@@ -1,0 +1,10 @@
+[package]
+name = "nv-frame"
+description = "Frame abstraction for the NextVision runtime — zero-copy, ref-counted FrameEnvelope."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+nv-core.workspace = true

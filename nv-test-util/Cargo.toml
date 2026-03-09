@@ -1,0 +1,13 @@
+[package]
+name = "nv-test-util"
+description = "Test harnesses, synthetic frames, mock stages, and controllable clock for NextVision."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+nv-core.workspace = true
+nv-frame.workspace = true
+nv-perception.workspace = true
+nv-view.workspace = true

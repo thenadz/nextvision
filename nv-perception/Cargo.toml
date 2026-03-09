@@ -1,0 +1,12 @@
+[package]
+name = "nv-perception"
+description = "Stage model, detection/track types, perception artifacts, and derived signals for the NextVision runtime."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+nv-core.workspace = true
+nv-frame.workspace = true
+nv-view.workspace = true

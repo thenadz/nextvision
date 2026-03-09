@@ -1,0 +1,18 @@
+[package]
+name = "nv-runtime"
+description = "Pipeline orchestration, feed lifecycle, output, provenance, and concurrency for the NextVision runtime."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+nv-core.workspace = true
+nv-frame.workspace = true
+nv-media.workspace = true
+nv-perception.workspace = true
+nv-temporal.workspace = true
+nv-view.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true

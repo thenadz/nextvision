@@ -1553,8 +1553,8 @@ pub enum NvError {
     Config(ConfigError),
 }
 
-pub enum MediaError {
-    ConnectionFailed { url: String, source: Box<dyn std::error::Error + Send + Sync> },
+pub enum MediaError {              // Clone
+    ConnectionFailed { url: String, detail: String },
     DecodeFailed { detail: String },
     Eos,       // end of stream (file source)
     Timeout,

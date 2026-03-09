@@ -1,0 +1,12 @@
+[package]
+name = "nv-temporal"
+description = "Temporal state management — trajectories, motion features, continuity, and retention for the NextVision runtime."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+nv-core.workspace = true
+nv-perception.workspace = true
+nv-view.workspace = true

@@ -1,0 +1,23 @@
+[package]
+name = "nv-media"
+description = "GStreamer backend for the NextVision runtime — source management, decode, and zero-copy bridge."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+nv-core.workspace = true
+nv-frame.workspace = true
+nv-view.workspace = true
+tracing.workspace = true
+
+# GStreamer dependency — private to this crate. No other crate depends on gstreamer-rs.
+gstreamer = { version = "0.25", optional = true, package = "gstreamer" }
+gstreamer-app = { version = "0.25", optional = true, package = "gstreamer-app" }
+gstreamer-video = { version = "0.25", optional = true, package = "gstreamer-video" }
+
+[features]
+default = ["gst-backend"]
+## Enable the GStreamer backend. Requires GStreamer development libraries at build time.
+gst-backend = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
