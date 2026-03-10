@@ -431,6 +431,7 @@ dependencies = [
  "nv-media",
  "nv-perception",
  "nv-temporal",
+ "nv-test-util",
  "nv-view",
  "thiserror",
  "tokio",

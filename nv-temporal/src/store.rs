@@ -82,6 +82,16 @@ impl TemporalStore {
         self.tracks.get(id)
     }
 
+    /// Get a mutable reference to a track history by ID.
+    pub fn get_track_mut(&mut self, id: &TrackId) -> Option<&mut TrackHistory> {
+        self.tracks.get_mut(id)
+    }
+
+    /// Insert or replace a track history.
+    pub fn insert_track(&mut self, id: TrackId, history: TrackHistory) {
+        self.tracks.insert(id, history);
+    }
+
     /// Iterate over all track histories.
     pub fn tracks(&self) -> impl Iterator<Item = (&TrackId, &TrackHistory)> {
         self.tracks.iter()

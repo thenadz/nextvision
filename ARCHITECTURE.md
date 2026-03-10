@@ -1564,7 +1564,7 @@ pub enum MediaError {              // Clone
 pub enum StageError {
     ProcessingFailed { stage_id: StageId, detail: String },
     ResourceExhausted { stage_id: StageId },
-    ModelLoadFailed { stage_id: StageId, source: Box<dyn std::error::Error + Send + Sync> },
+    ModelLoadFailed { stage_id: StageId, detail: String },  // Clone
 }
 
 pub enum RuntimeError {

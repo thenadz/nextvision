@@ -6,6 +6,7 @@
 //!
 //! - **[`Runtime`]** — manages cross-feed concerns (thread pools, metrics, shutdown).
 //! - **[`RuntimeBuilder`]** — builder for configuring and constructing a `Runtime`.
+//! - **[`RuntimeHandle`]** — cloneable control handle (add/remove feeds, subscribe, shutdown).
 //! - **[`FeedConfig`]** / **[`FeedConfigBuilder`]** — per-feed configuration.
 //! - **[`FeedHandle`]** — handle to a running feed (health, metrics, pause/resume).
 //! - **[`OutputEnvelope`]** — structured, provenanced output for each processed frame.
@@ -47,18 +48,21 @@
 //! ```
 
 pub mod backpressure;
+pub(crate) mod executor;
 pub mod feed;
 pub mod output;
 pub mod provenance;
+pub(crate) mod queue;
 pub mod runtime;
 pub mod shutdown;
+pub(crate) mod worker;
 
 // Re-export key types at crate root.
 pub use backpressure::BackpressurePolicy;
 pub use feed::{FeedConfig, FeedConfigBuilder, FeedHandle};
-pub use output::{OutputEnvelope, OutputSink};
+pub use output::{OutputEnvelope, OutputSink, SharedOutput};
 pub use provenance::{
     Provenance, StageOutcomeCategory, StageProvenance, StageResult, ViewProvenance,
 };
-pub use runtime::{Runtime, RuntimeBuilder};
+pub use runtime::{Runtime, RuntimeBuilder, RuntimeHandle};
 pub use shutdown::{RestartPolicy, RestartTrigger};

@@ -65,7 +65,10 @@ pub enum MediaError {
 }
 
 /// Errors from perception stages.
-#[derive(Debug, thiserror::Error)]
+///
+/// `Clone` is derived so that stage errors can be broadcast through
+/// health-event channels without wrapping in `Arc`.
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum StageError {
     /// The stage's processing logic failed.
     #[error("stage `{stage_id}` processing failed: {detail}")]
@@ -76,11 +79,8 @@ pub enum StageError {
     ResourceExhausted { stage_id: StageId },
 
     /// The stage could not load its model or contact an external dependency.
-    #[error("stage `{stage_id}` model/dependency load failed: {source}")]
-    ModelLoadFailed {
-        stage_id: StageId,
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
+    #[error("stage `{stage_id}` model/dependency load failed: {detail}")]
+    ModelLoadFailed { stage_id: StageId, detail: String },
 }
 
 /// Errors from the temporal state system.
@@ -137,6 +137,10 @@ pub enum RuntimeError {
     /// An internal lock is poisoned (a thread panicked while holding it).
     #[error("internal registry lock poisoned")]
     RegistryPoisoned,
+
+    /// Failed to spawn a feed worker thread.
+    #[error("thread spawn failed: {detail}")]
+    ThreadSpawnFailed { detail: String },
 }
 
 /// Configuration errors — returned at feed or runtime construction time.
@@ -159,4 +163,8 @@ pub enum ConfigError {
     /// For example: `Observed` without a provider, or `Fixed` with a provider.
     #[error("camera mode conflict: {detail}")]
     CameraModeConflict { detail: String },
+
+    /// A capacity or depth value is zero (which would deadlock or panic).
+    #[error("invalid capacity: {field} must be > 0")]
+    InvalidCapacity { field: &'static str },
 }

@@ -58,8 +58,14 @@ pub(crate) enum PixelData {
     Owned(Vec<u8>),
 }
 
-// SAFETY: `Mapped` variant holds an immutable pointer into a buffer whose lifetime
-// is managed by `_guard`. The data is read-only and the guard is `Send + Sync`.
+// SAFETY: `Mapped` variant holds an immutable pointer (`*const u8`) into a
+// buffer whose lifetime is managed by `_guard` (a trait-object box that is
+// `Send + Sync`). The contract on `new_mapped()` requires:
+//   1. The pointer remains valid as long as the guard lives.
+//   2. The data at the pointer is never mutated while any `FrameEnvelope`
+//      clone referencing it exists.
+// These invariants ensure the pointee is `Sync`-safe (immutable shared data)
+// and `Send`-safe (the guard is Send).
 unsafe impl Send for PixelData {}
 unsafe impl Sync for PixelData {}
 

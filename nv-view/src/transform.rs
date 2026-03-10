@@ -22,6 +22,19 @@ pub struct GlobalTransformEstimate {
     pub computed_at: ViewVersion,
 }
 
+impl GlobalTransformEstimate {
+    /// Displacement magnitude (in normalized coordinates) implied by
+    /// the translation component of the transform.
+    ///
+    /// `sqrt(tx² + ty²)` of the affine matrix.
+    #[must_use]
+    pub fn displacement_magnitude(&self) -> f32 {
+        let tx = self.transform.m[2];
+        let ty = self.transform.m[5];
+        ((tx * tx + ty * ty) as f64).sqrt() as f32
+    }
+}
+
 /// Method used to estimate a global coordinate transform.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TransformEstimationMethod {

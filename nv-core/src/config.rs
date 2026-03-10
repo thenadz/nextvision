@@ -53,6 +53,16 @@ impl SourceSpec {
             loop_: false,
         }
     }
+
+    /// Returns `true` if this is a non-looping file source.
+    ///
+    /// Non-looping file sources treat EOS as terminal (not an error):
+    /// the feed stops with [`StopReason::EndOfStream`](crate::health::StopReason::EndOfStream)
+    /// rather than attempting a restart.
+    #[must_use]
+    pub fn is_file_nonloop(&self) -> bool {
+        matches!(self, Self::File { loop_: false, .. })
+    }
 }
 
 /// RTSP transport protocol.

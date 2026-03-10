@@ -171,6 +171,14 @@ impl FeedConfigBuilder {
             field: "output_sink",
         })?;
 
+        // Validate queue depth.
+        if self.backpressure.queue_depth() == 0 {
+            return Err(ConfigError::InvalidCapacity {
+                field: "queue_depth",
+            }
+            .into());
+        }
+
         // Validate camera mode vs. provider.
         match camera_mode {
             CameraMode::Observed if self.view_state_provider.is_none() => {
@@ -213,69 +221,58 @@ impl FeedConfigBuilder {
 /// Provides per-feed monitoring and control: health events, metrics,
 /// pause/resume, and stop.
 ///
-/// The handle is cheaply cloneable (`Arc`-backed shared state).
+/// Backed by `Arc<FeedSharedState>` — metrics are read from the same
+/// atomic counters that the feed worker thread writes.
 pub struct FeedHandle {
-    inner: std::sync::Arc<FeedInner>,
-}
-
-/// Interior state behind `FeedHandle`.
-struct FeedInner {
-    id: FeedId,
-    paused: std::sync::atomic::AtomicBool,
+    shared: std::sync::Arc<crate::worker::FeedSharedState>,
 }
 
 impl FeedHandle {
     /// Create a feed handle (internal — constructed by the runtime).
-    pub(crate) fn new(id: FeedId) -> Self {
-        Self {
-            inner: std::sync::Arc::new(FeedInner {
-                id,
-                paused: std::sync::atomic::AtomicBool::new(false),
-            }),
-        }
+    pub(crate) fn new(shared: std::sync::Arc<crate::worker::FeedSharedState>) -> Self {
+        Self { shared }
     }
 
     /// The feed's unique identifier.
     #[must_use]
     pub fn id(&self) -> FeedId {
-        self.inner.id
+        self.shared.id
     }
 
-    /// Whether and feed is currently paused.
+    /// Whether the feed is currently paused.
     #[must_use]
     pub fn is_paused(&self) -> bool {
-        self.inner
+        self.shared
             .paused
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether the worker thread is still alive.
+    #[must_use]
+    pub fn is_alive(&self) -> bool {
+        self.shared
+            .alive
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Get a snapshot of the feed's current metrics.
     ///
-    /// When the full pipeline executor is implemented, this will query
-    /// live counters. Currently returns zeroed counters for the correct
-    /// feed ID.
+    /// Reads live atomic counters maintained by the feed worker thread.
     #[must_use]
     pub fn metrics(&self) -> FeedMetrics {
-        // Will query pipeline executor counters when implemented.
-        FeedMetrics {
-            feed_id: self.inner.id,
-            frames_received: 0,
-            frames_dropped: 0,
-            frames_processed: 0,
-            tracks_active: 0,
-            view_epoch: 0,
-            restarts: 0,
-        }
+        self.shared.metrics()
     }
 
     /// Pause the feed (stop pulling frames from source; stages idle).
+    ///
+    /// Uses a condvar to wake the worker without spin-sleeping.
     ///
     /// # Errors
     ///
     /// Returns an error if the feed is already paused.
     pub fn pause(&self) -> Result<(), nv_core::NvError> {
         let was_paused = self
-            .inner
+            .shared
             .paused
             .swap(true, std::sync::atomic::Ordering::Relaxed);
         if was_paused {
@@ -283,18 +280,22 @@ impl FeedHandle {
                 nv_core::error::RuntimeError::AlreadyPaused,
             ));
         }
-        // Full runtime will signal the feed's I/O thread to pause.
+        // Mirror into the condvar-guarded bool.
+        let (lock, _cvar) = &self.shared.pause_condvar;
+        *lock.lock().unwrap() = true;
         Ok(())
     }
 
     /// Resume a paused feed.
+    ///
+    /// Notifies the worker thread via condvar so it wakes immediately.
     ///
     /// # Errors
     ///
     /// Returns an error if the feed is not paused.
     pub fn resume(&self) -> Result<(), nv_core::NvError> {
         let was_paused = self
-            .inner
+            .shared
             .paused
             .swap(false, std::sync::atomic::Ordering::Relaxed);
         if !was_paused {
@@ -302,7 +303,10 @@ impl FeedHandle {
                 nv_core::error::RuntimeError::NotPaused,
             ));
         }
-        // Full runtime will signal the feed's I/O thread to resume.
+        // Mirror into the condvar-guarded bool and wake the worker.
+        let (lock, cvar) = &self.shared.pause_condvar;
+        *lock.lock().unwrap() = false;
+        cvar.notify_one();
         Ok(())
     }
 }

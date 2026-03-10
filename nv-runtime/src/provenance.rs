@@ -8,13 +8,24 @@ use nv_view::{CameraMotionState, EpochDecision, MotionSource, TransitionPhase};
 /// Full provenance for one processed frame.
 ///
 /// Every output carries this, making production debugging tractable.
+///
+/// # Timing semantics
+///
+/// All timestamps are [`MonotonicTs`] values — they share the same monotonic
+/// clock domain as [`FrameEnvelope::ts()`](nv_frame::FrameEnvelope::ts).
+///
+/// - `frame_receive_ts` — when the frame was dequeued from the bounded queue.
+/// - `pipeline_complete_ts` — when all stages finished and output was constructed.
+/// - Per-stage `start_ts` / `end_ts` — real wall-clock offsets converted to
+///   monotonic nanoseconds from the pipeline epoch for ordering consistency.
 #[derive(Debug, Clone)]
 pub struct Provenance {
     /// Per-stage provenance records, in execution order.
     pub stages: Vec<StageProvenance>,
     /// View-system provenance for this frame.
     pub view_provenance: ViewProvenance,
-    /// Timestamp when the frame was received from the source.
+    /// Timestamp when the frame was dequeued from the bounded queue
+    /// (start of pipeline processing for this frame).
     pub frame_receive_ts: MonotonicTs,
     /// Timestamp when the pipeline completed processing this frame.
     pub pipeline_complete_ts: MonotonicTs,
@@ -27,7 +38,7 @@ pub struct Provenance {
 pub struct StageProvenance {
     /// Which stage.
     pub stage_id: StageId,
-    /// When the stage started processing.
+    /// When the stage started processing (monotonic nanos from pipeline epoch).
     pub start_ts: MonotonicTs,
     /// When the stage finished processing.
     pub end_ts: MonotonicTs,
@@ -38,7 +49,7 @@ pub struct StageProvenance {
 }
 
 /// Outcome of a stage's processing for one frame.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StageResult {
     /// Stage completed successfully.
     Ok,
@@ -52,7 +63,7 @@ pub enum StageResult {
 ///
 /// A summary for programmatic filtering and dashboarding.
 /// Full diagnostic detail remains in tracing logs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StageOutcomeCategory {
     /// Inference or computation failed.
     ProcessingFailed,
