@@ -22,13 +22,13 @@
 //! the view crate — ensuring end-to-end type alignment. If telemetry is
 //! present, it is stored in the frame's [`TypedMetadata`](nv_core::TypedMetadata).
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use nv_core::TypedMetadata;
 use nv_core::error::MediaError;
 use nv_core::id::FeedId;
 use nv_core::timestamp::{MonotonicTs, WallTs};
-use nv_core::TypedMetadata;
 use nv_frame::{FrameEnvelope, PixelFormat};
 
 // Re-export PtzTelemetry from nv-view — this is the canonical PTZ type
@@ -96,10 +96,7 @@ pub(crate) fn bridge_gst_sample(
         detail: "sample has no buffer".into(),
     })?;
 
-    let pts_ns = buffer
-        .pts()
-        .map(|pts| pts.nseconds())
-        .unwrap_or(0);
+    let pts_ns = buffer.pts().map(|pts| pts.nseconds()).unwrap_or(0);
 
     let ts = MonotonicTs::from_nanos(pts_ns);
     let wall_ts = WallTs::now();
@@ -110,11 +107,11 @@ pub(crate) fn bridge_gst_sample(
     // the frame's PinGuard drops, it releases the buffer back to GStreamer's
     // pool. No pixel data is copied.
     let owned_buffer = buffer.copy();
-    let map = owned_buffer.into_mapped_buffer_readable().map_err(|_| {
-        MediaError::DecodeFailed {
+    let map = owned_buffer
+        .into_mapped_buffer_readable()
+        .map_err(|_| MediaError::DecodeFailed {
             detail: "failed to map buffer read-only".into(),
-        }
-    })?;
+        })?;
 
     let ptr = map.as_slice().as_ptr();
     let len = map.size();
@@ -287,4 +284,3 @@ mod tests {
         assert_eq!(frame.ts().as_nanos(), 5_000_000_000);
     }
 }
-

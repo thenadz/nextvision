@@ -1,12 +1,12 @@
 //! Tests for [`MediaSource`] lifecycle, event handling, and health emission.
 
 use super::*;
-use nv_core::config::BackoffKind;
-use nv_frame::FrameEnvelope;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex;
 use crate::factory::GstMediaIngressFactory;
 use crate::ingress::MediaIngressFactory;
+use nv_core::config::BackoffKind;
+use nv_frame::FrameEnvelope;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 // ---------------------------------------------------------------------------
 // Test sink helpers
@@ -353,8 +353,7 @@ fn health_emits_disconnected_and_reconnecting_on_error() {
 
 #[test]
 fn health_emits_feed_stopped_on_budget_exhausted() {
-    let (mut src, _, _, _, health) =
-        started_source_with_health(test_spec(), limited_reconnect(1));
+    let (mut src, _, _, _, health) = started_source_with_health(test_spec(), limited_reconnect(1));
     // First error → reconnecting.
     src.handle_event(MediaEvent::Error {
         error: MediaError::DecodeFailed {
@@ -373,7 +372,11 @@ fn health_emits_feed_stopped_on_budget_exhausted() {
     });
     let events = health.drain();
     // Disconnect + FeedStopped (no reconnecting since budget exhausted)
-    assert!(events.iter().any(|e| matches!(e, HealthEvent::FeedStopped { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HealthEvent::FeedStopped { .. }))
+    );
 }
 
 #[test]
@@ -386,10 +389,8 @@ fn health_emits_feed_stopped_on_file_eos() {
     src.handle_event(MediaEvent::Eos);
     let events = health.drain();
     assert_eq!(events.len(), 1);
-    assert!(
-        matches!(&events[0], HealthEvent::FeedStopped { reason, .. }
-            if matches!(reason, nv_core::health::StopReason::EndOfStream))
-    );
+    assert!(matches!(&events[0], HealthEvent::FeedStopped { reason, .. }
+            if matches!(reason, nv_core::health::StopReason::EndOfStream)));
 }
 
 #[test]
@@ -397,11 +398,9 @@ fn health_emits_feed_stopped_on_manual_stop() {
     let (mut src, _, _, _, health) = started_source_with_health(test_spec(), test_reconnect());
     src.stop().unwrap();
     let events = health.drain();
-    assert_eq!(events.len(), 1);
-    assert!(
-        matches!(&events[0], HealthEvent::FeedStopped { reason, .. }
-            if matches!(reason, nv_core::health::StopReason::UserRequested))
-    );
+    // source.stop() no longer emits FeedStopped — that is the worker's
+    // responsibility. The source only logs.
+    assert_eq!(events.len(), 0);
 }
 
 #[test]
@@ -410,8 +409,8 @@ fn health_no_duplicate_on_idempotent_stop() {
     src.stop().unwrap();
     src.stop().unwrap();
     let events = health.drain();
-    // Only one FeedStopped — second stop() is a no-op.
-    assert_eq!(events.len(), 1);
+    // source.stop() no longer emits FeedStopped.
+    assert_eq!(events.len(), 0);
 }
 
 #[test]
@@ -425,7 +424,11 @@ fn health_emits_reconnecting_on_successful_reconnect() {
     // so instead simulate the full cycle via handle_event.
     src.handle_event(MediaEvent::StreamStarted);
     let events = health.drain();
-    assert!(events.iter().any(|e| matches!(e, HealthEvent::SourceConnected { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HealthEvent::SourceConnected { .. }))
+    );
 }
 
 // ===========================================================================
@@ -435,12 +438,7 @@ fn health_emits_reconnecting_on_successful_reconnect() {
 #[test]
 fn factory_creates_source() {
     let factory = GstMediaIngressFactory::new();
-    let result = factory.create(
-        FeedId::new(42),
-        test_spec(),
-        test_reconnect(),
-        None,
-    );
+    let result = factory.create(FeedId::new(42), test_spec(), test_reconnect(), None);
     let source = result.unwrap();
     assert_eq!(source.feed_id(), FeedId::new(42));
 }
@@ -460,9 +458,13 @@ fn factory_wires_health_sink() {
     let health2 = RecordingHealthSink::new();
     let (mut src, _, _, _, _) = started_source_with_health(test_spec(), test_reconnect());
     src.health_sink = Some(health2.clone() as Arc<dyn HealthSink>);
-    src.stop().unwrap();
+    // Trigger a health event that the source still emits (e.g. SourceConnected
+    // via handle_event). source.stop() no longer emits FeedStopped.
+    src.emit_health(HealthEvent::SourceConnected {
+        feed_id: src.feed_id,
+    });
     let events = health2.drain();
-    assert!(!events.is_empty(), "health sink should receive FeedStopped on stop");
+    assert!(!events.is_empty(), "health sink should receive events");
 }
 
 #[test]
@@ -529,7 +531,10 @@ fn start_initial_connection_failure_stays_idle() {
     let mut src = MediaSource::new(FeedId::new(1), test_spec(), test_reconnect());
     let (sink, _, _, _) = CountingSink::new();
     let result = src.start(Box::new(sink));
-    assert!(result.is_err(), "start must return Err when session cannot be created");
+    assert!(
+        result.is_err(),
+        "start must return Err when session cannot be created"
+    );
     assert!(
         matches!(result.unwrap_err(), MediaError::Unsupported { .. }),
         "expected Unsupported without gst-backend"
@@ -559,10 +564,15 @@ fn sink_receives_typed_error_variant() {
         debug: None,
     });
 
-    let variant = capturing.last_error_variant().expect("sink should have received error");
+    let variant = capturing
+        .last_error_variant()
+        .expect("sink should have received error");
     match variant {
         MediaError::ConnectionFailed { url, detail } => {
-            assert_eq!(url, "rtsp://test/stream", "URL should be enriched from spec");
+            assert_eq!(
+                url, "rtsp://test/stream",
+                "URL should be enriched from spec"
+            );
             assert_eq!(detail, "connection refused");
         }
         other => panic!("sink should receive ConnectionFailed, got: {other}"),
@@ -583,7 +593,9 @@ fn sink_receives_timeout_variant() {
         debug: None,
     });
 
-    let variant = capturing.last_error_variant().expect("sink should have received error");
+    let variant = capturing
+        .last_error_variant()
+        .expect("sink should have received error");
     assert!(
         matches!(variant, MediaError::Timeout),
         "sink should receive Timeout, got: {variant}"
@@ -601,7 +613,10 @@ fn no_duplicate_source_connected_emission() {
 
     src.handle_event(MediaEvent::StreamStarted);
     let events = health.drain();
-    assert!(events.is_empty(), "should suppress duplicate SourceConnected");
+    assert!(
+        events.is_empty(),
+        "should suppress duplicate SourceConnected"
+    );
 }
 
 /// File loop EOS: seeks to start (no reconnect, no stop).
@@ -615,7 +630,11 @@ fn file_loop_eos_seeks_to_start() {
     // seek_start on the stub session succeeds (stub is in Running state).
     let delay = src.handle_event(MediaEvent::Eos);
     assert!(delay.is_none(), "looping file should not trigger reconnect");
-    assert_eq!(src.source_state(), SourceState::Running, "should stay running");
+    assert_eq!(
+        src.source_state(),
+        SourceState::Running,
+        "should stay running"
+    );
     assert_eq!(eos.load(Ordering::Relaxed), 0, "should not signal EOS");
 }
 
@@ -632,14 +651,19 @@ fn error_variant_preserved_in_health() {
     });
     let events = health.drain();
     // First event should be SourceDisconnected with the enriched error.
-    let disconnect = events.iter().find(|e| matches!(e, HealthEvent::SourceDisconnected { .. }));
+    let disconnect = events
+        .iter()
+        .find(|e| matches!(e, HealthEvent::SourceDisconnected { .. }));
     assert!(disconnect.is_some(), "should emit SourceDisconnected");
     match disconnect.unwrap() {
         HealthEvent::SourceDisconnected { reason, .. } => {
             // The enrich_error method should have filled in the source URL.
             match reason {
                 MediaError::ConnectionFailed { url, .. } => {
-                    assert_eq!(url, "rtsp://test/stream", "URL should be enriched from spec");
+                    assert_eq!(
+                        url, "rtsp://test/stream",
+                        "URL should be enriched from spec"
+                    );
                 }
                 other => panic!("expected ConnectionFailed, got: {other}"),
             }
@@ -657,11 +681,16 @@ fn timeout_variant_preserved_in_health() {
         debug: None,
     });
     let events = health.drain();
-    let disconnect = events.iter().find(|e| matches!(e, HealthEvent::SourceDisconnected { .. }));
+    let disconnect = events
+        .iter()
+        .find(|e| matches!(e, HealthEvent::SourceDisconnected { .. }));
     assert!(disconnect.is_some());
     match disconnect.unwrap() {
         HealthEvent::SourceDisconnected { reason, .. } => {
-            assert!(matches!(reason, MediaError::Timeout), "Timeout should be preserved");
+            assert!(
+                matches!(reason, MediaError::Timeout),
+                "Timeout should be preserved"
+            );
         }
         _ => unreachable!(),
     }

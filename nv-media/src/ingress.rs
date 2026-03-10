@@ -1,8 +1,12 @@
 //! Public trait contracts for media ingress.
 //!
-//! These traits define the boundary between the media backend (GStreamer) and
-//! the rest of the library. They ensure that no GStreamer types leak into the
-//! public API, and that alternative media backends could be substituted.
+//! These traits define the boundary between the media backend and the rest of
+//! the library. They ensure that no backend-specific types leak into the public
+//! API, and that alternative media backends can be substituted by implementing
+//! [`MediaIngressFactory`].
+//!
+//! The default implementation is GStreamer-backed (see [`DefaultMediaFactory`](super::DefaultMediaFactory)).
+//! All other crates interact through these traits, never through GStreamer types.
 
 use std::sync::Arc;
 
@@ -111,7 +115,9 @@ pub trait FrameSink: Send + Sync + 'static {
 /// Factory for creating [`MediaIngress`] instances from a source spec.
 ///
 /// The runtime holds one factory and calls `create()` for each new feed.
-/// The default factory produces GStreamer-backed media sources.
+/// The default implementation ([`DefaultMediaFactory`](super::DefaultMediaFactory))
+/// produces backend-specific media sources. Custom implementations can
+/// substitute alternative backends or test doubles.
 pub trait MediaIngressFactory: Send + Sync + 'static {
     /// Create a new media ingress for the given feed and source specification.
     ///

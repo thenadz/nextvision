@@ -229,8 +229,10 @@ mod tests {
 
     #[test]
     fn buffering_maps_to_none() {
-        assert!(BusMessage::Buffering { percent: 50 }
-            .into_media_event()
-            .is_none());
+        assert!(
+            BusMessage::Buffering { percent: 50 }
+                .into_media_event()
+                .is_none()
+        );
     }
 }

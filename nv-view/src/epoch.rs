@@ -91,9 +91,10 @@ impl Default for DefaultEpochPolicy {
 impl EpochPolicy for DefaultEpochPolicy {
     fn decide(&self, ctx: &EpochPolicyContext<'_>) -> EpochDecision {
         // Check PTZ telemetry for large moves.
-        if let (Some(prev_ptz), Some(curr_ptz)) =
-            (ctx.previous_view.ptz.as_ref(), ctx.current_report.ptz.as_ref())
-        {
+        if let (Some(prev_ptz), Some(curr_ptz)) = (
+            ctx.previous_view.ptz.as_ref(),
+            ctx.current_report.ptz.as_ref(),
+        ) {
             let pan_delta = (curr_ptz.pan - prev_ptz.pan).abs();
             let tilt_delta = (curr_ptz.tilt - prev_ptz.tilt).abs();
             let zoom_delta = (curr_ptz.zoom - prev_ptz.zoom).abs();

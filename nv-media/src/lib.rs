@@ -48,9 +48,9 @@
 //! | `pipeline` | `pub(crate)` | Pipeline builder and configuration |
 
 // -- Public modules --
+pub mod factory;
 pub mod ingress;
 pub mod source;
-pub mod factory;
 
 // -- Internal modules --
 pub(crate) mod backend;
@@ -63,8 +63,8 @@ pub(crate) mod pipeline;
 pub(crate) mod reconnect;
 
 // -- Public re-exports --
-pub use ingress::PtzProvider;
 pub use bridge::PtzTelemetry;
+pub use factory::{DefaultMediaFactory, GstMediaIngressFactory};
+pub use ingress::PtzProvider;
 pub use ingress::{FrameSink, HealthSink, MediaIngress, MediaIngressFactory};
-pub use factory::GstMediaIngressFactory;
 pub use source::MediaSource;

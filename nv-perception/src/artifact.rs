@@ -25,7 +25,19 @@ pub struct PerceptionArtifacts {
     /// Current detection set (replaced by each stage that returns detections).
     pub detections: DetectionSet,
     /// Current track set (replaced by each stage that returns tracks).
+    ///
+    /// When [`tracks_authoritative`](Self::tracks_authoritative) is `true`,
+    /// this is the complete set of active tracks for the frame. Tracks
+    /// previously known to the temporal store but absent here are considered
+    /// normally ended (`TrackEnded`).
     pub tracks: Vec<Track>,
+    /// Whether any stage produced authoritative track output this frame.
+    ///
+    /// Set to `true` when at least one stage returns `Some(tracks)` in its
+    /// [`StageOutput`](super::StageOutput). When `false`, no stage claimed
+    /// ownership of the track set, and the executor must **not** infer
+    /// track endings from the (default-empty) `tracks` field.
+    pub tracks_authoritative: bool,
     /// Accumulated signals from all stages.
     pub signals: Vec<DerivedSignal>,
     /// Scene-level features accumulated from all stages.
@@ -50,6 +62,7 @@ impl PerceptionArtifacts {
         }
         if let Some(tracks) = output.tracks {
             self.tracks = tracks;
+            self.tracks_authoritative = true;
         }
         self.signals.extend(output.signals);
         self.scene_features.extend(output.scene_features);

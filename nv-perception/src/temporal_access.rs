@@ -26,6 +26,12 @@ pub trait TemporalAccess: Send + Sync {
     /// Number of tracks in the snapshot.
     fn track_count(&self) -> usize;
 
+    /// All track IDs in the snapshot.
+    ///
+    /// The order is unspecified. Callers that need a stable iteration
+    /// order should collect and sort.
+    fn track_ids(&self) -> Vec<TrackId>;
+
     /// Look up a track's current state by ID.
     ///
     /// Returns `None` if the track is not present in the snapshot.
@@ -46,4 +52,14 @@ pub trait TemporalAccess: Send + Sync {
     ///
     /// Returns `None` if the track is not present.
     fn last_seen(&self, id: &TrackId) -> Option<MonotonicTs>;
+
+    /// Total trajectory points for a track across all segments.
+    ///
+    /// Returns 0 if the track is not present.
+    fn trajectory_point_count(&self, id: &TrackId) -> usize;
+
+    /// Number of trajectory segments for a track.
+    ///
+    /// Returns 0 if the track is not present.
+    fn trajectory_segment_count(&self, id: &TrackId) -> usize;
 }

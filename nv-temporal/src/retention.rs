@@ -13,6 +13,12 @@ pub struct RetentionPolicy {
     pub max_observations_per_track: usize,
     /// Hard cap on concurrent tracks. Oldest `Lost` then `Coasted` are evicted first.
     pub max_concurrent_tracks: usize,
+    /// Maximum trajectory points retained per track across all segments.
+    ///
+    /// When exceeded, the oldest points (from the oldest closed segments) are
+    /// pruned first. This prevents unbounded memory growth for long-lived
+    /// confirmed tracks.
+    pub max_trajectory_points_per_track: usize,
 }
 
 impl Default for RetentionPolicy {
@@ -21,6 +27,7 @@ impl Default for RetentionPolicy {
             max_track_age: Duration::from_secs(30),
             max_observations_per_track: 100,
             max_concurrent_tracks: 500,
+            max_trajectory_points_per_track: 1000,
         }
     }
 }

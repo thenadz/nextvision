@@ -9,18 +9,15 @@ use crate::id::{FeedId, StageId};
 
 /// A health event emitted by the runtime.
 ///
-/// Subscribe via `FeedHandle::health_recv()` (per-feed) or
-/// `Runtime::health_recv()` (aggregate).
+/// Subscribe via [`Runtime::health_subscribe()`](crate) (aggregate).
+/// Per-feed filtering is the subscriber's responsibility.
 #[derive(Debug, Clone)]
 pub enum HealthEvent {
     /// The video source connected successfully.
     SourceConnected { feed_id: FeedId },
 
     /// The video source disconnected.
-    SourceDisconnected {
-        feed_id: FeedId,
-        reason: MediaError,
-    },
+    SourceDisconnected { feed_id: FeedId, reason: MediaError },
 
     /// The video source is attempting to reconnect.
     SourceReconnecting { feed_id: FeedId, attempt: u32 },
@@ -37,16 +34,10 @@ pub enum HealthEvent {
     StagePanic { feed_id: FeedId, stage_id: StageId },
 
     /// The feed is restarting.
-    FeedRestarting {
-        feed_id: FeedId,
-        restart_count: u32,
-    },
+    FeedRestarting { feed_id: FeedId, restart_count: u32 },
 
     /// The feed has stopped permanently.
-    FeedStopped {
-        feed_id: FeedId,
-        reason: StopReason,
-    },
+    FeedStopped { feed_id: FeedId, reason: StopReason },
 
     /// Frames were dropped due to backpressure.
     BackpressureDrop {
@@ -118,6 +109,13 @@ pub enum HealthEvent {
     /// For non-looping file sources this is terminal: the feed stops
     /// with [`StopReason::EndOfStream`] rather than restarting.
     SourceEos { feed_id: FeedId },
+
+    /// The per-feed [`OutputSink`] panicked during `emit()`.
+    ///
+    /// The output is dropped but the feed continues processing.
+    /// The runtime wraps `OutputSink::emit()` in `catch_unwind` to
+    /// prevent a misbehaving sink from tearing down the worker thread.
+    SinkPanic { feed_id: FeedId },
 }
 
 /// Reason a feed stopped permanently.

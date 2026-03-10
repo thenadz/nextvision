@@ -53,7 +53,10 @@ impl<T> ViewBoundContext<T> {
             }
         } else {
             BoundContextValidity::InvalidAcrossEpoch {
-                epochs_behind: current.epoch.as_u64().saturating_sub(self.bound_epoch.as_u64()),
+                epochs_behind: current
+                    .epoch
+                    .as_u64()
+                    .saturating_sub(self.bound_epoch.as_u64()),
             }
         }
     }
@@ -108,9 +111,7 @@ mod tests {
         updated.version = ViewVersion::new(5);
         assert_eq!(
             bound.validity(&updated),
-            BoundContextValidity::StaleWithinEpoch {
-                versions_behind: 5
-            }
+            BoundContextValidity::StaleWithinEpoch { versions_behind: 5 }
         );
     }
 

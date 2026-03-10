@@ -22,6 +22,13 @@ pub struct GstMediaIngressFactory {
     health_sink: Option<Arc<dyn HealthSink>>,
 }
 
+/// Backend-neutral alias for the default [`MediaIngressFactory`] implementation.
+///
+/// Currently points to [`GstMediaIngressFactory`] (the GStreamer backend).
+/// Downstream code should prefer this alias so that public-facing APIs and
+/// documentation read as backend-agnostic.
+pub type DefaultMediaFactory = GstMediaIngressFactory;
+
 impl GstMediaIngressFactory {
     /// Create a factory with no health event reporting.
     #[must_use]

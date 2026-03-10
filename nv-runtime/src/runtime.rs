@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use nv_core::error::{NvError, RuntimeError};
 use nv_core::health::HealthEvent;
 use nv_core::id::FeedId;
-use nv_media::factory::GstMediaIngressFactory;
+use nv_media::DefaultMediaFactory;
 use nv_media::ingress::MediaIngressFactory;
 use tokio::sync::broadcast;
 
@@ -32,6 +32,9 @@ const DEFAULT_HEALTH_CAPACITY: usize = 256;
 const DEFAULT_OUTPUT_CAPACITY: usize = 256;
 
 /// Builder for constructing a [`Runtime`].
+///
+/// The runtime uses a default media backend unless a custom
+/// [`MediaIngressFactory`] is supplied via [`ingress_factory()`](Self::ingress_factory).
 ///
 /// # Example
 ///
@@ -84,8 +87,9 @@ impl RuntimeBuilder {
 
     /// Set a custom `MediaIngressFactory`.
     ///
-    /// By default the runtime uses [`GstMediaIngressFactory`]. Replace
-    /// this for testing or alternative backends.
+    /// By default the runtime uses the built-in media backend
+    /// ([`DefaultMediaFactory`](nv_media::DefaultMediaFactory)).
+    /// Replace this for testing or alternative backends.
     #[must_use]
     pub fn ingress_factory(mut self, factory: Box<dyn MediaIngressFactory>) -> Self {
         self.ingress_factory = Some(factory);
@@ -121,9 +125,7 @@ impl RuntimeBuilder {
         let health_sink = Arc::new(BroadcastHealthSink::new(health_tx.clone()));
         let factory: Arc<dyn MediaIngressFactory> = match self.ingress_factory {
             Some(f) => Arc::from(f),
-            None => Arc::new(
-                GstMediaIngressFactory::with_health_sink(health_sink as _),
-            ),
+            None => Arc::new(DefaultMediaFactory::with_health_sink(health_sink as _)),
         };
 
         let inner = Arc::new(RuntimeInner {

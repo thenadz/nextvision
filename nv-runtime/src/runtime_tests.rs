@@ -3,8 +3,8 @@
 //! sentinel-based lag detection.
 
 use super::*;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use nv_core::config::{CameraMode, ReconnectPolicy, SourceSpec};
 use nv_core::error::StageError;
@@ -34,10 +34,7 @@ struct MockIngress {
 }
 
 impl MediaIngress for MockIngress {
-    fn start(
-        &mut self,
-        sink: Box<dyn FrameSink>,
-    ) -> Result<(), nv_core::error::MediaError> {
+    fn start(&mut self, sink: Box<dyn FrameSink>) -> Result<(), nv_core::error::MediaError> {
         if self.fail_on_start {
             return Err(nv_core::error::MediaError::ConnectionFailed {
                 url: "mock://fail".into(),
@@ -128,7 +125,12 @@ struct CountingSink {
 impl CountingSink {
     fn new() -> (Self, Arc<AtomicU64>) {
         let count = Arc::new(AtomicU64::new(0));
-        (Self { count: Arc::clone(&count) }, count)
+        (
+            Self {
+                count: Arc::clone(&count),
+            },
+            count,
+        )
     }
 }
 
@@ -153,10 +155,7 @@ fn make_test_frame(feed_id: FeedId, seq: u64) -> nv_frame::FrameEnvelope {
     )
 }
 
-fn build_config(
-    stages: Vec<Box<dyn Stage>>,
-    sink: Box<dyn OutputSink>,
-) -> FeedConfig {
+fn build_config(stages: Vec<Box<dyn Stage>>, sink: Box<dyn OutputSink>) -> FeedConfig {
     FeedConfig::builder()
         .source(SourceSpec::rtsp("rtsp://mock/stream"))
         .camera_mode(CameraMode::Fixed)
@@ -205,13 +204,22 @@ fn multi_feed_registration() {
     let (s2, _) = CountingSink::new();
     let (s3, _) = CountingSink::new();
     let h1 = runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(s1)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(s1),
+        ))
         .unwrap();
     let h2 = runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(s2)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(s2),
+        ))
         .unwrap();
     let h3 = runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(s3)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(s3),
+        ))
         .unwrap();
 
     assert_eq!(runtime.feed_count().unwrap(), 3);
@@ -233,7 +241,10 @@ fn feed_limit_exceeded() {
     let (s1, _) = CountingSink::new();
     let (s2, _) = CountingSink::new();
     runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(s1)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(s1),
+        ))
         .unwrap();
     let err = runtime.add_feed(build_config(
         vec![Box::new(NoOpStage::new("noop"))],
@@ -260,7 +271,10 @@ fn start_stop_lifecycle() {
 
     let (sink, count) = CountingSink::new();
     let handle = runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(sink)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
         .unwrap();
 
     wait_for_stop(&handle, std::time::Duration::from_secs(5));
@@ -281,7 +295,10 @@ fn remove_feed_stops_worker() {
 
     let (sink, _) = CountingSink::new();
     let handle = runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(sink)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
         .unwrap();
     let feed_id = handle.id();
 
@@ -322,9 +339,7 @@ fn backpressure_drops_are_reported() {
         .camera_mode(CameraMode::Fixed)
         .stages(vec![Box::new(NoOpStage::new("noop"))])
         .output_sink(Box::new(sink))
-        .backpressure(crate::backpressure::BackpressurePolicy::DropOldest {
-            queue_depth: 1,
-        })
+        .backpressure(crate::backpressure::BackpressurePolicy::DropOldest { queue_depth: 1 })
         .build()
         .unwrap();
 
@@ -332,10 +347,7 @@ fn backpressure_drops_are_reported() {
     wait_for_stop(&handle, std::time::Duration::from_secs(5));
 
     let m = handle.metrics();
-    assert!(
-        m.frames_received > 0,
-        "should have received frames"
-    );
+    assert!(m.frames_received > 0, "should have received frames");
 
     // Check for BackpressureDrop health events if any drops occurred.
     if m.frames_dropped > 0 {
@@ -390,7 +402,8 @@ fn feed_failure_isolation() {
     );
     // The failing-stage feed drops every frame (stage error → frame dropped).
     assert_eq!(
-        count_fail.load(Ordering::Relaxed), 0,
+        count_fail.load(Ordering::Relaxed),
+        0,
         "failing-stage feed drops frames on error, emits no output"
     );
 
@@ -551,7 +564,10 @@ fn restart_window_resets_counter() {
     // Let it restart a few times.
     std::thread::sleep(std::time::Duration::from_millis(200));
     // Feed should still be alive — counter keeps resetting.
-    assert!(handle.is_alive(), "feed should keep restarting due to window reset");
+    assert!(
+        handle.is_alive(),
+        "feed should keep restarting due to window reset"
+    );
     assert!(handle.metrics().restarts >= 1, "should have restarted");
 
     runtime.shutdown().unwrap();
@@ -570,7 +586,10 @@ fn immediate_shutdown_after_add() {
 
     let (sink, _) = CountingSink::new();
     let _handle = runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(sink)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
         .unwrap();
 
     // Immediately shutdown — must not hang.
@@ -613,7 +632,10 @@ fn output_subscription_receives_outputs() {
     let mut rx = runtime.output_subscribe();
     let (sink, _) = CountingSink::new();
     let handle = runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(sink)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
         .unwrap();
 
     let feed_id = handle.id();
@@ -641,7 +663,10 @@ fn output_subscription_receives_outputs() {
         }
     }
 
-    assert!(!outputs.is_empty(), "should receive outputs via subscription");
+    assert!(
+        !outputs.is_empty(),
+        "should receive outputs via subscription"
+    );
     for o in &outputs {
         assert_eq!(o.feed_id, feed_id);
     }
@@ -665,7 +690,10 @@ fn output_subscription_bounded_capacity() {
     let mut rx = runtime.output_subscribe();
     let (sink, _) = CountingSink::new();
     let handle = runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(sink)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
         .unwrap();
 
     // Wait for feed to complete.
@@ -708,7 +736,10 @@ fn runtime_handle_is_cloneable_and_functional() {
 
     let (sink, _) = CountingSink::new();
     let _feed = h1
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(sink)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
         .unwrap();
 
     assert_eq!(h2.feed_count().unwrap(), 1);
@@ -730,7 +761,10 @@ fn pause_resume_controls_processing() {
 
     let (sink, count) = CountingSink::new();
     let handle = runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(sink)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
         .unwrap();
 
     // Wait for some processing.
@@ -785,7 +819,11 @@ fn max_restarts_zero_with_source_failure_trigger_never_restarts() {
 
     wait_for_stop(&handle, std::time::Duration::from_secs(5));
     assert!(!handle.is_alive());
-    assert_eq!(handle.metrics().restarts, 0, "max_restarts=0 must prevent restart");
+    assert_eq!(
+        handle.metrics().restarts,
+        0,
+        "max_restarts=0 must prevent restart"
+    );
 
     runtime.shutdown().unwrap();
 }
@@ -814,7 +852,11 @@ fn max_restarts_zero_with_source_or_panic_trigger_never_restarts() {
 
     wait_for_stop(&handle, std::time::Duration::from_secs(5));
     assert!(!handle.is_alive());
-    assert_eq!(handle.metrics().restarts, 0, "max_restarts=0 must prevent restart");
+    assert_eq!(
+        handle.metrics().restarts,
+        0,
+        "max_restarts=0 must prevent restart"
+    );
 
     runtime.shutdown().unwrap();
 }
@@ -845,7 +887,8 @@ fn max_restarts_zero_with_zero_window_never_restarts() {
     wait_for_stop(&handle, std::time::Duration::from_secs(5));
     assert!(!handle.is_alive());
     assert_eq!(
-        handle.metrics().restarts, 0,
+        handle.metrics().restarts,
+        0,
         "max_restarts=0 must prevent restart even with zero window"
     );
 
@@ -877,8 +920,14 @@ fn restart_window_reset_still_works_with_nonzero_max() {
 
     // Let it restart a few cycles.
     std::thread::sleep(std::time::Duration::from_millis(200));
-    assert!(handle.is_alive(), "feed should keep restarting with window reset");
-    assert!(handle.metrics().restarts >= 2, "should have restarted multiple times");
+    assert!(
+        handle.is_alive(),
+        "feed should keep restarting with window reset"
+    );
+    assert!(
+        handle.metrics().restarts >= 2,
+        "should have restarted multiple times"
+    );
 
     runtime.shutdown().unwrap();
 }
@@ -910,7 +959,10 @@ fn output_lag_emits_health_event() {
 
     let (sink, _) = CountingSink::new();
     let handle = runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(sink)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
         .unwrap();
 
     wait_for_stop(&handle, std::time::Duration::from_secs(5));
@@ -935,10 +987,7 @@ fn output_lag_emits_health_event() {
         saw_lag_event,
         "should emit OutputLagged when output channel is saturated"
     );
-    assert!(
-        total_lost > 0,
-        "messages_lost should be nonzero"
-    );
+    assert!(total_lost > 0, "messages_lost should be nonzero");
 
     runtime.shutdown().unwrap();
 }
@@ -962,7 +1011,10 @@ fn no_lag_event_without_subscribers() {
 
     let (sink, _) = CountingSink::new();
     let handle = runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(sink)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
         .unwrap();
 
     wait_for_stop(&handle, std::time::Duration::from_secs(5));
@@ -1056,7 +1108,11 @@ fn file_eos_stops_cleanly() {
 
     wait_for_stop(&handle, std::time::Duration::from_secs(5));
     assert!(!handle.is_alive(), "feed should have stopped");
-    assert_eq!(count.load(Ordering::Relaxed), 3, "all frames should produce output");
+    assert_eq!(
+        count.load(Ordering::Relaxed),
+        3,
+        "all frames should produce output"
+    );
     assert_eq!(handle.metrics().restarts, 0, "no restarts for file EOS");
 
     let mut saw_eos = false;
@@ -1089,7 +1145,10 @@ fn looping_file_restarts_on_eos() {
     let handle = runtime
         .add_feed(
             FeedConfig::builder()
-                .source(SourceSpec::File { path: "/tmp/test.mp4".into(), loop_: true })
+                .source(SourceSpec::File {
+                    path: "/tmp/test.mp4".into(),
+                    loop_: true,
+                })
                 .camera_mode(CameraMode::Fixed)
                 .stages(vec![Box::new(NoOpStage::new("noop"))])
                 .output_sink(Box::new(sink))
@@ -1128,7 +1187,9 @@ fn stage_error_drops_frame_no_output() {
     let (sink, count) = CountingSink::new();
     let handle = runtime
         .add_feed(build_config(
-            vec![Box::new(nv_test_util::mock_stage::FailingStage::new("fail"))],
+            vec![Box::new(nv_test_util::mock_stage::FailingStage::new(
+                "fail",
+            ))],
             Box::new(sink),
         ))
         .unwrap();
@@ -1190,7 +1251,10 @@ fn shared_output_broadcast_is_arc() {
     let mut rx = runtime.output_subscribe();
     let (sink, _) = CountingSink::new();
     let handle = runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(sink)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
         .unwrap();
 
     wait_for_stop(&handle, std::time::Duration::from_secs(5));
@@ -1226,7 +1290,10 @@ fn provenance_has_valid_timestamps() {
     let mut rx = runtime.output_subscribe();
     let (sink, _) = CountingSink::new();
     let handle = runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(sink)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
         .unwrap();
 
     wait_for_stop(&handle, std::time::Duration::from_secs(5));
@@ -1267,7 +1334,10 @@ fn shutdown_wakes_paused_feed() {
 
     let (sink, _) = CountingSink::new();
     let handle = runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(sink)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
         .unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -1346,7 +1416,10 @@ fn lag_messages_lost_is_per_event_delta() {
 
     let (sink, _) = CountingSink::new();
     let handle = runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(sink)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
         .unwrap();
 
     wait_for_stop(&handle, std::time::Duration::from_secs(5));
@@ -1357,7 +1430,10 @@ fn lag_messages_lost_is_per_event_delta() {
             Ok(event) => {
                 if let HealthEvent::OutputLagged { messages_lost } = event {
                     // Each delta must be positive.
-                    assert!(messages_lost > 0, "each lag event must have messages_lost > 0");
+                    assert!(
+                        messages_lost > 0,
+                        "each lag event must have messages_lost > 0"
+                    );
                     deltas.push(messages_lost);
                 }
             }
@@ -1374,10 +1450,7 @@ fn lag_messages_lost_is_per_event_delta() {
     // The sum of all deltas should be <= (frames - capacity) since the
     // canary can only report messages it actually missed.
     let total_lost: u64 = deltas.iter().sum();
-    assert!(
-        total_lost > 0,
-        "total messages lost should be > 0, got 0"
-    );
+    assert!(total_lost > 0, "total messages lost should be > 0, got 0");
 
     runtime.shutdown().unwrap();
 }
@@ -1405,7 +1478,10 @@ fn no_spurious_lag_on_subscriber_disconnect() {
 
     let (sink, _) = CountingSink::new();
     let handle = runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(sink)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
         .unwrap();
 
     // Let it run a bit then shutdown.
@@ -1457,10 +1533,16 @@ fn multi_feed_lag_attribution_is_global() {
     let (s1, _) = CountingSink::new();
     let (s2, _) = CountingSink::new();
     let h1 = runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(s1)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(s1),
+        ))
         .unwrap();
     let h2 = runtime
-        .add_feed(build_config(vec![Box::new(NoOpStage::new("noop"))], Box::new(s2)))
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(s2),
+        ))
         .unwrap();
 
     wait_for_stop(&h1, std::time::Duration::from_secs(5));
@@ -1545,10 +1627,7 @@ fn lag_throttling_bounds_event_count() {
     // up to ~66 lag events (one every capacity+1 sends). Throttling
     // should keep this much lower: 1 transition event + at most a
     // few periodic ones (1/sec). The test runs in well under 1 second.
-    assert!(
-        lag_event_count > 0,
-        "should see at least one lag event"
-    );
+    assert!(lag_event_count > 0, "should see at least one lag event");
     assert!(
         lag_event_count < frame_count / 2,
         "throttling should bound lag events: got {lag_event_count} for {frame_count} frames"

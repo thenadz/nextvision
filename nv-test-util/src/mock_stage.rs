@@ -22,6 +22,10 @@ impl TemporalAccess for NullTemporalAccess {
         0
     }
 
+    fn track_ids(&self) -> Vec<TrackId> {
+        Vec::new()
+    }
+
     fn get_track(&self, _id: &TrackId) -> Option<&Track> {
         None
     }
@@ -36,6 +40,14 @@ impl TemporalAccess for NullTemporalAccess {
 
     fn last_seen(&self, _id: &TrackId) -> Option<MonotonicTs> {
         None
+    }
+
+    fn trajectory_point_count(&self, _id: &TrackId) -> usize {
+        0
+    }
+
+    fn trajectory_segment_count(&self, _id: &TrackId) -> usize {
+        0
     }
 }
 

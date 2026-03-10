@@ -20,5 +20,8 @@ pub mod trajectory;
 
 pub use continuity::SegmentBoundary;
 pub use retention::RetentionPolicy;
-pub use store::{SnapshotTrackHistory, TemporalStore, TemporalStoreSnapshot, TrackHistory};
+pub use store::{
+    SnapshotTrackHistory, TemporalStore, TemporalStoreSnapshot, TrackHistory, TrackStore,
+    TrajectoryStoreAccess,
+};
 pub use trajectory::{MotionFeatures, Trajectory, TrajectoryPoint, TrajectorySegment};

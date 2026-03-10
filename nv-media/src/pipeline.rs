@@ -158,45 +158,39 @@ impl PipelineBuilder {
 
         // --- Source element ---
         let source = match &self.spec {
-            SourceSpec::Rtsp { url, transport } => {
-                gst::ElementFactory::make("rtspsrc")
-                    .property("location", url.as_str())
-                    .property("latency", self.latency_ms)
-                    .property(
-                        "protocols",
-                        match transport {
-                            RtspTransport::Tcp => "tcp",
-                            RtspTransport::UdpUnicast => "udp",
-                        },
-                    )
-                    .build()
-                    .map_err(|e| MediaError::Unsupported {
-                        detail: format!("failed to create rtspsrc: {e}"),
-                    })?
-            }
-            SourceSpec::File { path, loop_: _ } => {
-                gst::ElementFactory::make("filesrc")
-                    .property("location", path.to_string_lossy().as_ref())
-                    .build()
-                    .map_err(|e| MediaError::Unsupported {
-                        detail: format!("failed to create filesrc: {e}"),
-                    })?
-            }
-            SourceSpec::V4l2 { device } => {
-                gst::ElementFactory::make("v4l2src")
-                    .property("device", device.as_str())
-                    .build()
-                    .map_err(|e| MediaError::Unsupported {
-                        detail: format!("failed to create v4l2src: {e}"),
-                    })?
-            }
-            SourceSpec::Custom { gst_launch_fragment } => {
-                gst::parse::bin_from_description(gst_launch_fragment, true)
-                    .map_err(|e| MediaError::Unsupported {
-                        detail: format!("failed to parse custom pipeline fragment: {e}"),
-                    })?
-                    .upcast()
-            }
+            SourceSpec::Rtsp { url, transport } => gst::ElementFactory::make("rtspsrc")
+                .property("location", url.as_str())
+                .property("latency", self.latency_ms)
+                .property(
+                    "protocols",
+                    match transport {
+                        RtspTransport::Tcp => "tcp",
+                        RtspTransport::UdpUnicast => "udp",
+                    },
+                )
+                .build()
+                .map_err(|e| MediaError::Unsupported {
+                    detail: format!("failed to create rtspsrc: {e}"),
+                })?,
+            SourceSpec::File { path, loop_: _ } => gst::ElementFactory::make("filesrc")
+                .property("location", path.to_string_lossy().as_ref())
+                .build()
+                .map_err(|e| MediaError::Unsupported {
+                    detail: format!("failed to create filesrc: {e}"),
+                })?,
+            SourceSpec::V4l2 { device } => gst::ElementFactory::make("v4l2src")
+                .property("device", device.as_str())
+                .build()
+                .map_err(|e| MediaError::Unsupported {
+                    detail: format!("failed to create v4l2src: {e}"),
+                })?,
+            SourceSpec::Custom {
+                gst_launch_fragment,
+            } => gst::parse::bin_from_description(gst_launch_fragment, true)
+                .map_err(|e| MediaError::Unsupported {
+                    detail: format!("failed to parse custom pipeline fragment: {e}"),
+                })?
+                .upcast(),
         };
 
         // --- Decode element(s) ---
@@ -249,10 +243,8 @@ impl PipelineBuilder {
             })?;
 
         let caps_str = format!("video/x-raw,format={}", self.output_format.gst_format_str());
-        let appsink_caps: gst::Caps = caps_str.parse().map_err(|_| {
-            MediaError::Unsupported {
-                detail: format!("invalid appsink caps: {caps_str}"),
-            }
+        let appsink_caps: gst::Caps = caps_str.parse().map_err(|_| MediaError::Unsupported {
+            detail: format!("invalid appsink caps: {caps_str}"),
         })?;
 
         let appsink = gst_app::AppSink::builder()
@@ -276,9 +268,11 @@ impl PipelineBuilder {
 
             // Non-RTSP: static link source → decodebin
             if !is_rtsp {
-                source.link(&decode_element).map_err(|e| MediaError::Unsupported {
-                    detail: format!("failed to link source → decodebin: {e}"),
-                })?;
+                source
+                    .link(&decode_element)
+                    .map_err(|e| MediaError::Unsupported {
+                        detail: format!("failed to link source → decodebin: {e}"),
+                    })?;
             }
 
             // Static link: videoconvert → appsink
@@ -322,7 +316,9 @@ impl PipelineBuilder {
             if is_rtsp {
                 let dec_weak = decode_element.downgrade();
                 source.connect_pad_added(move |_element, pad| {
-                    let Some(dec) = dec_weak.upgrade() else { return };
+                    let Some(dec) = dec_weak.upgrade() else {
+                        return;
+                    };
                     if let Some(sink_pad) = dec.static_pad("sink") {
                         if !sink_pad.is_linked() {
                             let _ = pad.link(&sink_pad);
@@ -330,14 +326,18 @@ impl PipelineBuilder {
                     }
                 });
             } else {
-                source.link(&decode_element).map_err(|e| MediaError::Unsupported {
-                    detail: format!("failed to link source → decoder: {e}"),
-                })?;
+                source
+                    .link(&decode_element)
+                    .map_err(|e| MediaError::Unsupported {
+                        detail: format!("failed to link source → decoder: {e}"),
+                    })?;
             }
 
-            decode_element.link(&videoconvert).map_err(|e| MediaError::Unsupported {
-                detail: format!("failed to link decoder → videoconvert: {e}"),
-            })?;
+            decode_element
+                .link(&videoconvert)
+                .map_err(|e| MediaError::Unsupported {
+                    detail: format!("failed to link decoder → videoconvert: {e}"),
+                })?;
 
             videoconvert
                 .link(appsink_element)
@@ -459,4 +459,3 @@ mod tests {
         assert!(matches!(b.decoder, DecoderSelection::ForceSoftware));
     }
 }
-

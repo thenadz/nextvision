@@ -57,47 +57,68 @@ mod tests {
 
     #[test]
     fn settled_stays_settled() {
-        assert_eq!(TransitionPhase::Settled.next(false), TransitionPhase::Settled);
+        assert_eq!(
+            TransitionPhase::Settled.next(false),
+            TransitionPhase::Settled
+        );
     }
 
     #[test]
     fn settled_to_move_start() {
-        assert_eq!(TransitionPhase::Settled.next(true), TransitionPhase::MoveStart);
+        assert_eq!(
+            TransitionPhase::Settled.next(true),
+            TransitionPhase::MoveStart
+        );
     }
 
     #[test]
     fn move_start_to_moving() {
-        assert_eq!(TransitionPhase::MoveStart.next(true), TransitionPhase::Moving);
+        assert_eq!(
+            TransitionPhase::MoveStart.next(true),
+            TransitionPhase::Moving
+        );
     }
 
     #[test]
     fn move_start_one_frame_jitter() {
-        assert_eq!(TransitionPhase::MoveStart.next(false), TransitionPhase::MoveEnd);
+        assert_eq!(
+            TransitionPhase::MoveStart.next(false),
+            TransitionPhase::MoveEnd
+        );
     }
 
     #[test]
     fn moving_to_move_end() {
-        assert_eq!(TransitionPhase::Moving.next(false), TransitionPhase::MoveEnd);
+        assert_eq!(
+            TransitionPhase::Moving.next(false),
+            TransitionPhase::MoveEnd
+        );
     }
 
     #[test]
     fn move_end_to_settled() {
-        assert_eq!(TransitionPhase::MoveEnd.next(false), TransitionPhase::Settled);
+        assert_eq!(
+            TransitionPhase::MoveEnd.next(false),
+            TransitionPhase::Settled
+        );
     }
 
     #[test]
     fn move_end_resume_motion() {
-        assert_eq!(TransitionPhase::MoveEnd.next(true), TransitionPhase::MoveStart);
+        assert_eq!(
+            TransitionPhase::MoveEnd.next(true),
+            TransitionPhase::MoveStart
+        );
     }
 
     #[test]
     fn full_cycle() {
         let mut phase = TransitionPhase::Settled;
-        phase = phase.next(true);  // MoveStart
+        phase = phase.next(true); // MoveStart
         assert_eq!(phase, TransitionPhase::MoveStart);
-        phase = phase.next(true);  // Moving
+        phase = phase.next(true); // Moving
         assert_eq!(phase, TransitionPhase::Moving);
-        phase = phase.next(true);  // Moving
+        phase = phase.next(true); // Moving
         assert_eq!(phase, TransitionPhase::Moving);
         phase = phase.next(false); // MoveEnd
         assert_eq!(phase, TransitionPhase::MoveEnd);

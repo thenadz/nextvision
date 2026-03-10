@@ -30,8 +30,8 @@ struct CloneableEntry {
     clone_fn: fn(&(dyn Any + Send + Sync)) -> Box<dyn Any + Send + Sync>,
 }
 
-fn make_clone_fn<T: Clone + Send + Sync + 'static>(
-) -> fn(&(dyn Any + Send + Sync)) -> Box<dyn Any + Send + Sync> {
+fn make_clone_fn<T: Clone + Send + Sync + 'static>()
+-> fn(&(dyn Any + Send + Sync)) -> Box<dyn Any + Send + Sync> {
     |any| {
         let val = any
             .downcast_ref::<T>()

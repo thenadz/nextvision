@@ -3,6 +3,34 @@
 //! Stages are the primary extension point for adding perception capabilities
 //! to the pipeline. Each stage processes one frame at a time and produces
 //! structured output.
+//!
+//! # Design intent: one trait, composed pipelines
+//!
+//! The library intentionally uses a **single** `Stage` trait rather than
+//! separate trait hierarchies for detection, tracking, classification, etc.
+//! This keeps the abstraction minimal and avoids a taxonomy that would
+//! either leak domain assumptions or force awkward categorizations.
+//!
+//! Instead, the pipeline _composes_ stages linearly: earlier stages write
+//! fields into [`StageOutput`] that later stages read from
+//! [`StageContext::artifacts`]. Specialization happens by convention (which
+//! fields a stage populates), not by type hierarchy.
+//!
+//! # What a stage should do
+//!
+//! - Process a single frame and return structured results.
+//! - Read upstream artifacts from [`StageContext::artifacts`].
+//! - Read temporal history from [`StageContext::temporal`].
+//! - Populate only the [`StageOutput`] fields it owns.
+//! - Remain stateless across feeds — internal state is per-feed.
+//!
+//! # What a stage should NOT do
+//!
+//! - Block on network I/O (manage async bridges internally).
+//! - Mutate shared global state.
+//! - Produce side-channel output bypassing [`StageOutput`].
+//! - Depend on stage execution order beyond what upstream artifacts provide.
+//! - Accumulate unbounded internal state (use the temporal store instead).
 
 use crate::artifact::PerceptionArtifacts;
 use crate::detection::DetectionSet;
@@ -55,8 +83,13 @@ pub struct StageOutput {
 
     /// New or updated track set.
     ///
-    /// If `Some`, **replaces** the current track set in the accumulator.
-    /// If `None`, the previous track set is kept.
+    /// `Some(Vec<Track>)` is **authoritative** for this frame: it replaces
+    /// the current track set in the accumulator and marks the output as
+    /// authoritative. Previously-known tracks absent from this set are
+    /// treated as normally ended (`TrackEnded`) by the temporal store.
+    ///
+    /// `None` means this stage does not produce tracks — the previous
+    /// track set is kept and authoritativeness is unchanged.
     pub tracks: Option<Vec<Track>>,
 
     /// Derived signals — always **appended** to the accumulator.
@@ -75,9 +108,59 @@ impl StageOutput {
     pub fn empty() -> Self {
         Self::default()
     }
+
+    /// Create a stage output containing only detections.
+    #[must_use]
+    pub fn with_detections(detections: DetectionSet) -> Self {
+        Self {
+            detections: Some(detections),
+            ..Self::default()
+        }
+    }
+
+    /// Create a stage output containing only tracks.
+    #[must_use]
+    pub fn with_tracks(tracks: Vec<Track>) -> Self {
+        Self {
+            tracks: Some(tracks),
+            ..Self::default()
+        }
+    }
+
+    /// Create a stage output containing only signals.
+    #[must_use]
+    pub fn with_signals(signals: Vec<DerivedSignal>) -> Self {
+        Self {
+            signals,
+            ..Self::default()
+        }
+    }
+
+    /// Create a stage output containing a single signal.
+    #[must_use]
+    pub fn with_signal(signal: DerivedSignal) -> Self {
+        Self {
+            signals: vec![signal],
+            ..Self::default()
+        }
+    }
+
+    /// Create a stage output containing only scene features.
+    #[must_use]
+    pub fn with_scene_features(features: Vec<SceneFeature>) -> Self {
+        Self {
+            scene_features: features,
+            ..Self::default()
+        }
+    }
 }
 
 /// The core user-implementable perception trait.
+///
+/// This is the **only** extension point for adding perception logic to the
+/// pipeline. Stages run in a fixed linear order; each stage sees the
+/// accumulated [`PerceptionArtifacts`](super::PerceptionArtifacts) from all
+/// prior stages.
 ///
 /// All methods take `&mut self`. The executor holds exclusive ownership of each
 /// stage on the feed's dedicated OS thread — stages are never shared across
@@ -99,6 +182,18 @@ impl StageOutput {
 ///   The feed continues processing subsequent frames.
 /// - `on_start()` returning `Err` prevents the feed from starting.
 /// - A panic in `process()` is caught; the feed restarts per its restart policy.
+///
+/// # Typical stage categories (by convention, not by type)
+///
+/// | Category | Reads | Writes |
+/// |---|---|---|
+/// | Detection | frame pixels | `detections` |
+/// | Tracking | `detections`, temporal | `tracks` |
+/// | Classification | `detections` or `tracks` | `artifacts` (typed metadata) |
+/// | Scene analysis | frame pixels, temporal | `scene_features`, `signals` |
+///
+/// These are conventions, not enforced constraints. A stage may read and write
+/// any combination of fields.
 pub trait Stage: Send + 'static {
     /// Unique name for this stage (used in provenance, metrics, and logging).
     ///

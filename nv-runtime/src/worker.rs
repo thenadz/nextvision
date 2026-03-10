@@ -224,6 +224,7 @@ pub(crate) fn spawn_feed_worker(
                     config.epoch_policy,
                 ),
                 output_sink: config.output_sink,
+                ptz_provider: config.ptz_provider,
                 health_tx,
                 output_tx,
                 shared: shared_clone,
@@ -252,6 +253,7 @@ struct FeedWorker {
     restart_policy: RestartPolicy,
     executor: PipelineExecutor,
     output_sink: Box<dyn OutputSink>,
+    ptz_provider: Option<Arc<dyn nv_media::PtzProvider>>,
     health_tx: broadcast::Sender<HealthEvent>,
     output_tx: broadcast::Sender<SharedOutput>,
     shared: Arc<FeedSharedState>,
@@ -315,7 +317,7 @@ impl FeedWorker {
                 self.feed_id,
                 self.source_spec.clone(),
                 self.reconnect_policy.clone(),
-                None, // PTZ provider — wired when FeedConfig gains it
+                self.ptz_provider.clone(),
             );
 
             let mut source = match source {
@@ -371,7 +373,10 @@ impl FeedWorker {
             self.executor.stop_stages();
 
             match exit_reason {
-                ExitReason::Shutdown => break,
+                ExitReason::Shutdown => {
+                    self.emit_feed_stopped(StopReason::UserRequested);
+                    break;
+                }
                 ExitReason::FileEos => {
                     // Non-looping file source — terminal, no restart.
                     let _ = self.health_tx.send(HealthEvent::SourceEos {
@@ -387,10 +392,9 @@ impl FeedWorker {
                                 "stage panic (trigger {:?} does not allow restart, or budget exhausted after {} restarts)",
                                 self.restart_policy.restart_on, restart_count,
                             ),
-                            _ => format!(
-                                "restart budget exhausted after {} restarts",
-                                restart_count,
-                            ),
+                            _ => {
+                                format!("restart budget exhausted after {} restarts", restart_count,)
+                            }
                         };
                         self.emit_feed_stopped(StopReason::Fatal { detail });
                         break;
@@ -454,9 +458,7 @@ impl FeedWorker {
             }
 
             // Update shared metrics.
-            self.shared
-                .frames_processed
-                .fetch_add(1, Ordering::Relaxed);
+            self.shared.frames_processed.fetch_add(1, Ordering::Relaxed);
             self.shared
                 .tracks_active
                 .store(self.executor.track_count() as u64, Ordering::Relaxed);
@@ -471,15 +473,31 @@ impl FeedWorker {
                 // there is at least one external subscriber (count > 1).
                 let has_external = self.output_tx.receiver_count() > 1;
 
+                // Arc-wrap first so both broadcast and sink share the
+                // same allocation instead of cloning the full output.
+                let shared_out: SharedOutput = Arc::new(output);
+
                 if has_external {
                     self.had_external_subscribers = true;
-                    let shared_out = Arc::new(output.clone());
-                    let _ = self.output_tx.send(shared_out);
+                    let _ = self.output_tx.send(Arc::clone(&shared_out));
                     self.lag_detector.check_after_send(&self.health_tx);
                 }
 
-                // Emit output to the per-feed sink.
-                self.output_sink.emit(output);
+                // Emit output to the per-feed sink with panic containment.
+                // A panicking OutputSink must not tear down the feed thread.
+                let sink_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let output = Arc::try_unwrap(shared_out).unwrap_or_else(|arc| (*arc).clone());
+                    self.output_sink.emit(output);
+                }));
+                if sink_result.is_err() {
+                    tracing::error!(
+                        feed_id = %self.feed_id,
+                        "OutputSink::emit() panicked — output dropped",
+                    );
+                    let _ = self.health_tx.send(HealthEvent::SinkPanic {
+                        feed_id: self.feed_id,
+                    });
+                }
             }
 
             // Subscriber transition: external subscribers were present on
@@ -554,11 +572,7 @@ impl FeedWorker {
     ///
     /// Returns the new *window-scoped* counter (used for budget checking).
     /// The shared `restarts` metric tracks the cumulative total.
-    fn bump_restart(
-        &self,
-        session_start: &mut Instant,
-        current_count: u32,
-    ) -> u32 {
+    fn bump_restart(&self, session_start: &mut Instant, current_count: u32) -> u32 {
         let window: std::time::Duration = self.restart_policy.restart_window.into();
         let new_count = if session_start.elapsed() >= window {
             // Window elapsed — reset counter.

@@ -226,9 +226,7 @@ impl FrameEnvelope {
         match &self.inner.data {
             PixelData::Owned(v) => v.as_slice(),
             // SAFETY: the PinGuard keeps the buffer alive and immutable.
-            PixelData::Mapped { ptr, len, .. } => unsafe {
-                std::slice::from_raw_parts(*ptr, *len)
-            },
+            PixelData::Mapped { ptr, len, .. } => unsafe { std::slice::from_raw_parts(*ptr, *len) },
         }
     }
 

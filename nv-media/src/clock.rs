@@ -124,7 +124,12 @@ mod tests {
         let mut t = PtsTracker::new();
         t.observe(0);
         let r = t.observe(33_333_333); // ~30 fps
-        assert_eq!(r, PtsResult::Normal { delta_ns: 33_333_333 });
+        assert_eq!(
+            r,
+            PtsResult::Normal {
+                delta_ns: 33_333_333
+            }
+        );
     }
 
     #[test]
@@ -132,7 +137,13 @@ mod tests {
         let mut t = PtsTracker::with_threshold_ns(1_000_000_000); // 1 s
         t.observe(0);
         let r = t.observe(2_000_000_000); // 2 s jump
-        assert!(matches!(r, PtsResult::Discontinuity { gap_ns: 2_000_000_000, .. }));
+        assert!(matches!(
+            r,
+            PtsResult::Discontinuity {
+                gap_ns: 2_000_000_000,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -140,7 +151,13 @@ mod tests {
         let mut t = PtsTracker::with_threshold_ns(1_000_000_000);
         t.observe(5_000_000_000);
         let r = t.observe(1_000_000_000); // jumped back 4 s
-        assert!(matches!(r, PtsResult::Discontinuity { gap_ns: 4_000_000_000, .. }));
+        assert!(matches!(
+            r,
+            PtsResult::Discontinuity {
+                gap_ns: 4_000_000_000,
+                ..
+            }
+        ));
     }
 
     #[test]

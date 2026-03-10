@@ -307,9 +307,7 @@ impl GstSession {
                 gstreamer::Pipeline::new().bus().unwrap()
             },
             #[cfg(feature = "gst-backend")]
-            _appsink: {
-                gstreamer_app::AppSink::builder().build()
-            },
+            _appsink: { gstreamer_app::AppSink::builder().build() },
         }
     }
 
@@ -319,8 +317,8 @@ impl GstSession {
     /// messages to [`BusMessage`].
     #[cfg(feature = "gst-backend")]
     pub fn poll_bus(&self) -> Option<BusMessage> {
-        use gstreamer::prelude::*;
         use gstreamer::MessageView;
+        use gstreamer::prelude::*;
 
         let msg = self.bus.pop()?;
         let pipeline_obj: &gstreamer::Object = self.pipeline.upcast_ref();

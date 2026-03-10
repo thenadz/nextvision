@@ -42,10 +42,7 @@ pub enum NvError {
 pub enum MediaError {
     /// Failed to connect to the video source.
     #[error("connection failed to `{url}`: {detail}")]
-    ConnectionFailed {
-        url: String,
-        detail: String,
-    },
+    ConnectionFailed { url: String, detail: String },
 
     /// Decoding a video frame failed.
     #[error("decode failed: {detail}")]

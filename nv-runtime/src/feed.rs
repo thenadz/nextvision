@@ -1,9 +1,12 @@
 //! Feed configuration and handle.
 
+use std::sync::Arc;
+
 use nv_core::config::{CameraMode, ReconnectPolicy, SourceSpec};
 use nv_core::error::{ConfigError, NvError};
 use nv_core::id::FeedId;
 use nv_core::metrics::FeedMetrics;
+use nv_media::PtzProvider;
 use nv_perception::Stage;
 use nv_temporal::RetentionPolicy;
 use nv_view::{EpochPolicy, ViewStateProvider};
@@ -26,6 +29,7 @@ pub struct FeedConfig {
     pub(crate) temporal: RetentionPolicy,
     pub(crate) reconnect: ReconnectPolicy,
     pub(crate) restart: RestartPolicy,
+    pub(crate) ptz_provider: Option<Arc<dyn PtzProvider>>,
 }
 
 /// Builder for [`FeedConfig`].
@@ -53,6 +57,7 @@ pub struct FeedConfigBuilder {
     temporal: RetentionPolicy,
     reconnect: ReconnectPolicy,
     restart: RestartPolicy,
+    ptz_provider: Option<Arc<dyn PtzProvider>>,
 }
 
 impl FeedConfig {
@@ -70,6 +75,7 @@ impl FeedConfig {
             temporal: RetentionPolicy::default(),
             reconnect: ReconnectPolicy::default(),
             restart: RestartPolicy::default(),
+            ptz_provider: None,
         }
     }
 }
@@ -145,6 +151,16 @@ impl FeedConfigBuilder {
         self
     }
 
+    /// Set an optional PTZ telemetry provider.
+    ///
+    /// When provided, the media backend queries this on every decoded
+    /// frame to attach PTZ telemetry to the frame metadata.
+    #[must_use]
+    pub fn ptz_provider(mut self, provider: Arc<dyn PtzProvider>) -> Self {
+        self.ptz_provider = Some(provider);
+        self
+    }
+
     /// Build the feed configuration.
     ///
     /// # Errors
@@ -152,15 +168,15 @@ impl FeedConfigBuilder {
     /// - `MissingRequired` if `source`, `camera_mode`, `stages`, or `output_sink` are not set.
     /// - `CameraModeConflict` if `Observed` is set without a provider, or `Fixed` with a provider.
     pub fn build(self) -> Result<FeedConfig, NvError> {
-        let source = self.source.ok_or(ConfigError::MissingRequired {
-            field: "source",
-        })?;
+        let source = self
+            .source
+            .ok_or(ConfigError::MissingRequired { field: "source" })?;
         let camera_mode = self.camera_mode.ok_or(ConfigError::MissingRequired {
             field: "camera_mode",
         })?;
-        let stages = self.stages.ok_or(ConfigError::MissingRequired {
-            field: "stages",
-        })?;
+        let stages = self
+            .stages
+            .ok_or(ConfigError::MissingRequired { field: "stages" })?;
         if stages.is_empty() {
             return Err(ConfigError::InvalidPolicy {
                 detail: "at least one perception stage is required".into(),
@@ -212,6 +228,7 @@ impl FeedConfigBuilder {
             temporal: self.temporal,
             reconnect: self.reconnect,
             restart: self.restart,
+            ptz_provider: self.ptz_provider,
         })
     }
 }
@@ -250,9 +267,7 @@ impl FeedHandle {
     /// Whether the worker thread is still alive.
     #[must_use]
     pub fn is_alive(&self) -> bool {
-        self.shared
-            .alive
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.shared.alive.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Get a snapshot of the feed's current metrics.

@@ -111,10 +111,7 @@ impl FrameQueue {
             BackpressurePolicy::Block { .. } => {
                 // Block until space is available or the queue is closed.
                 while inner.buf.len() >= self.depth && !inner.closed {
-                    let (guard, _) = self
-                        .not_full
-                        .wait_timeout(inner, POLL_INTERVAL)
-                        .unwrap();
+                    let (guard, _) = self.not_full.wait_timeout(inner, POLL_INTERVAL).unwrap();
                     inner = guard;
                 }
                 if inner.closed {
@@ -141,10 +138,7 @@ impl FrameQueue {
             if inner.closed || shutdown.load(Ordering::Relaxed) {
                 return None;
             }
-            let (guard, _) = self
-                .not_empty
-                .wait_timeout(inner, POLL_INTERVAL)
-                .unwrap();
+            let (guard, _) = self.not_empty.wait_timeout(inner, POLL_INTERVAL).unwrap();
             inner = guard;
         }
     }

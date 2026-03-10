@@ -46,9 +46,9 @@ use nv_core::health::HealthEvent;
 use nv_core::id::FeedId;
 
 use crate::backend::{EventQueue, GstSession, SessionConfig};
-use crate::ingress::PtzProvider;
 use crate::decode::DecoderSelection;
 use crate::event::MediaEvent;
+use crate::ingress::PtzProvider;
 use crate::ingress::{FrameSink, HealthSink, MediaIngress};
 use crate::pipeline::OutputFormat;
 use crate::reconnect::ReconnectTracker;
@@ -307,7 +307,10 @@ impl MediaSource {
                     }
                 }
             }
-            MediaEvent::Error { error, debug: debug_detail } => {
+            MediaEvent::Error {
+                error,
+                debug: debug_detail,
+            } => {
                 tracing::warn!(
                     feed_id = %self.feed_id,
                     error = %error,
@@ -326,7 +329,10 @@ impl MediaSource {
                 }
                 self.try_reconnect_or_stop()
             }
-            MediaEvent::Warning { message, debug: debug_detail } => {
+            MediaEvent::Warning {
+                message,
+                debug: debug_detail,
+            } => {
                 tracing::warn!(
                     feed_id = %self.feed_id,
                     message = %message,
@@ -590,10 +596,8 @@ impl MediaIngress for MediaSource {
             sink.on_eos();
         }
         self.state = SourceState::Stopped;
-        self.emit_health(HealthEvent::FeedStopped {
-            feed_id: self.feed_id,
-            reason: nv_core::health::StopReason::UserRequested,
-        });
+        // Note: FeedStopped health events are emitted by the worker thread
+        // with the correct StopReason. The source does not emit them.
         tracing::info!(feed_id = %self.feed_id, "source stopped");
         Ok(())
     }
@@ -640,5 +644,3 @@ impl MediaIngress for MediaSource {
 #[cfg(test)]
 #[path = "source_tests.rs"]
 mod tests;
-
-
