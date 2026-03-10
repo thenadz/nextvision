@@ -62,10 +62,10 @@
 //! # }
 //! struct MySink;
 //! impl OutputSink for MySink {
-//!     fn emit(&self, _output: OutputEnvelope) {}
+//!     fn emit(&self, _output: SharedOutput) {}
 //! }
 //!
-//! # async fn example() -> Result<(), NvError> {
+//! # fn example() -> Result<(), NvError> {
 //! let runtime = Runtime::builder().build()?;
 //! let _feed = runtime.add_feed(
 //!     FeedConfig::builder()
@@ -75,7 +75,7 @@
 //!         .output_sink(Box::new(MySink))
 //!         .build()?
 //! )?;
-//! // runtime.shutdown().await?;
+//! // runtime.shutdown();
 //! # Ok(())
 //! # }
 //! ```

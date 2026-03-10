@@ -17,6 +17,8 @@ use nv_core::id::StageId;
 use nv_perception::{Stage, StageContext, StageOutput};
 use nv_runtime::{FeedConfig, OutputEnvelope, OutputSink, Runtime};
 
+use std::sync::Arc;
+
 /// A minimal detection stage that passes frames through unchanged.
 struct PassthroughStage;
 
@@ -36,7 +38,7 @@ struct PrintSink {
 }
 
 impl OutputSink for PrintSink {
-    fn emit(&self, output: OutputEnvelope) {
+    fn emit(&self, output: Arc<OutputEnvelope>) {
         println!(
             "[{}] feed={:?} seq={} detections={}",
             self.label,

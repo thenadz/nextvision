@@ -9,6 +9,7 @@
 //! All other crates interact through these traits, never through GStreamer types.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use nv_core::config::{ReconnectPolicy, SourceSpec};
 use nv_core::error::MediaError;
@@ -17,6 +18,64 @@ use nv_core::id::FeedId;
 use nv_frame::FrameEnvelope;
 
 use crate::bridge::PtzTelemetry;
+
+/// Reported lifecycle state of a media source after a [`tick()`](MediaIngress::tick).
+///
+/// The runtime uses this to decide whether the feed is still alive,
+/// currently recovering, or permanently stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceStatus {
+    /// The source is running normally — frames are (or will be) flowing.
+    Running,
+    /// The source is attempting to reconnect after a failure.
+    ///
+    /// Frames are not flowing. The runtime should keep ticking to drive
+    /// the reconnection state machine forward.
+    Reconnecting,
+    /// The source is permanently stopped (reconnection budget exhausted,
+    /// terminal EOS, or explicit stop).
+    Stopped,
+}
+
+/// Result of a [`MediaIngress::tick()`] call.
+///
+/// Combines the source's lifecycle status with an optional scheduling hint
+/// that tells the runtime how soon the next tick is needed.
+#[derive(Debug, Clone)]
+pub struct TickOutcome {
+    /// Current lifecycle state of the source.
+    pub status: SourceStatus,
+    /// Suggested delay before the next `tick()` call.
+    ///
+    /// - `Some(d)` — the source has a pending deadline (e.g., a reconnect
+    ///   backoff that expires in `d`). The runtime should arrange to tick
+    ///   again after at most `d`.
+    /// - `None` — no specific urgency. The runtime will wait indefinitely
+    ///   for the next frame, EOS, or error — no periodic tick occurs.
+    ///   Sources that rely on polling to discover state changes (e.g., a
+    ///   stopped flag) **must** provide a `Some` hint.
+    pub next_tick: Option<Duration>,
+}
+
+impl TickOutcome {
+    /// Source is running, no specific tick urgency.
+    #[inline]
+    pub fn running() -> Self {
+        Self { status: SourceStatus::Running, next_tick: None }
+    }
+
+    /// Source is reconnecting; tick again after `delay`.
+    #[inline]
+    pub fn reconnecting(delay: Duration) -> Self {
+        Self { status: SourceStatus::Reconnecting, next_tick: Some(delay) }
+    }
+
+    /// Source is permanently stopped.
+    #[inline]
+    pub fn stopped() -> Self {
+        Self { status: SourceStatus::Stopped, next_tick: None }
+    }
+}
 
 /// Trait contract for a media ingress source.
 ///
@@ -31,11 +90,30 @@ use crate::bridge::PtzTelemetry;
 ///
 /// 1. `start(sink)` — begin producing frames, delivering them via `sink`.
 /// 2. Frames flow: decoded frames are pushed to `sink.on_frame()`.
-/// 3. `pause()` / `resume()` — temporarily halt/restart frame production.
-/// 4. `stop()` — tear down the source and release all resources.
+/// 3. The runtime calls `tick()` on every processed frame **and** whenever
+///    the frame queue times out according to [`TickOutcome::next_tick`].
+///    This is event-driven: when `next_tick` is `None`, the runtime waits
+///    indefinitely for the next frame, EOS, or error — there is **no**
+///    fixed polling interval.
+/// 4. `pause()` / `resume()` — temporarily halt/restart frame production.
+/// 5. `stop()` — tear down the source and release all resources.
 ///
-/// Reconnection with backoff is handled internally by the implementation
-/// according to the configured [`ReconnectPolicy`].
+/// # Tick scheduling
+///
+/// The runtime does **not** poll at a fixed interval. Tick frequency is
+/// determined entirely by frame arrivals and the `next_tick` hint:
+///
+/// - When frames are flowing, `tick()` is called after each frame.
+/// - When the queue is idle and `next_tick` is `Some(d)`, the runtime
+///   wakes after `d` to call `tick()`.
+/// - When the queue is idle and `next_tick` is `None`, the runtime
+///   sleeps indefinitely — only a new frame, `on_error()`, `on_eos()`,
+///   or shutdown will wake it.
+///
+/// Sources that need periodic management (e.g., reconnection with
+/// backoff) **must** return `Some(remaining)` in `next_tick` so the
+/// runtime wakes at the right time. Sources that are purely
+/// frame-driven (e.g., test doubles) can return `None`.
 pub trait MediaIngress: Send + 'static {
     /// Begin producing frames.
     ///
@@ -78,6 +156,39 @@ pub trait MediaIngress: Send + 'static {
     ///
     /// Returns `MediaError` if the source is not paused.
     fn resume(&mut self) -> Result<(), MediaError>;
+
+    /// Drive internal lifecycle management: poll the backend bus for
+    /// errors/events and advance the reconnection state machine.
+    ///
+    /// Called by the runtime after each processed frame and whenever
+    /// the frame queue times out according to the previous
+    /// [`TickOutcome::next_tick`] hint. There is no fixed polling
+    /// interval — tick frequency is entirely event-driven.
+    ///
+    /// Implementations should:
+    ///
+    /// 1. Drain pending bus messages and process lifecycle events.
+    /// 2. If in a reconnecting state and the backoff deadline has elapsed,
+    ///    attempt reconnection.
+    /// 3. Return a [`TickOutcome`] carrying the current status and an
+    ///    optional hint for when the next tick is needed.
+    ///
+    /// The `next_tick` hint allows the runtime to sleep efficiently.
+    /// For example, when reconnecting with a 2-second backoff,
+    /// `next_tick` should be `Some(remaining)` so the runtime wakes
+    /// exactly when the backoff expires. Returning `None` means the
+    /// runtime will wait indefinitely for the next frame/error/EOS.
+    ///
+    /// Sources that need to poll for state changes **must** provide a
+    /// `Some` hint — without one, the runtime will not call `tick()`
+    /// again until a frame or error arrives.
+    ///
+    /// For sources that do not need periodic management (e.g., test
+    /// doubles that produce all frames upfront), the default
+    /// implementation returns [`TickOutcome::running()`].
+    fn tick(&mut self) -> TickOutcome {
+        TickOutcome::running()
+    }
 
     /// The source specification this ingress was created from.
     fn source_spec(&self) -> &SourceSpec;

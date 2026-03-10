@@ -37,3 +37,40 @@ pub enum DegradationReason {
     /// Reason is unspecified or could not be determined.
     Unknown,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_is_not_degraded() {
+        let v = ContextValidity::Valid;
+        assert!(!matches!(v, ContextValidity::Degraded { .. }));
+        assert!(!matches!(v, ContextValidity::Invalid));
+    }
+
+    #[test]
+    fn degraded_carries_reason() {
+        let v = ContextValidity::Degraded {
+            reason: DegradationReason::PtzMoving,
+        };
+        match v {
+            ContextValidity::Degraded { reason } => {
+                assert_eq!(reason, DegradationReason::PtzMoving);
+            }
+            _ => panic!("expected Degraded"),
+        }
+    }
+
+    #[test]
+    fn degradation_reasons_are_distinct() {
+        assert_ne!(DegradationReason::PtzMoving, DegradationReason::LargeJump);
+        assert_ne!(DegradationReason::ZoomChange, DegradationReason::Unknown);
+    }
+
+    #[test]
+    fn invalid_is_terminal() {
+        let v = ContextValidity::Invalid;
+        assert!(matches!(v, ContextValidity::Invalid));
+    }
+}

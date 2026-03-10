@@ -38,7 +38,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nv_core::config::{ReconnectPolicy, SourceSpec};
 use nv_core::error::MediaError;
@@ -46,9 +46,9 @@ use nv_core::health::HealthEvent;
 use nv_core::id::FeedId;
 
 use crate::backend::{EventQueue, GstSession, SessionConfig};
+use crate::ingress::PtzProvider;
 use crate::decode::DecoderSelection;
 use crate::event::MediaEvent;
-use crate::ingress::PtzProvider;
 use crate::ingress::{FrameSink, HealthSink, MediaIngress};
 use crate::pipeline::OutputFormat;
 use crate::reconnect::ReconnectTracker;
@@ -97,6 +97,9 @@ pub struct MediaSource {
     /// Shared event queue: the appsink callback pushes discontinuity events
     /// here, and [`poll_bus()`] drains them alongside GStreamer bus messages.
     event_queue: EventQueue,
+    /// Earliest `Instant` at which the next reconnect attempt is allowed.
+    /// Set when a backoff delay is computed; cleared on successful connect.
+    reconnect_deadline: Option<Instant>,
 }
 
 impl MediaSource {
@@ -113,6 +116,7 @@ impl MediaSource {
             health_sink: None,
             ptz_provider: None,
             event_queue: Arc::new(std::sync::Mutex::new(VecDeque::new())),
+            reconnect_deadline: None,
         }
     }
 
@@ -260,6 +264,7 @@ impl MediaSource {
                 }
                 self.state = SourceState::Running;
                 self.reconnect.reset_attempts();
+                self.reconnect_deadline = None;
                 tracing::info!(feed_id = %self.feed_id, "stream started");
                 self.emit_health(HealthEvent::SourceConnected {
                     feed_id: self.feed_id,
@@ -307,10 +312,7 @@ impl MediaSource {
                     }
                 }
             }
-            MediaEvent::Error {
-                error,
-                debug: debug_detail,
-            } => {
+            MediaEvent::Error { error, debug: debug_detail } => {
                 tracing::warn!(
                     feed_id = %self.feed_id,
                     error = %error,
@@ -329,10 +331,7 @@ impl MediaSource {
                 }
                 self.try_reconnect_or_stop()
             }
-            MediaEvent::Warning {
-                message,
-                debug: debug_detail,
-            } => {
+            MediaEvent::Warning { message, debug: debug_detail } => {
                 tracing::warn!(
                     feed_id = %self.feed_id,
                     message = %message,
@@ -431,6 +430,7 @@ impl MediaSource {
 
         for event in queued_events {
             if let Some(delay) = self.handle_event(event) {
+                self.reconnect_deadline = Some(Instant::now() + delay);
                 return Some(delay);
             }
         }
@@ -447,20 +447,30 @@ impl MediaSource {
         for bus_msg in messages {
             if let Some(event) = bus_msg.into_media_event() {
                 if let Some(delay) = self.handle_event(event) {
+                    self.reconnect_deadline = Some(Instant::now() + delay);
                     reconnect_delay = Some(delay);
                     break;
                 }
             }
         }
 
-        // If in Reconnecting state and no delay was just scheduled, attempt
-        // reconnection now (the previous backoff has presumably elapsed if
-        // the caller is polling).
+        // If in Reconnecting state and no new delay was just scheduled,
+        // attempt reconnection only if the backoff deadline has elapsed.
         if reconnect_delay.is_none() && self.state == SourceState::Reconnecting {
-            match self.try_reconnect() {
-                Ok(()) => {}
-                Err(Some(delay)) => reconnect_delay = Some(delay),
-                Err(None) => {} // stopped permanently
+            let deadline_elapsed = self
+                .reconnect_deadline
+                .map_or(true, |d| Instant::now() >= d);
+            if deadline_elapsed {
+                match self.try_reconnect() {
+                    Ok(()) => {
+                        self.reconnect_deadline = None;
+                    }
+                    Err(Some(delay)) => {
+                        self.reconnect_deadline = Some(Instant::now() + delay);
+                        reconnect_delay = Some(delay);
+                    }
+                    Err(None) => {} // stopped permanently
+                }
             }
         }
 
@@ -635,6 +645,38 @@ impl MediaIngress for MediaSource {
     fn feed_id(&self) -> FeedId {
         self.feed_id
     }
+
+    fn tick(&mut self) -> crate::ingress::TickOutcome {
+        use crate::ingress::TickOutcome;
+
+        // If already stopped or idle, return immediately.
+        match self.state {
+            SourceState::Stopped => return TickOutcome::stopped(),
+            SourceState::Idle => return TickOutcome::running(),
+            _ => {}
+        }
+
+        // Drive bus polling — this processes pending GStreamer messages and
+        // pending discontinuity events, advancing the reconnection FSM.
+        let _reconnect_delay = self.poll_bus();
+
+        // Map the resulting state and compute the next-tick hint.
+        match self.state {
+            SourceState::Running | SourceState::Paused | SourceState::Idle => {
+                TickOutcome::running()
+            }
+            SourceState::Reconnecting => {
+                // Return the remaining backoff as the next-tick hint so
+                // the worker can sleep precisely instead of polling.
+                let remaining = self
+                    .reconnect_deadline
+                    .map(|d| d.saturating_duration_since(Instant::now()))
+                    .unwrap_or(Duration::ZERO);
+                TickOutcome::reconnecting(remaining)
+            }
+            SourceState::Stopped => TickOutcome::stopped(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -644,3 +686,5 @@ impl MediaIngress for MediaSource {
 #[cfg(test)]
 #[path = "source_tests.rs"]
 mod tests;
+
+

@@ -3,10 +3,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use nv_core::TypedMetadata;
 use nv_core::health::HealthEvent;
 use nv_core::id::FeedId;
 use nv_core::timestamp::{MonotonicTs, WallTs};
+use nv_core::TypedMetadata;
 use nv_perception::{DerivedSignal, DetectionSet, SceneFeature, Track};
 use nv_view::ViewState;
 use tokio::sync::broadcast;
@@ -49,10 +49,17 @@ pub struct OutputEnvelope {
 
 /// User-implementable trait: receives structured outputs from the pipeline.
 ///
-/// `emit()` is called on the per-feed worker thread after stage execution
-/// completes for each frame. It is wrapped in `catch_unwind` — a panicking
-/// sink emits a [`HealthEvent::SinkPanic`] and the output is dropped, but
-/// the feed continues.
+/// `emit()` is called on a dedicated per-feed sink thread, decoupled from
+/// the feed's processing loop by a bounded queue. This isolation ensures
+/// that a slow sink does not block perception.
+///
+/// The output arrives as `Arc<OutputEnvelope>` for zero-copy handoff.
+/// Sinks that need an owned copy can call `Arc::unwrap_or_clone()` or
+/// clone specific fields as needed.
+///
+/// `emit()` is wrapped in `catch_unwind` — a panicking sink emits a
+/// [`HealthEvent::SinkPanic`] and the output is dropped, but the feed
+/// continues.
 ///
 /// `emit()` is deliberately **not** async and **not** fallible:
 ///
@@ -61,7 +68,7 @@ pub struct OutputEnvelope {
 ///   must never block on downstream consumption.
 pub trait OutputSink: Send + 'static {
     /// Receive a processed output envelope.
-    fn emit(&self, output: OutputEnvelope);
+    fn emit(&self, output: Arc<OutputEnvelope>);
 }
 
 /// Arc-wrapped output envelope for zero-copy broadcast fan-out.
@@ -182,7 +189,10 @@ impl LagDetector {
     pub fn check_after_send(&self, health_tx: &broadcast::Sender<HealthEvent>) {
         use std::sync::atomic::Ordering;
 
-        let sends = self.sends_since_check.fetch_add(1, Ordering::Relaxed) + 1;
+        let sends = self
+            .sends_since_check
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
 
         // The sentinel hasn't consumed any messages since the last drain.
         // It can only observe Lagged(n) when the ring buffer wraps past
@@ -329,10 +339,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use nv_core::TypedMetadata;
     use nv_core::health::HealthEvent;
     use nv_core::id::FeedId;
     use nv_core::timestamp::{MonotonicTs, WallTs};
+    use nv_core::TypedMetadata;
     use nv_perception::DetectionSet;
     use nv_view::ViewState;
     use tokio::sync::broadcast;
@@ -378,10 +388,7 @@ mod tests {
         (tx, detector)
     }
 
-    fn make_health() -> (
-        broadcast::Sender<HealthEvent>,
-        broadcast::Receiver<HealthEvent>,
-    ) {
+    fn make_health() -> (broadcast::Sender<HealthEvent>, broadcast::Receiver<HealthEvent>) {
         broadcast::channel(128)
     }
 
@@ -535,15 +542,9 @@ mod tests {
 
         // Should report only the loss from this interval, not from the
         // pre-realign window.
-        assert!(
-            !d3.is_empty(),
-            "new window should produce its own lag events"
-        );
+        assert!(!d3.is_empty(), "new window should produce its own lag events");
         let total: u64 = d3.iter().sum();
-        assert!(
-            total > 0 && total <= 2,
-            "delta should reflect only new-window loss"
-        );
+        assert!(total > 0 && total <= 2, "delta should reflect only new-window loss");
     }
 
     // D.5: flush_pending_emits_final_delta

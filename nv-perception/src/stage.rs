@@ -45,6 +45,42 @@ use nv_core::TypedMetadata;
 use nv_frame::FrameEnvelope;
 use nv_view::{ViewEpoch, ViewSnapshot};
 
+/// Optional category hint for a perception stage.
+///
+/// Does not affect execution order or behavior — the pipeline executor
+/// treats all stages uniformly. Categories serve as:
+///
+/// - **Documentation** — makes pipeline composition self-describing.
+/// - **Metrics grouping** — category-aware dashboards and provenance.
+/// - **Composition validation** — pipeline builders can warn about
+///   unusual orderings (e.g., a tracker before a detector).
+///
+/// Stages report their category via [`Stage::category()`], which defaults
+/// to [`StageCategory::Custom`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StageCategory {
+    /// Reads frame pixel data, produces detections and/or scene features.
+    ///
+    /// Examples: object detector, feature extractor, background subtractor.
+    FrameAnalysis,
+    /// Reads detections (and optionally temporal state), produces tracks.
+    ///
+    /// Examples: multi-object tracker, re-identification matcher.
+    Association,
+    /// Reads temporal state and accumulated artifacts, produces derived
+    /// signals or scene-level features.
+    ///
+    /// Examples: trajectory analyzer, anomaly detector, dwell-time estimator.
+    TemporalAnalysis,
+    /// Reads accumulated artifacts and performs side-effect output.
+    ///
+    /// Returns empty [`StageOutput`] — does not modify the artifact accumulator.
+    /// Examples: structured logger, metric exporter, event publisher.
+    Sink,
+    /// Uncategorized or multi-purpose stage.
+    Custom,
+}
+
 /// Context provided to every stage invocation.
 ///
 /// Contains the current frame, accumulated artifacts from prior stages,
@@ -231,5 +267,13 @@ pub trait Stage: Send + 'static {
     /// adapt here. The `new_epoch` value identifies the new view epoch.
     fn on_view_epoch_change(&mut self, _new_epoch: ViewEpoch) -> Result<(), StageError> {
         Ok(())
+    }
+
+    /// Optional category hint for this stage.
+    ///
+    /// Defaults to [`StageCategory::Custom`]. Override to enable
+    /// composition validation and category-aware metrics.
+    fn category(&self) -> StageCategory {
+        StageCategory::Custom
     }
 }

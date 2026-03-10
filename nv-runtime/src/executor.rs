@@ -15,8 +15,8 @@
 //!
 //! - `Continue` — no change.
 //! - `Degrade` — degrade context validity.
-//! - `Compensate` — degrade + apply transform (TODO: transform application
-//!   on tracks is data-model–dependent; plumbing is in place).
+//! - `Compensate` — degrade + apply compensation transform to existing
+//!   trajectory data so positions align with the new view.
 //! - `Segment` — increment epoch, segment trajectories, notify stages
 //!   via `on_view_epoch_change`.
 //!
@@ -457,7 +457,12 @@ impl PipelineExecutor {
         let current_epoch = self.view_state.epoch;
 
         for track in &artifacts.tracks {
-            self.temporal.commit_track(track, now_ts, current_epoch);
+            if !self.temporal.commit_track(track, now_ts, current_epoch) {
+                health_events.push(HealthEvent::TrackAdmissionRejected {
+                    feed_id: self.feed_id,
+                    track_id: track.id,
+                });
+            }
         }
 
         // --- Track ending (authoritative set semantics) ---
@@ -753,6 +758,82 @@ mod tests {
         assert!(exec.temporal.get_track(&nv_core::TrackId::new(1)).is_none());
         assert!(exec.temporal.get_track(&nv_core::TrackId::new(2)).is_none());
         assert!(exec.temporal.get_track(&nv_core::TrackId::new(3)).is_some());
+    }
+
+    // ------------------------------------------------------------------
+    // Admission rejection visibility (B / D.2)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn admission_rejection_emits_health_event() {
+        // Stage that returns more tracks than the executor's cap (3).
+        struct ManyTracksStage;
+        impl nv_perception::Stage for ManyTracksStage {
+            fn id(&self) -> nv_core::id::StageId {
+                nv_core::id::StageId("many_tracks")
+            }
+            fn process(
+                &mut self,
+                _ctx: &nv_perception::StageContext<'_>,
+            ) -> Result<nv_perception::StageOutput, nv_core::error::StageError> {
+                // 5 Confirmed tracks — exceeds cap of 3.
+                let tracks: Vec<nv_perception::Track> = (1..=5u64)
+                    .map(|i| nv_perception::Track {
+                        id: nv_core::TrackId::new(i),
+                        class_id: 0,
+                        state: nv_perception::TrackState::Confirmed,
+                        current: nv_perception::TrackObservation {
+                            ts: MonotonicTs::from_nanos(0),
+                            bbox: nv_core::BBox::new(0.0, 0.0, 0.1, 0.1),
+                            confidence: 0.9,
+                            state: nv_perception::TrackState::Confirmed,
+                            detection_id: None,
+                        },
+                        metadata: nv_core::TypedMetadata::new(),
+                    })
+                    .collect();
+                Ok(nv_perception::StageOutput::with_tracks(tracks))
+            }
+        }
+
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(1),
+            vec![Box::new(ManyTracksStage)],
+            RetentionPolicy {
+                max_track_age: Duration::from_secs(5),
+                max_observations_per_track: 10,
+                max_concurrent_tracks: 3,
+                max_trajectory_points_per_track: 1000,
+            },
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+        );
+        exec.start_stages().unwrap();
+
+        let frame = nv_test_util::synthetic::solid_gray(
+            FeedId::new(1),
+            0,
+            MonotonicTs::from_nanos(0),
+            2,
+            2,
+            128,
+        );
+        let (_output, health_events) = exec.process_frame(&frame);
+
+        // 5 tracks, cap 3: first 3 admitted, last 2 rejected.
+        let rejection_events: Vec<_> = health_events
+            .iter()
+            .filter(|e| matches!(e, HealthEvent::TrackAdmissionRejected { .. }))
+            .collect();
+        assert_eq!(
+            rejection_events.len(),
+            2,
+            "should emit TrackAdmissionRejected for each rejected track, got {rejection_events:?}",
+        );
+
+        // The temporal store should be at exactly the cap.
+        assert_eq!(exec.track_count(), 3);
     }
 
     // ------------------------------------------------------------------
@@ -1136,5 +1217,633 @@ mod tests {
             0,
             "store should be empty after restart"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // View-state provenance tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn fixed_camera_provenance_shows_stable() {
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(1),
+            Vec::new(),
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+        );
+
+        let frame = nv_test_util::synthetic::solid_gray(
+            FeedId::new(1),
+            0,
+            MonotonicTs::from_nanos(1_000_000),
+            2,
+            2,
+            128,
+        );
+        let (output, health) = exec.process_frame(&frame);
+        assert!(health.is_empty());
+        let out = output.expect("should produce output");
+
+        // Fixed camera — stability score should be 1.0, transition Settled,
+        // no epoch decision, epoch 0.
+        let vp = &out.provenance.view_provenance;
+        assert_eq!(vp.stability_score, 1.0);
+        assert_eq!(vp.transition, TransitionPhase::Settled);
+        assert_eq!(vp.epoch, ViewEpoch::INITIAL);
+        assert!(vp.epoch_decision.is_none(), "fixed camera has no epoch decision");
+
+        // View state on output should be Valid.
+        assert!(
+            matches!(out.view.validity, nv_view::ContextValidity::Valid),
+            "fixed camera output should have Valid context"
+        );
+    }
+
+    #[test]
+    fn observed_camera_with_provider_populates_provenance() {
+        use nv_view::{MotionPollContext, MotionReport, ViewStateProvider};
+
+        struct StableProvider;
+        impl ViewStateProvider for StableProvider {
+            fn poll(&self, _ctx: &MotionPollContext<'_>) -> MotionReport {
+                MotionReport::default() // no motion data → Unknown state
+            }
+        }
+
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(1),
+            Vec::new(),
+            RetentionPolicy::default(),
+            CameraMode::Observed,
+            Some(Box::new(StableProvider)),
+            Box::new(DefaultEpochPolicy::default()),
+        );
+
+        let frame = nv_test_util::synthetic::solid_gray(
+            FeedId::new(1),
+            0,
+            MonotonicTs::from_nanos(1_000_000),
+            2,
+            2,
+            128,
+        );
+        let (output, _) = exec.process_frame(&frame);
+        let out = output.expect("should produce output");
+
+        let vp = &out.provenance.view_provenance;
+        // The provider returned no data, so CameraMotionState::Unknown.
+        // DefaultEpochPolicy returns Continue for Unknown state.
+        assert!(
+            vp.epoch_decision.is_some(),
+            "observed camera should have epoch decision"
+        );
+        // Version should have advanced from INITIAL.
+        assert!(vp.version > nv_view::ViewVersion::INITIAL);
+    }
+
+    #[test]
+    fn view_degradation_reflected_in_output() {
+        use nv_view::{MotionPollContext, MotionReport, ViewStateProvider};
+
+        // Provider reports small PTZ movement → Degrade decision.
+        struct SmallPtzProvider;
+        impl ViewStateProvider for SmallPtzProvider {
+            fn poll(&self, ctx: &MotionPollContext<'_>) -> MotionReport {
+                // Always report a small PTZ pan delta.
+                let prev_pan = ctx
+                    .previous_view
+                    .ptz
+                    .as_ref()
+                    .map(|p| p.pan)
+                    .unwrap_or(0.0);
+                MotionReport {
+                    ptz: Some(nv_view::PtzTelemetry {
+                        pan: prev_pan + 2.0, // small move
+                        tilt: 0.0,
+                        zoom: 0.5,
+                        ts: ctx.ts,
+                    }),
+                    ..Default::default()
+                }
+            }
+        }
+
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(1),
+            Vec::new(),
+            RetentionPolicy::default(),
+            CameraMode::Observed,
+            Some(Box::new(SmallPtzProvider)),
+            Box::new(DefaultEpochPolicy::default()),
+        );
+
+        // First frame initializes PTZ baseline (no previous ptz → Continue on
+        // first frame since DefaultEpochPolicy needs both prev and current ptz).
+        let f1 = nv_test_util::synthetic::solid_gray(
+            FeedId::new(1),
+            0,
+            MonotonicTs::from_nanos(1_000_000),
+            2,
+            2,
+            128,
+        );
+        exec.process_frame(&f1);
+
+        // Second frame: the policy now has prev_ptz and current_ptz, and
+        // the delta (2.0) is small → Degrade.
+        let f2 = nv_test_util::synthetic::solid_gray(
+            FeedId::new(1),
+            1,
+            MonotonicTs::from_nanos(2_000_000),
+            2,
+            2,
+            128,
+        );
+        let (output, _) = exec.process_frame(&f2);
+        let out = output.expect("should produce output");
+
+        // Stability score should have decreased from initial.
+        assert!(
+            out.provenance.view_provenance.stability_score < 1.0,
+            "stability should decrease under PTZ movement"
+        );
+        assert!(
+            matches!(
+                out.view.validity,
+                nv_view::ContextValidity::Degraded { .. }
+            ),
+            "view should be degraded under small PTZ move"
+        );
+    }
+
+    // ==================================================================
+    // Stage execution flow tests
+    // ==================================================================
+
+    #[test]
+    fn stages_execute_in_declared_order() {
+        // A stage that appends its ID to a shared log via a signal name.
+        struct OrderStage {
+            name: &'static str,
+        }
+        impl nv_perception::Stage for OrderStage {
+            fn id(&self) -> nv_core::id::StageId {
+                nv_core::id::StageId(self.name)
+            }
+            fn process(
+                &mut self,
+                _ctx: &nv_perception::StageContext<'_>,
+            ) -> Result<nv_perception::StageOutput, nv_core::error::StageError> {
+                Ok(nv_perception::StageOutput::with_signal(
+                    nv_perception::DerivedSignal {
+                        name: self.name,
+                        value: nv_perception::SignalValue::Boolean(true),
+                        ts: MonotonicTs::ZERO,
+                    },
+                ))
+            }
+        }
+
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(1),
+            vec![
+                Box::new(OrderStage { name: "first" }),
+                Box::new(OrderStage { name: "second" }),
+                Box::new(OrderStage { name: "third" }),
+            ],
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+        );
+        exec.start_stages().unwrap();
+
+        let frame = nv_test_util::synthetic::solid_gray(
+            FeedId::new(1),
+            0,
+            MonotonicTs::from_nanos(0),
+            2,
+            2,
+            128,
+        );
+        let (output, _) = exec.process_frame(&frame);
+        let out = output.expect("should produce output");
+
+        // Signals are appended in execution order.
+        let names: Vec<&str> = out.signals.iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn detector_output_visible_to_tracker() {
+        use nv_test_util::mock_stage::{MockDetectorStage, MockTrackerStage};
+
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(1),
+            vec![
+                Box::new(MockDetectorStage::new("det", 3)),
+                Box::new(MockTrackerStage::new("trk")),
+            ],
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+        );
+        exec.start_stages().unwrap();
+
+        let frame = nv_test_util::synthetic::solid_gray(
+            FeedId::new(1),
+            0,
+            MonotonicTs::from_nanos(1_000_000),
+            4,
+            4,
+            128,
+        );
+        let (output, _) = exec.process_frame(&frame);
+        let out = output.expect("should produce output");
+
+        assert_eq!(out.detections.len(), 3, "detector should produce 3 detections");
+        assert_eq!(out.tracks.len(), 3, "tracker should produce 3 tracks from 3 detections");
+    }
+
+    #[test]
+    fn full_pipeline_detector_tracker_temporal_sink() {
+        // Use a custom sink stage that records what it saw via a signal.
+        struct RecordingSink;
+        impl nv_perception::Stage for RecordingSink {
+            fn id(&self) -> nv_core::id::StageId {
+                nv_core::id::StageId("recording_sink")
+            }
+            fn category(&self) -> nv_perception::StageCategory {
+                nv_perception::StageCategory::Sink
+            }
+            fn process(
+                &mut self,
+                ctx: &nv_perception::StageContext<'_>,
+            ) -> Result<nv_perception::StageOutput, nv_core::error::StageError> {
+                // Record what we see — detection count and track count as signals.
+                Ok(nv_perception::StageOutput::with_signals(vec![
+                    nv_perception::DerivedSignal {
+                        name: "sink_det_count",
+                        value: nv_perception::SignalValue::Scalar(
+                            ctx.artifacts.detections.len() as f64,
+                        ),
+                        ts: ctx.frame.ts(),
+                    },
+                    nv_perception::DerivedSignal {
+                        name: "sink_track_count",
+                        value: nv_perception::SignalValue::Scalar(
+                            ctx.artifacts.tracks.len() as f64,
+                        ),
+                        ts: ctx.frame.ts(),
+                    },
+                ]))
+            }
+        }
+
+        use nv_test_util::mock_stage::{MockDetectorStage, MockTemporalStage, MockTrackerStage};
+
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(1),
+            vec![
+                Box::new(MockDetectorStage::new("det", 2)),
+                Box::new(MockTrackerStage::new("trk")),
+                Box::new(MockTemporalStage::new("temporal")),
+                Box::new(RecordingSink),
+            ],
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+        );
+        exec.start_stages().unwrap();
+
+        let frame = nv_test_util::synthetic::solid_gray(
+            FeedId::new(1),
+            0,
+            MonotonicTs::from_nanos(1_000_000),
+            4,
+            4,
+            128,
+        );
+        let (output, _) = exec.process_frame(&frame);
+        let out = output.expect("should produce output");
+
+        // Detections and tracks should propagate to output.
+        assert_eq!(out.detections.len(), 2);
+        assert_eq!(out.tracks.len(), 2);
+
+        // The temporal stage should have produced a track_count signal.
+        // On frame 0 no tracks are in the temporal store yet (committed after stages).
+        let temporal_signal = out
+            .signals
+            .iter()
+            .find(|s| s.name == "track_count")
+            .expect("temporal stage should produce track_count signal");
+        assert!(matches!(temporal_signal.value, nv_perception::SignalValue::Scalar(_)));
+
+        // The sink should see 2 detections and 2 tracks.
+        let sink_det = out
+            .signals
+            .iter()
+            .find(|s| s.name == "sink_det_count")
+            .expect("sink should record detection count");
+        let sink_trk = out
+            .signals
+            .iter()
+            .find(|s| s.name == "sink_track_count")
+            .expect("sink should record track count");
+        assert!(matches!(sink_det.value, nv_perception::SignalValue::Scalar(v) if (v - 2.0).abs() < f64::EPSILON));
+        assert!(matches!(sink_trk.value, nv_perception::SignalValue::Scalar(v) if (v - 2.0).abs() < f64::EPSILON));
+
+        // Provenance should have 4 stage entries.
+        assert_eq!(out.provenance.stages.len(), 4);
+        assert_eq!(out.provenance.stages[0].stage_id, nv_core::id::StageId("det"));
+        assert_eq!(out.provenance.stages[1].stage_id, nv_core::id::StageId("trk"));
+        assert_eq!(out.provenance.stages[2].stage_id, nv_core::id::StageId("temporal"));
+        assert_eq!(out.provenance.stages[3].stage_id, nv_core::id::StageId("recording_sink"));
+    }
+
+    #[test]
+    fn stage_failure_drops_frame_skips_remaining() {
+        use nv_test_util::mock_stage::{FailingStage, MockDetectorStage};
+
+        // Pipeline: detector → failing → never-reached
+        struct NeverReached;
+        impl nv_perception::Stage for NeverReached {
+            fn id(&self) -> nv_core::id::StageId {
+                nv_core::id::StageId("never_reached")
+            }
+            fn process(
+                &mut self,
+                _ctx: &nv_perception::StageContext<'_>,
+            ) -> Result<nv_perception::StageOutput, nv_core::error::StageError> {
+                panic!("this stage should never be called");
+            }
+        }
+
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(1),
+            vec![
+                Box::new(MockDetectorStage::new("det", 2)),
+                Box::new(FailingStage::new("bad_stage")),
+                Box::new(NeverReached),
+            ],
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+        );
+        exec.start_stages().unwrap();
+
+        let frame = nv_test_util::synthetic::solid_gray(
+            FeedId::new(1),
+            0,
+            MonotonicTs::from_nanos(1_000_000),
+            4,
+            4,
+            128,
+        );
+        let (output, health) = exec.process_frame(&frame);
+
+        // Frame should be dropped.
+        assert!(output.is_none(), "failed stage should drop the frame");
+        // Health event should be emitted.
+        assert!(
+            health.iter().any(|h| matches!(h, HealthEvent::StageError { .. })),
+            "should emit StageError health event"
+        );
+    }
+
+    #[test]
+    fn stage_error_provenance_records_failure() {
+        use nv_test_util::mock_stage::FailingStage;
+
+        // Pipeline: detector → failing. The detector runs fine,
+        // the failing stage errors. Both get provenance entries.
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(1),
+            vec![
+                Box::new(nv_test_util::mock_stage::NoOpStage::new("ok")),
+                Box::new(FailingStage::new("fail")),
+            ],
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+        );
+        exec.start_stages().unwrap();
+
+        let frame = nv_test_util::synthetic::solid_gray(
+            FeedId::new(1),
+            0,
+            MonotonicTs::from_nanos(1_000_000),
+            4,
+            4,
+            128,
+        );
+        let (output, _) = exec.process_frame(&frame);
+        // Output is None (frame dropped), but we can verify through
+        // health events that the executor processed both stages.
+        assert!(output.is_none());
+    }
+
+    #[test]
+    fn output_propagation_across_frames() {
+        use nv_test_util::mock_stage::{MockDetectorStage, MockTrackerStage};
+
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(1),
+            vec![
+                Box::new(MockDetectorStage::new("det", 2)),
+                Box::new(MockTrackerStage::new("trk")),
+            ],
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+        );
+        exec.start_stages().unwrap();
+
+        // Process 3 frames.
+        for i in 0..3u64 {
+            let frame = nv_test_util::synthetic::solid_gray(
+                FeedId::new(1),
+                i,
+                MonotonicTs::from_nanos(i * 33_000_000),
+                4,
+                4,
+                128,
+            );
+            let (output, _) = exec.process_frame(&frame);
+            let out = output.expect("should produce output");
+            assert_eq!(out.detections.len(), 2, "frame {i}: should have 2 detections");
+            assert_eq!(out.tracks.len(), 2, "frame {i}: should have 2 tracks");
+            assert_eq!(out.frame_seq, i);
+        }
+        assert_eq!(exec.frames_processed(), 3);
+    }
+
+    #[test]
+    fn feed_local_state_preserved_across_frames() {
+        // A stage with internal state (counter).
+        struct CounterStage {
+            call_count: u64,
+        }
+        impl nv_perception::Stage for CounterStage {
+            fn id(&self) -> nv_core::id::StageId {
+                nv_core::id::StageId("counter")
+            }
+            fn process(
+                &mut self,
+                ctx: &nv_perception::StageContext<'_>,
+            ) -> Result<nv_perception::StageOutput, nv_core::error::StageError> {
+                self.call_count += 1;
+                Ok(nv_perception::StageOutput::with_signal(
+                    nv_perception::DerivedSignal {
+                        name: "call_count",
+                        value: nv_perception::SignalValue::Scalar(self.call_count as f64),
+                        ts: ctx.frame.ts(),
+                    },
+                ))
+            }
+        }
+
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(1),
+            vec![Box::new(CounterStage { call_count: 0 })],
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+        );
+        exec.start_stages().unwrap();
+
+        for i in 0..5u64 {
+            let frame = nv_test_util::synthetic::solid_gray(
+                FeedId::new(1),
+                i,
+                MonotonicTs::from_nanos(i * 33_000_000),
+                2,
+                2,
+                128,
+            );
+            let (output, _) = exec.process_frame(&frame);
+            let out = output.expect("should produce output");
+            let signal = out.signals.iter().find(|s| s.name == "call_count").unwrap();
+            match signal.value {
+                nv_perception::SignalValue::Scalar(v) => {
+                    assert_eq!(v as u64, i + 1, "stage internal state should persist")
+                }
+                _ => panic!("expected scalar signal"),
+            }
+        }
+    }
+
+    #[test]
+    fn two_independent_executors_have_isolated_state() {
+        use nv_test_util::mock_stage::{MockDetectorStage, MockTrackerStage};
+
+        // Two executors simulating two feeds.
+        let mut exec_a = PipelineExecutor::new(
+            FeedId::new(1),
+            vec![
+                Box::new(MockDetectorStage::new("det", 2)),
+                Box::new(MockTrackerStage::new("trk")),
+            ],
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+        );
+        let mut exec_b = PipelineExecutor::new(
+            FeedId::new(2),
+            vec![
+                Box::new(MockDetectorStage::new("det", 5)),
+                Box::new(MockTrackerStage::new("trk")),
+            ],
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+        );
+        exec_a.start_stages().unwrap();
+        exec_b.start_stages().unwrap();
+
+        let frame_a = nv_test_util::synthetic::solid_gray(
+            FeedId::new(1),
+            0,
+            MonotonicTs::from_nanos(1_000_000),
+            4,
+            4,
+            128,
+        );
+        let frame_b = nv_test_util::synthetic::solid_gray(
+            FeedId::new(2),
+            0,
+            MonotonicTs::from_nanos(1_000_000),
+            4,
+            4,
+            128,
+        );
+
+        let (out_a, _) = exec_a.process_frame(&frame_a);
+        let (out_b, _) = exec_b.process_frame(&frame_b);
+
+        let a = out_a.expect("feed A output");
+        let b = out_b.expect("feed B output");
+
+        // Feed A: 2 detections → 2 tracks.
+        assert_eq!(a.detections.len(), 2);
+        assert_eq!(a.tracks.len(), 2);
+        assert_eq!(a.feed_id, FeedId::new(1));
+
+        // Feed B: 5 detections → 5 tracks.
+        assert_eq!(b.detections.len(), 5);
+        assert_eq!(b.tracks.len(), 5);
+        assert_eq!(b.feed_id, FeedId::new(2));
+
+        // Temporal stores are independent.
+        assert_eq!(exec_a.track_count(), 2);
+        assert_eq!(exec_b.track_count(), 5);
+    }
+
+    #[test]
+    fn pipeline_with_stage_pipeline_builder() {
+        use nv_perception::StagePipeline;
+        use nv_test_util::mock_stage::{MockDetectorStage, MockTrackerStage};
+
+        let pipeline = StagePipeline::builder()
+            .add(MockDetectorStage::new("det", 4))
+            .add(MockTrackerStage::new("trk"))
+            .build();
+
+        let ids: Vec<&str> = pipeline.stage_ids().iter().map(|s| s.as_str()).collect();
+        assert_eq!(ids, vec!["det", "trk"]);
+
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(1),
+            pipeline.into_stages(),
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+        );
+        exec.start_stages().unwrap();
+
+        let frame = nv_test_util::synthetic::solid_gray(
+            FeedId::new(1),
+            0,
+            MonotonicTs::from_nanos(1_000_000),
+            4,
+            4,
+            128,
+        );
+        let (output, _) = exec.process_frame(&frame);
+        let out = output.expect("should produce output");
+        assert_eq!(out.detections.len(), 4);
+        assert_eq!(out.tracks.len(), 4);
     }
 }

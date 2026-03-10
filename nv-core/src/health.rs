@@ -17,7 +17,10 @@ pub enum HealthEvent {
     SourceConnected { feed_id: FeedId },
 
     /// The video source disconnected.
-    SourceDisconnected { feed_id: FeedId, reason: MediaError },
+    SourceDisconnected {
+        feed_id: FeedId,
+        reason: MediaError,
+    },
 
     /// The video source is attempting to reconnect.
     SourceReconnecting { feed_id: FeedId, attempt: u32 },
@@ -34,10 +37,16 @@ pub enum HealthEvent {
     StagePanic { feed_id: FeedId, stage_id: StageId },
 
     /// The feed is restarting.
-    FeedRestarting { feed_id: FeedId, restart_count: u32 },
+    FeedRestarting {
+        feed_id: FeedId,
+        restart_count: u32,
+    },
 
     /// The feed has stopped permanently.
-    FeedStopped { feed_id: FeedId, reason: StopReason },
+    FeedStopped {
+        feed_id: FeedId,
+        reason: StopReason,
+    },
 
     /// Frames were dropped due to backpressure.
     BackpressureDrop {
@@ -116,6 +125,31 @@ pub enum HealthEvent {
     /// The runtime wraps `OutputSink::emit()` in `catch_unwind` to
     /// prevent a misbehaving sink from tearing down the worker thread.
     SinkPanic { feed_id: FeedId },
+
+    /// The per-feed sink queue is full — output was dropped.
+    ///
+    /// The feed continues processing; only the output delivery is
+    /// dropped to prevent slow downstream I/O from blocking the
+    /// perception pipeline.
+    ///
+    /// `outputs_dropped` is the number of outputs dropped since the
+    /// last `SinkBackpressure` event (per-event delta).
+    SinkBackpressure {
+        feed_id: FeedId,
+        outputs_dropped: u64,
+    },
+
+    /// A new track was rejected by the temporal store's admission
+    /// control because the hard cap was reached and no evictable
+    /// candidates (Lost/Coasted/Tentative) were available.
+    ///
+    /// The feed continues processing. This event indicates tracker
+    /// saturation — the scene has more confirmed objects than
+    /// `max_concurrent_tracks` allows.
+    TrackAdmissionRejected {
+        feed_id: FeedId,
+        track_id: crate::TrackId,
+    },
 }
 
 /// Reason a feed stopped permanently.

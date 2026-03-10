@@ -1342,12 +1342,16 @@ Every output carries full provenance of which stages ran, how long each took, wh
 
 ```rust
 /// User-implementable. Receives structured outputs from the pipeline.
+///
+/// `emit` receives an `Arc<OutputEnvelope>` — the same Arc that is
+/// broadcast to subscribers, so zero cloning is needed when multiple
+/// consumers share the same output.
 pub trait OutputSink: Send + Sync + 'static {
-    fn emit(&self, output: OutputEnvelope);
+    fn emit(&self, output: Arc<OutputEnvelope>);
 }
 ```
 
-`emit` is deliberately not `async` and not fallible. If the user's sink needs async I/O, it should internally buffer/channel. If it fails, it should log and drop. The perception pipeline must not block on downstream consumption.
+`emit` is deliberately not `async` and not fallible. The per-feed sink worker calls `emit` on a dedicated thread, so a slow sink cannot block the perception pipeline. If the user's sink needs async I/O, it should internally buffer/channel. If it fails, it should log and drop.
 
 ---
 

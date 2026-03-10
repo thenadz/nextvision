@@ -15,7 +15,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nv_frame::FrameEnvelope;
 
@@ -30,6 +30,17 @@ pub(crate) enum PushOutcome {
     DroppedOldest,
     /// Queue was full or closed: the incoming frame was discarded.
     Rejected,
+}
+
+/// Result from a [`FrameQueue::pop`] call with deadline support.
+#[derive(Debug)]
+pub(crate) enum PopResult {
+    /// A frame was available and returned.
+    Frame(FrameEnvelope),
+    /// The queue was closed or shutdown was requested.
+    Closed,
+    /// The deadline elapsed with no frame available.
+    Timeout,
 }
 
 /// Internal mutable state behind the lock.
@@ -47,6 +58,9 @@ struct QueueInner {
 /// for simplicity and correctness — contention is minimal because the
 /// producer pushes at frame rate (~30 Hz) and the consumer pops at
 /// processing rate.
+///
+/// Shutdown and close are event-driven: [`wake_consumer()`](Self::wake_consumer)
+/// notifies the consumer condvar so there is no fixed polling delay.
 pub(crate) struct FrameQueue {
     inner: Mutex<QueueInner>,
     /// Signaled when a frame is pushed (wakes the consumer).
@@ -56,9 +70,6 @@ pub(crate) struct FrameQueue {
     depth: usize,
     policy: BackpressurePolicy,
 }
-
-/// Poll timeout for checking shutdown between waits.
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 impl FrameQueue {
     /// Create a new bounded frame queue.
@@ -111,8 +122,7 @@ impl FrameQueue {
             BackpressurePolicy::Block { .. } => {
                 // Block until space is available or the queue is closed.
                 while inner.buf.len() >= self.depth && !inner.closed {
-                    let (guard, _) = self.not_full.wait_timeout(inner, POLL_INTERVAL).unwrap();
-                    inner = guard;
+                    inner = self.not_full.wait(inner).unwrap();
                 }
                 if inner.closed {
                     return PushOutcome::Rejected;
@@ -124,23 +134,56 @@ impl FrameQueue {
         }
     }
 
-    /// Pop the next frame, blocking until one is available.
+    /// Pop the next frame, blocking until one is available or the deadline
+    /// elapses.
     ///
-    /// Returns `None` if the queue has been closed or `shutdown` is set.
+    /// - `shutdown` — checked on every wake; returns `Closed` when set.
+    /// - `deadline` — if `Some`, returns `Timeout` when the deadline passes
+    ///   with no frame available. If `None`, waits indefinitely (pure
+    ///   event-driven — woken by push, close, or
+    ///   [`wake_consumer()`](Self::wake_consumer)).
+    ///
     /// Called from the feed worker thread.
-    pub fn pop(&self, shutdown: &AtomicBool) -> Option<FrameEnvelope> {
+    pub fn pop(&self, shutdown: &AtomicBool, deadline: Option<Instant>) -> PopResult {
         let mut inner = self.inner.lock().unwrap();
         loop {
             if let Some(frame) = inner.buf.pop_front() {
                 self.not_full.notify_one();
-                return Some(frame);
+                return PopResult::Frame(frame);
             }
             if inner.closed || shutdown.load(Ordering::Relaxed) {
-                return None;
+                return PopResult::Closed;
             }
-            let (guard, _) = self.not_empty.wait_timeout(inner, POLL_INTERVAL).unwrap();
-            inner = guard;
+            match deadline {
+                Some(dl) => {
+                    let now = Instant::now();
+                    if now >= dl {
+                        return PopResult::Timeout;
+                    }
+                    let (guard, result) =
+                        self.not_empty.wait_timeout(inner, dl - now).unwrap();
+                    inner = guard;
+                    // If timed out and still empty, return Timeout.
+                    if result.timed_out() && inner.buf.is_empty() {
+                        if inner.closed || shutdown.load(Ordering::Relaxed) {
+                            return PopResult::Closed;
+                        }
+                        return PopResult::Timeout;
+                    }
+                }
+                None => {
+                    inner = self.not_empty.wait(inner).unwrap();
+                }
+            }
         }
+    }
+
+    /// Wake the consumer without pushing a frame.
+    ///
+    /// Used by the shutdown path to break the consumer out of a
+    /// `Condvar::wait` without the fixed polling delay.
+    pub fn wake_consumer(&self) {
+        self.not_empty.notify_all();
     }
 
     /// Close the queue: reject future pushes and wake all waiters.
@@ -197,7 +240,9 @@ mod tests {
         assert_eq!(q.len(), 2);
 
         let shutdown = AtomicBool::new(false);
-        let f = q.pop(&shutdown).unwrap();
+        let PopResult::Frame(f) = q.pop(&shutdown, None) else {
+            panic!("expected frame");
+        };
         assert_eq!(f.seq(), 0);
         assert_eq!(q.len(), 1);
     }
@@ -212,7 +257,9 @@ mod tests {
 
         let shutdown = AtomicBool::new(false);
         // Frame 0 was evicted; first available is frame 1.
-        let f = q.pop(&shutdown).unwrap();
+        let PopResult::Frame(f) = q.pop(&shutdown, None) else {
+            panic!("expected frame");
+        };
         assert_eq!(f.seq(), 1);
 
         let (received, dropped) = q.stats();
@@ -230,7 +277,9 @@ mod tests {
 
         let shutdown = AtomicBool::new(false);
         // Frame 2 was rejected; queue still has 0 and 1.
-        let f = q.pop(&shutdown).unwrap();
+        let PopResult::Frame(f) = q.pop(&shutdown, None) else {
+            panic!("expected frame");
+        };
         assert_eq!(f.seq(), 0);
     }
 
@@ -241,14 +290,14 @@ mod tests {
         let shutdown = std::sync::Arc::new(AtomicBool::new(false));
         let sd = shutdown.clone();
 
-        let handle = std::thread::spawn(move || q2.pop(&sd));
+        let handle = std::thread::spawn(move || q2.pop(&sd, None));
 
         // Give the consumer time to block.
         std::thread::sleep(Duration::from_millis(50));
         q.close();
 
         let result = handle.join().unwrap();
-        assert!(result.is_none(), "pop should return None after close");
+        assert!(matches!(result, PopResult::Closed), "pop should return Closed after close");
     }
 
     #[test]
@@ -258,13 +307,14 @@ mod tests {
         let shutdown = std::sync::Arc::new(AtomicBool::new(false));
         let sd = shutdown.clone();
 
-        let handle = std::thread::spawn(move || q2.pop(&sd));
+        let handle = std::thread::spawn(move || q2.pop(&sd, None));
 
         std::thread::sleep(Duration::from_millis(50));
         shutdown.store(true, Ordering::Relaxed);
+        q.wake_consumer();
 
         let result = handle.join().unwrap();
-        assert!(result.is_none(), "pop should return None after shutdown");
+        assert!(matches!(result, PopResult::Closed), "pop should return Closed after shutdown");
     }
 
     #[test]
@@ -286,10 +336,21 @@ mod tests {
 
         // Consumer pops, freeing space.
         let shutdown = AtomicBool::new(false);
-        let _ = q.pop(&shutdown).unwrap();
+        let PopResult::Frame(_) = q.pop(&shutdown, None) else {
+            panic!("expected frame");
+        };
 
         let outcome = handle.join().unwrap();
         assert_eq!(outcome, PushOutcome::Accepted);
+    }
+
+    #[test]
+    fn pop_with_deadline_returns_timeout() {
+        let q = FrameQueue::new(BackpressurePolicy::DropOldest { queue_depth: 4 });
+        let shutdown = AtomicBool::new(false);
+        let deadline = Instant::now() + Duration::from_millis(10);
+        let result = q.pop(&shutdown, Some(deadline));
+        assert!(matches!(result, PopResult::Timeout), "expected Timeout on empty queue with deadline");
     }
 
     #[test]

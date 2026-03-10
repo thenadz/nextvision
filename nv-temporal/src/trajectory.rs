@@ -104,6 +104,10 @@ impl Trajectory {
     /// Removes points from the oldest closed segments first. Empty closed
     /// segments are discarded entirely. The active segment is pruned from
     /// the front as a last resort.
+    ///
+    /// Uses a two-pass approach: first counts how many complete closed
+    /// segments can be removed, then drains them in a single `Vec::drain`
+    /// call, avoiding repeated O(n) front-removals.
     pub fn prune_oldest_points(&mut self, max_points: usize) {
         let total = self.total_points();
         if total <= max_points {
@@ -111,26 +115,40 @@ impl Trajectory {
         }
         let mut to_remove = total - max_points;
 
-        while to_remove > 0 {
-            let seg = match self.segments.first_mut() {
-                Some(s) => s,
-                None => break,
-            };
-
+        // Pass 1: count complete closed segments that can be removed entirely.
+        let mut segments_to_drain = 0;
+        for seg in &self.segments {
+            if to_remove == 0 {
+                break;
+            }
+            if seg.is_active() {
+                // Active segment is always last — handled below.
+                break;
+            }
             if seg.points.len() <= to_remove {
                 to_remove -= seg.points.len();
-                if seg.is_active() {
-                    // Active segment is always last — clear but keep it.
+                segments_to_drain += 1;
+            } else {
+                break;
+            }
+        }
+
+        // Remove complete closed segments in one operation — O(n) total.
+        if segments_to_drain > 0 {
+            self.segments.drain(..segments_to_drain);
+        }
+
+        // Pass 2: handle remaining deficit from the first surviving segment.
+        if to_remove > 0 {
+            if let Some(seg) = self.segments.first_mut() {
+                if seg.is_active() && seg.points.len() <= to_remove {
                     seg.points.clear();
                     seg.motion = MotionFeatures::default();
-                    break;
                 } else {
-                    self.segments.remove(0);
+                    let drain_count = to_remove.min(seg.points.len());
+                    seg.points.drain(..drain_count);
+                    seg.motion = MotionFeatures::compute(&seg.points);
                 }
-            } else {
-                seg.points.drain(..to_remove);
-                seg.motion = MotionFeatures::compute(&seg.points);
-                to_remove = 0;
             }
         }
     }
@@ -348,7 +366,11 @@ mod tests {
     #[test]
     fn open_segment_creates_empty_segment() {
         let mut traj = Trajectory::new();
-        traj.open_segment(ViewEpoch::INITIAL, SegmentBoundary::TrackCreated, None);
+        traj.open_segment(
+            ViewEpoch::INITIAL,
+            SegmentBoundary::TrackCreated,
+            None,
+        );
         assert_eq!(traj.segment_count(), 1);
         assert!(traj.active_segment().is_some());
         assert_eq!(traj.total_points(), 0);
@@ -357,17 +379,18 @@ mod tests {
     #[test]
     fn push_point_adds_to_active_segment() {
         let mut traj = Trajectory::new();
-        traj.open_segment(ViewEpoch::INITIAL, SegmentBoundary::TrackCreated, None);
+        traj.open_segment(
+            ViewEpoch::INITIAL,
+            SegmentBoundary::TrackCreated,
+            None,
+        );
 
         assert!(traj.push_point(make_point(0, 0.1, 0.1)));
         assert!(traj.push_point(make_point(33_333_333, 0.2, 0.1)));
         assert_eq!(traj.total_points(), 2);
 
         let seg = traj.active_segment().unwrap();
-        assert!(
-            !seg.motion.is_stationary,
-            "two distant points should show motion"
-        );
+        assert!(!seg.motion.is_stationary, "two distant points should show motion");
     }
 
     #[test]
@@ -379,7 +402,11 @@ mod tests {
     #[test]
     fn close_active_segment_marks_boundary() {
         let mut traj = Trajectory::new();
-        traj.open_segment(ViewEpoch::INITIAL, SegmentBoundary::TrackCreated, None);
+        traj.open_segment(
+            ViewEpoch::INITIAL,
+            SegmentBoundary::TrackCreated,
+            None,
+        );
         traj.push_point(make_point(0, 0.1, 0.1));
 
         assert!(traj.close_active_segment(SegmentBoundary::TrackLost));
@@ -502,7 +529,10 @@ mod tests {
 
     #[test]
     fn motion_features_direction() {
-        let points = vec![make_point(0, 0.0, 0.0), make_point(1_000_000_000, 0.0, 0.5)];
+        let points = vec![
+            make_point(0, 0.0, 0.0),
+            make_point(1_000_000_000, 0.0, 0.5),
+        ];
         let f = MotionFeatures::compute(&points);
         // Moving purely in +Y → direction should be ~π/2.
         let dir = f.direction.unwrap();
@@ -517,15 +547,12 @@ mod tests {
         // Slow → fast → slow.
         let points = vec![
             make_point(0, 0.0, 0.0),
-            make_point(1_000_000_000, 0.01, 0.0), // slow: 0.01/s
-            make_point(2_000_000_000, 0.51, 0.0), // fast: 0.50/s
-            make_point(3_000_000_000, 0.52, 0.0), // slow: 0.01/s
+            make_point(1_000_000_000, 0.01, 0.0),  // slow: 0.01/s
+            make_point(2_000_000_000, 0.51, 0.0),  // fast: 0.50/s
+            make_point(3_000_000_000, 0.52, 0.0),  // slow: 0.01/s
         ];
         let f = MotionFeatures::compute(&points);
-        assert!(
-            f.max_speed > 0.4,
-            "max speed should reflect the fast segment"
-        );
+        assert!(f.max_speed > 0.4, "max speed should reflect the fast segment");
     }
 
     // ------------------------------------------------------------------
@@ -535,7 +562,11 @@ mod tests {
     #[test]
     fn prune_oldest_points_no_op_when_under_limit() {
         let mut traj = Trajectory::new();
-        traj.open_segment(ViewEpoch::INITIAL, SegmentBoundary::TrackCreated, None);
+        traj.open_segment(
+            ViewEpoch::INITIAL,
+            SegmentBoundary::TrackCreated,
+            None,
+        );
         for i in 0..5u64 {
             traj.push_point(make_point(i * 1_000_000, 0.0, 0.0));
         }
@@ -546,7 +577,11 @@ mod tests {
     #[test]
     fn prune_oldest_points_removes_from_single_segment() {
         let mut traj = Trajectory::new();
-        traj.open_segment(ViewEpoch::INITIAL, SegmentBoundary::TrackCreated, None);
+        traj.open_segment(
+            ViewEpoch::INITIAL,
+            SegmentBoundary::TrackCreated,
+            None,
+        );
         for i in 0..10u64 {
             traj.push_point(make_point(i * 1_000_000, 0.0, 0.0));
         }
@@ -572,14 +607,8 @@ mod tests {
         // Segment 1: 3 points, closed.
         traj.open_segment(
             epoch1,
-            SegmentBoundary::EpochChange {
-                from_epoch: epoch0,
-                to_epoch: epoch1,
-            },
-            Some(SegmentBoundary::EpochChange {
-                from_epoch: epoch0,
-                to_epoch: epoch1,
-            }),
+            SegmentBoundary::EpochChange { from_epoch: epoch0, to_epoch: epoch1 },
+            Some(SegmentBoundary::EpochChange { from_epoch: epoch0, to_epoch: epoch1 }),
         );
         for i in 3..6u64 {
             traj.push_point(make_point(i * 1_000_000, 0.0, 0.0));
@@ -587,14 +616,8 @@ mod tests {
         // Segment 2: 3 points, active.
         traj.open_segment(
             epoch2,
-            SegmentBoundary::EpochChange {
-                from_epoch: epoch1,
-                to_epoch: epoch2,
-            },
-            Some(SegmentBoundary::EpochChange {
-                from_epoch: epoch1,
-                to_epoch: epoch2,
-            }),
+            SegmentBoundary::EpochChange { from_epoch: epoch1, to_epoch: epoch2 },
+            Some(SegmentBoundary::EpochChange { from_epoch: epoch1, to_epoch: epoch2 }),
         );
         for i in 6..9u64 {
             traj.push_point(make_point(i * 1_000_000, 0.0, 0.0));
@@ -618,7 +641,11 @@ mod tests {
     #[test]
     fn prune_to_zero_keeps_active_segment_shell() {
         let mut traj = Trajectory::new();
-        traj.open_segment(ViewEpoch::INITIAL, SegmentBoundary::TrackCreated, None);
+        traj.open_segment(
+            ViewEpoch::INITIAL,
+            SegmentBoundary::TrackCreated,
+            None,
+        );
         for i in 0..5u64 {
             traj.push_point(make_point(i * 1_000_000, 0.0, 0.0));
         }
@@ -637,7 +664,10 @@ mod tests {
     fn segment_apply_compensation_transforms_points() {
         let mut seg = TrajectorySegment {
             view_epoch: ViewEpoch::INITIAL,
-            points: vec![make_point(0, 0.1, 0.2), make_point(1_000_000, 0.3, 0.4)],
+            points: vec![
+                make_point(0, 0.1, 0.2),
+                make_point(1_000_000, 0.3, 0.4),
+            ],
             motion: MotionFeatures::default(),
             opened_by: SegmentBoundary::TrackCreated,
             closed_by: None,

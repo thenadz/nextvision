@@ -14,6 +14,8 @@ use nv_perception::detection::{Detection, DetectionSet};
 use nv_perception::{Stage, StageContext, StageOutput};
 use nv_runtime::{FeedConfig, OutputEnvelope, OutputSink, Runtime};
 
+use std::sync::Arc;
+
 /// A mock object detector that produces one synthetic detection per frame.
 ///
 /// In a real implementation, this would call an inference engine
@@ -74,7 +76,7 @@ impl Stage for MockClassifierStage {
 struct DetectionLogger;
 
 impl OutputSink for DetectionLogger {
-    fn emit(&self, output: OutputEnvelope) {
+    fn emit(&self, output: Arc<OutputEnvelope>) {
         let det_count = output.detections.len();
         let stage_names: Vec<_> = output
             .provenance
@@ -85,7 +87,10 @@ impl OutputSink for DetectionLogger {
 
         println!(
             "seq={} detections={} stages={:?} total_latency={:?}",
-            output.frame_seq, det_count, stage_names, output.provenance.total_latency,
+            output.frame_seq,
+            det_count,
+            stage_names,
+            output.provenance.total_latency,
         );
     }
 }
@@ -105,10 +110,7 @@ fn main() -> Result<(), nv_core::error::NvError> {
         .build()?;
 
     let handle = runtime.add_feed(config)?;
-    println!(
-        "Feed {:?} running with mock detector + classifier",
-        handle.id()
-    );
+    println!("Feed {:?} running with mock detector + classifier", handle.id());
 
     // Let the feed run for a while.
     std::thread::sleep(std::time::Duration::from_secs(5));

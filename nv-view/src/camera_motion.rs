@@ -46,3 +46,46 @@ pub enum MotionSource {
     /// No motion information available for this frame.
     None,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stable_is_not_moving() {
+        assert!(!matches!(CameraMotionState::Stable, CameraMotionState::Moving { .. }));
+    }
+
+    #[test]
+    fn moving_carries_optional_fields() {
+        let m = CameraMotionState::Moving {
+            angular_velocity: Some(30.0),
+            displacement: Some(0.15),
+        };
+        if let CameraMotionState::Moving {
+            angular_velocity,
+            displacement,
+        } = m
+        {
+            assert_eq!(angular_velocity, Some(30.0));
+            assert_eq!(displacement, Some(0.15));
+        } else {
+            panic!("expected Moving");
+        }
+    }
+
+    #[test]
+    fn unknown_treated_as_potentially_moving() {
+        // Verify Unknown is distinct from both Stable and Moving.
+        let u = CameraMotionState::Unknown;
+        assert_ne!(u, CameraMotionState::Stable);
+        assert!(!matches!(u, CameraMotionState::Moving { .. }));
+    }
+
+    #[test]
+    fn motion_source_variants() {
+        assert_ne!(MotionSource::Telemetry, MotionSource::None);
+        let inferred = MotionSource::Inferred { confidence: 0.7 };
+        assert!(matches!(inferred, MotionSource::Inferred { confidence } if confidence > 0.5));
+    }
+}

@@ -11,7 +11,17 @@ pub struct RetentionPolicy {
     pub max_track_age: Duration,
     /// Maximum observations retained per track (ring buffer depth).
     pub max_observations_per_track: usize,
-    /// Hard cap on concurrent tracks. Oldest `Lost` then `Coasted` are evicted first.
+    /// Hard cap on concurrent tracks.
+    ///
+    /// Enforced strictly: `commit_track` pre-evicts a victim when
+    /// admitting a new track at cap, so the store size never exceeds
+    /// this limit after each commit.
+    ///
+    /// Eviction priority: `Lost` (oldest) → `Coasted` (oldest) →
+    /// `Tentative` (oldest). `Confirmed` tracks are never evicted.
+    ///
+    /// If only `Confirmed` tracks remain at cap, new track admissions
+    /// are rejected (existing track updates are always accepted).
     pub max_concurrent_tracks: usize,
     /// Maximum trajectory points retained per track across all segments.
     ///

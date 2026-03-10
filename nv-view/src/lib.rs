@@ -36,7 +36,7 @@ pub use bound::{BoundContextValidity, ViewBoundContext};
 pub use camera_motion::{CameraMotionState, MotionSource};
 pub use epoch::{DefaultEpochPolicy, EpochDecision, EpochPolicy, EpochPolicyContext};
 pub use provider::{MotionPollContext, MotionReport, ViewStateProvider};
-pub use ptz::PtzTelemetry;
+pub use ptz::{PtzEvent, PtzTelemetry};
 pub use transform::{GlobalTransformEstimate, TransformEstimationMethod};
 pub use transition::TransitionPhase;
 pub use validity::{ContextValidity, DegradationReason};

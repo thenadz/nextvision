@@ -39,6 +39,7 @@
 
 pub mod artifact;
 pub mod detection;
+pub mod pipeline;
 pub mod scene;
 pub mod signal;
 pub mod stage;
@@ -47,8 +48,9 @@ pub mod track;
 
 pub use artifact::PerceptionArtifacts;
 pub use detection::{Detection, DetectionSet};
+pub use pipeline::{StagePipeline, StagePipelineBuilder};
 pub use scene::{SceneFeature, SceneFeatureValue};
 pub use signal::{DerivedSignal, SignalValue};
-pub use stage::{Stage, StageContext, StageOutput};
+pub use stage::{Stage, StageCategory, StageContext, StageOutput};
 pub use temporal_access::TemporalAccess;
 pub use track::{Track, TrackObservation, TrackState};

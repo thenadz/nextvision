@@ -149,8 +149,12 @@ impl TemporalStore {
     /// This is the canonical way to upsert track history after stage
     /// execution. For each track produced by the pipeline:
     ///
-    /// 1. If the track is new, a [`TrackHistory`] is created with an
-    ///    initial trajectory segment.
+    /// 1. If the track is new and the store is at the hard cap, the
+    ///    store pre-evicts a victim (Lost → Coasted → Tentative,
+    ///    oldest first) before inserting. If no evictable candidate
+    ///    exists (only Confirmed tracks remain), the new track is
+    ///    rejected and `false` is returned. Updates to existing
+    ///    tracks are always accepted regardless of cap.
     /// 2. The observation is pushed into the ring buffer.
     /// 3. If the view epoch has changed since the last point, the active
     ///    trajectory segment is closed with [`SegmentBoundary::EpochChange`]
@@ -160,15 +164,54 @@ impl TemporalStore {
     ///    [`SegmentBoundary::TrackLost`].
     /// 6. Per-track observation and trajectory-point caps are enforced.
     ///
-    /// Call [`enforce_retention`](Self::enforce_retention) once after
-    /// committing all tracks to apply global retention limits.
-    pub fn commit_track(&mut self, track: &Track, now_ts: MonotonicTs, current_epoch: ViewEpoch) {
+    /// The store size never exceeds `max_concurrent_tracks` after a
+    /// successful commit. Call [`enforce_retention`](Self::enforce_retention)
+    /// once per frame for age-based and trajectory-point pruning.
+    ///
+    /// Returns `true` if the track was committed, `false` if the track
+    /// was a new admission rejected due to the hard cap.
+    pub fn commit_track(&mut self, track: &Track, now_ts: MonotonicTs, current_epoch: ViewEpoch) -> bool {
         let track_id = track.id;
         let track_arc = Arc::new(track.clone());
         let max_obs = self.retention.max_observations_per_track;
         let max_traj = self.retention.max_trajectory_points_per_track;
 
         if self.get_track(&track_id).is_none() {
+            // New track — enforce strict cap via pre-eviction.
+            if self.tracks.len() >= self.retention.max_concurrent_tracks {
+                // Find the best eviction victim:
+                // Lost (oldest) → Coasted (oldest) → Tentative (oldest).
+                let victim = self
+                    .tracks
+                    .iter()
+                    .filter(|(_, h)| h.track.state == nv_perception::TrackState::Lost)
+                    .min_by_key(|(_, h)| h.last_seen)
+                    .map(|(id, _)| *id)
+                    .or_else(|| {
+                        self.tracks
+                            .iter()
+                            .filter(|(_, h)| h.track.state == nv_perception::TrackState::Coasted)
+                            .min_by_key(|(_, h)| h.last_seen)
+                            .map(|(id, _)| *id)
+                    })
+                    .or_else(|| {
+                        self.tracks
+                            .iter()
+                            .filter(|(_, h)| h.track.state == nv_perception::TrackState::Tentative)
+                            .min_by_key(|(_, h)| h.last_seen)
+                            .map(|(id, _)| *id)
+                    });
+                match victim {
+                    Some(id) => {
+                        self.tracks.remove(&id);
+                    }
+                    None => {
+                        // Only Confirmed tracks remain — reject.
+                        return false;
+                    }
+                }
+            }
+
             let mut trajectory = Trajectory::new();
             trajectory.open_segment(
                 current_epoch,
@@ -235,6 +278,8 @@ impl TemporalStore {
             // Enforce per-track trajectory point cap.
             traj.prune_oldest_points(max_traj);
         }
+
+        true
     }
 
     /// Enforce the retention policy: evict stale tracks, enforce the
@@ -246,9 +291,18 @@ impl TemporalStore {
     /// [`RetentionPolicy::max_track_age`].
     ///
     /// Phase 2: if the track count exceeds
-    /// [`RetentionPolicy::max_concurrent_tracks`], evict the oldest
-    /// `Lost` then `Coasted` tracks until under the limit. Confirmed
-    /// and Tentative tracks are never evicted by the hard cap.
+    /// [`RetentionPolicy::max_concurrent_tracks`], evict tracks by
+    /// priority until under the limit:
+    ///   1. `Lost` (oldest first)
+    ///   2. `Coasted` (oldest first)
+    ///   3. `Tentative` (oldest first)
+    ///
+    /// `Confirmed` tracks are never evicted by the hard cap.
+    ///
+    /// Note: in normal production flow the cap is already enforced by
+    /// [`commit_track`]'s pre-eviction, so Phase 2 is a
+    /// safety-net that fires only when tracks are inserted via test
+    /// helpers or other non-`commit_track` paths.
     ///
     /// Phase 3: prune trajectory points for all surviving tracks to
     /// stay within [`RetentionPolicy::max_trajectory_points_per_track`].
@@ -273,10 +327,9 @@ impl TemporalStore {
         }
 
         // Phase 2: hard cap on concurrent tracks.
-        // Eviction priority: Lost (oldest first), then Coasted (oldest first).
-        // Confirmed and Tentative tracks are never evicted.
+        // Eviction priority: Lost (oldest) → Coasted (oldest) → Tentative (oldest).
+        // Confirmed tracks are never evicted.
         while self.tracks.len() > max_tracks {
-            // Prefer evicting the oldest Lost track.
             let victim = self
                 .tracks
                 .iter()
@@ -284,10 +337,16 @@ impl TemporalStore {
                 .min_by_key(|(_, h)| h.last_seen)
                 .map(|(id, _)| *id)
                 .or_else(|| {
-                    // Fall back to the oldest Coasted track.
                     self.tracks
                         .iter()
                         .filter(|(_, h)| h.track.state == nv_perception::TrackState::Coasted)
+                        .min_by_key(|(_, h)| h.last_seen)
+                        .map(|(id, _)| *id)
+                })
+                .or_else(|| {
+                    self.tracks
+                        .iter()
+                        .filter(|(_, h)| h.track.state == nv_perception::TrackState::Tentative)
                         .min_by_key(|(_, h)| h.last_seen)
                         .map(|(id, _)| *id)
                 });
@@ -295,7 +354,7 @@ impl TemporalStore {
                 Some(id) => {
                     self.tracks.remove(&id);
                 }
-                None => break,
+                None => break, // only Confirmed remain — tolerate excess
             }
         }
 
@@ -711,6 +770,25 @@ mod tests {
         store.tracks.insert(id, history);
     }
 
+    /// Insert a track with a specific state directly (bypasses admission control).
+    fn insert_track_with_state(
+        store: &mut TemporalStore,
+        track_id: u64,
+        state: TrackState,
+        last_seen_ns: u64,
+    ) {
+        let id = TrackId::new(track_id);
+        let track = Arc::new(make_track_with_state(track_id, state));
+        let history = TrackHistory::new(
+            track,
+            Arc::new(Trajectory::new()),
+            MonotonicTs::from_nanos(0),
+            MonotonicTs::from_nanos(last_seen_ns),
+            ViewEpoch::INITIAL,
+        );
+        store.tracks.insert(id, history);
+    }
+
     #[test]
     fn snapshot_shares_track_arc() {
         let mut store = TemporalStore::new(RetentionPolicy::default());
@@ -1063,11 +1141,10 @@ mod tests {
             ..RetentionPolicy::default()
         };
         let mut store = TemporalStore::new(retention);
-        let epoch = ViewEpoch::INITIAL;
 
+        // Insert directly to bypass pre-eviction — testing enforce_retention.
         for i in 1..=5u64 {
-            let lost = make_track_with_state(i, TrackState::Lost);
-            store.commit_track(&lost, MonotonicTs::from_nanos(i * 1_000_000), epoch);
+            insert_track_with_state(&mut store, i, TrackState::Lost, i * 1_000_000);
         }
         assert_eq!(store.track_count(), 5);
 
@@ -1088,21 +1165,164 @@ mod tests {
             ..RetentionPolicy::default()
         };
         let mut store = TemporalStore::new(retention);
-        let epoch = ViewEpoch::INITIAL;
 
+        // Insert directly to bypass admission control — we're testing
+        // enforce_retention eviction, not commit_track admission.
         // 3 Confirmed tracks + 1 Lost.
         for i in 1..=3u64 {
-            let confirmed = make_track_with_state(i, TrackState::Confirmed);
-            store.commit_track(&confirmed, MonotonicTs::from_nanos(i * 1_000_000), epoch);
+            insert_track_with_state(&mut store, i, TrackState::Confirmed, i * 1_000_000);
         }
-        let lost = make_track_with_state(10, TrackState::Lost);
-        store.commit_track(&lost, MonotonicTs::from_nanos(0), epoch);
+        insert_track_with_state(&mut store, 10, TrackState::Lost, 0);
+        assert_eq!(store.track_count(), 4);
 
         store.enforce_retention(MonotonicTs::from_nanos(100_000_000));
 
         // Lost track should be evicted, but Confirmed tracks stay even though > cap.
         assert!(store.get_track(&TrackId::new(10)).is_none());
         assert_eq!(store.track_count(), 3, "Confirmed tracks cannot be evicted by hard cap");
+    }
+
+    #[test]
+    fn enforce_retention_hard_cap_evicts_tentative_after_lost_and_coasted() {
+        let retention = RetentionPolicy {
+            max_concurrent_tracks: 2,
+            max_track_age: nv_core::Duration::from_secs(600),
+            ..RetentionPolicy::default()
+        };
+        let mut store = TemporalStore::new(retention);
+
+        // Insert directly to bypass admission control.
+        // 2 Confirmed + 2 Tentative — no Lost or Coasted.
+        for i in 1..=2u64 {
+            insert_track_with_state(&mut store, i, TrackState::Confirmed, i * 1_000_000);
+        }
+        for i in 3..=4u64 {
+            insert_track_with_state(&mut store, i, TrackState::Tentative, i * 1_000_000);
+        }
+        assert_eq!(store.track_count(), 4);
+
+        store.enforce_retention(MonotonicTs::from_nanos(100_000_000));
+
+        // Tentative tracks should be evicted (oldest first) to reach cap.
+        assert_eq!(store.track_count(), 2);
+        // Oldest tentative (3) evicted first, then (4).
+        assert!(store.get_track(&TrackId::new(3)).is_none());
+        assert!(store.get_track(&TrackId::new(4)).is_none());
+        // Confirmed remain.
+        assert!(store.get_track(&TrackId::new(1)).is_some());
+        assert!(store.get_track(&TrackId::new(2)).is_some());
+    }
+
+    #[test]
+    fn hard_cap_strictly_bounded_under_high_id_churn_no_evictable() {
+        // Simulates rapid ID churn with only Confirmed tracks:
+        // commit_track should reject new admission when at cap.
+        let retention = RetentionPolicy {
+            max_concurrent_tracks: 3,
+            max_track_age: nv_core::Duration::from_secs(600),
+            ..RetentionPolicy::default()
+        };
+        let mut store = TemporalStore::new(retention);
+        let epoch = ViewEpoch::INITIAL;
+
+        // Fill to cap with Confirmed tracks.
+        for i in 1..=3u64 {
+            let confirmed = make_track_with_state(i, TrackState::Confirmed);
+            let accepted = store.commit_track(&confirmed, MonotonicTs::from_nanos(i * 1_000_000), epoch);
+            assert!(accepted, "track {i} should be accepted (under cap)");
+        }
+
+        // Try to admit new Confirmed tracks beyond cap — should be rejected.
+        for i in 100..=105u64 {
+            let confirmed = make_track_with_state(i, TrackState::Confirmed);
+            let accepted = store.commit_track(&confirmed, MonotonicTs::from_nanos(i * 1_000_000), epoch);
+            assert!(!accepted, "track {i} should be rejected (at cap, no evictable)");
+        }
+
+        assert_eq!(store.track_count(), 3, "count must never exceed cap");
+
+        // Updates to existing tracks are always accepted.
+        let updated = make_track_with_state(1, TrackState::Confirmed);
+        let accepted = store.commit_track(&updated, MonotonicTs::from_nanos(200_000_000), epoch);
+        assert!(accepted, "updates to existing tracks must always be accepted");
+        assert_eq!(store.track_count(), 3);
+    }
+
+    #[test]
+    fn admission_allowed_when_evictable_candidate_exists_at_cap() {
+        let retention = RetentionPolicy {
+            max_concurrent_tracks: 2,
+            max_track_age: nv_core::Duration::from_secs(600),
+            ..RetentionPolicy::default()
+        };
+        let mut store = TemporalStore::new(retention);
+        let epoch = ViewEpoch::INITIAL;
+
+        // 1 Confirmed + 1 Lost = at cap.
+        let confirmed = make_track_with_state(1, TrackState::Confirmed);
+        store.commit_track(&confirmed, MonotonicTs::from_nanos(1_000_000), epoch);
+        let lost = make_track_with_state(2, TrackState::Lost);
+        store.commit_track(&lost, MonotonicTs::from_nanos(2_000_000), epoch);
+        assert_eq!(store.track_count(), 2);
+
+        // New track should be admitted (Lost is pre-evicted) at cap.
+        let new_track = make_track_with_state(3, TrackState::Confirmed);
+        let accepted = store.commit_track(&new_track, MonotonicTs::from_nanos(3_000_000), epoch);
+        assert!(accepted, "new track should be admitted when evictable candidate exists");
+        // Pre-eviction removes the Lost victim during commit — count stays at cap.
+        assert_eq!(store.track_count(), 2, "strict cap: count stays at max");
+        assert!(store.get_track(&TrackId::new(2)).is_none(), "Lost victim should be pre-evicted");
+        assert!(store.get_track(&TrackId::new(3)).is_some(), "new track should be present");
+    }
+
+    #[test]
+    fn strict_cap_mixed_states_burst_never_exceeds() {
+        // Burst-admission of mixed-state tracks should never push
+        // the store above max_concurrent_tracks.
+        let cap = 4;
+        let retention = RetentionPolicy {
+            max_concurrent_tracks: cap,
+            max_track_age: nv_core::Duration::from_secs(600),
+            ..RetentionPolicy::default()
+        };
+        let mut store = TemporalStore::new(retention);
+        let epoch = ViewEpoch::INITIAL;
+
+        // Phase 1: fill to cap with 2 Confirmed + 1 Lost + 1 Tentative.
+        let c1 = make_track_with_state(1, TrackState::Confirmed);
+        store.commit_track(&c1, MonotonicTs::from_nanos(1_000_000), epoch);
+        let c2 = make_track_with_state(2, TrackState::Confirmed);
+        store.commit_track(&c2, MonotonicTs::from_nanos(2_000_000), epoch);
+        let l3 = make_track_with_state(3, TrackState::Lost);
+        store.commit_track(&l3, MonotonicTs::from_nanos(3_000_000), epoch);
+        let t4 = make_track_with_state(4, TrackState::Tentative);
+        store.commit_track(&t4, MonotonicTs::from_nanos(4_000_000), epoch);
+        assert_eq!(store.track_count(), cap);
+
+        // Phase 2: burst 10 new confirmed tracks.
+        let mut admitted = 0u32;
+        let mut rejected = 0u32;
+        for i in 100..110u64 {
+            let t = make_track_with_state(i, TrackState::Confirmed);
+            if store.commit_track(&t, MonotonicTs::from_nanos(i * 1_000_000), epoch) {
+                admitted += 1;
+            } else {
+                rejected += 1;
+            }
+            // Invariant: never exceeds cap.
+            assert!(
+                store.track_count() <= cap,
+                "count {} exceeds cap {} after admitting track {i}",
+                store.track_count(),
+                cap,
+            );
+        }
+
+        // Lost (3) + Tentative (4) = 2 evictable victims, so 2 admissions
+        // succeed; remaining 8 are rejected (only Confirmed remain).
+        assert_eq!(admitted, 2, "should admit exactly as many as victims available");
+        assert_eq!(rejected, 8);
+        assert_eq!(store.track_count(), cap);
     }
 
     // ------------------------------------------------------------------
@@ -1554,18 +1774,12 @@ mod tests {
             ..RetentionPolicy::default()
         };
         let mut store = TemporalStore::new(retention);
-        let epoch = ViewEpoch::INITIAL;
 
-        // Insert a Coasted track (older) and a Lost track (newer).
-        let coasted = make_track_with_state(1, TrackState::Coasted);
-        store.commit_track(&coasted, MonotonicTs::from_nanos(1_000_000), epoch);
-
-        let confirmed = make_track_with_state(2, TrackState::Confirmed);
-        store.commit_track(&confirmed, MonotonicTs::from_nanos(2_000_000), epoch);
-
-        let lost = make_track_with_state(3, TrackState::Lost);
-        store.commit_track(&lost, MonotonicTs::from_nanos(3_000_000), epoch);
-
+        // Insert directly to bypass pre-eviction — testing enforce_retention
+        // priority: Lost should be evicted before Coasted.
+        insert_track_with_state(&mut store, 1, TrackState::Coasted, 1_000_000);
+        insert_track_with_state(&mut store, 2, TrackState::Confirmed, 2_000_000);
+        insert_track_with_state(&mut store, 3, TrackState::Lost, 3_000_000);
         assert_eq!(store.track_count(), 3);
 
         // Enforce — should evict Lost (track 3) first, even though Coasted

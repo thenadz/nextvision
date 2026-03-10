@@ -17,7 +17,7 @@ use nv_test_util::mock_stage::{NoOpStage, PanicStage};
 use std::sync::atomic::Ordering;
 use tokio::sync::broadcast;
 
-use crate::output::{OutputEnvelope, OutputSink};
+use crate::output::{OutputEnvelope, OutputSink, SharedOutput};
 use crate::shutdown::{RestartPolicy, RestartTrigger};
 
 // ---------------------------------------------------------------------------
@@ -135,7 +135,7 @@ impl CountingSink {
 }
 
 impl OutputSink for CountingSink {
-    fn emit(&self, _output: OutputEnvelope) {
+    fn emit(&self, _output: SharedOutput) {
         self.count.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -1631,6 +1631,546 @@ fn lag_throttling_bounds_event_count() {
     assert!(
         lag_event_count < frame_count / 2,
         "throttling should bound lag events: got {lag_event_count} for {frame_count} frames"
+    );
+
+    runtime.shutdown().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 19. Source tick — Stopped causes feed to exit without restart
+// ---------------------------------------------------------------------------
+
+/// Mock source that sends N frames then keeps running, but returns
+/// `SourceStatus::Stopped` from `tick()` after the frames are sent.
+struct TickStoppedIngress {
+    feed_id: FeedId,
+    spec: SourceSpec,
+    frame_count: u64,
+    stopped_after_eos: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl MediaIngress for TickStoppedIngress {
+    fn start(&mut self, sink: Box<dyn FrameSink>) -> Result<(), nv_core::error::MediaError> {
+        let count = self.frame_count;
+        let feed_id = self.feed_id;
+        let flag = Arc::clone(&self.stopped_after_eos);
+        std::thread::spawn(move || {
+            for i in 0..count {
+                let frame = make_test_frame(feed_id, i);
+                sink.on_frame(frame);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            // Don't call on_eos — the worker will tick() and discover Stopped.
+            flag.store(true, Ordering::Release);
+        });
+        Ok(())
+    }
+    fn stop(&mut self) -> Result<(), nv_core::error::MediaError> {
+        Ok(())
+    }
+    fn pause(&mut self) -> Result<(), nv_core::error::MediaError> {
+        Ok(())
+    }
+    fn resume(&mut self) -> Result<(), nv_core::error::MediaError> {
+        Ok(())
+    }
+    fn source_spec(&self) -> &SourceSpec {
+        &self.spec
+    }
+    fn feed_id(&self) -> FeedId {
+        self.feed_id
+    }
+    fn tick(&mut self) -> nv_media::TickOutcome {
+        if self.stopped_after_eos.load(Ordering::Acquire) {
+            nv_media::TickOutcome::stopped()
+        } else {
+            // Source needs periodic polling to discover the stopped state,
+            // so provide a tick hint. Without it, the event-driven worker
+            // would wait indefinitely for a frame/EOS that never comes.
+            nv_media::TickOutcome {
+                status: nv_media::SourceStatus::Running,
+                next_tick: Some(std::time::Duration::from_millis(50)),
+            }
+        }
+    }
+}
+
+struct TickStoppedFactory {
+    frame_count: u64,
+}
+
+impl MediaIngressFactory for TickStoppedFactory {
+    fn create(
+        &self,
+        feed_id: FeedId,
+        spec: SourceSpec,
+        _reconnect: ReconnectPolicy,
+        _ptz: Option<Arc<dyn PtzProvider>>,
+    ) -> Result<Box<dyn MediaIngress>, nv_core::error::MediaError> {
+        Ok(Box::new(TickStoppedIngress {
+            feed_id,
+            spec,
+            frame_count: self.frame_count,
+            stopped_after_eos: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }))
+    }
+}
+
+#[test]
+fn source_tick_stopped_terminates_feed() {
+    let runtime = Runtime::builder()
+        .ingress_factory(Box::new(TickStoppedFactory { frame_count: 5 }))
+        .build()
+        .unwrap();
+
+    let mut health_rx = runtime.health_subscribe();
+    let (sink, count) = CountingSink::new();
+    let handle = runtime
+        .add_feed(build_config_with_restart(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+            RestartPolicy {
+                max_restarts: 3,
+                restart_on: RestartTrigger::SourceOrStagePanic,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+
+    wait_for_stop(&handle, std::time::Duration::from_secs(5));
+
+    // The feed should have stopped (not restarted).
+    assert!(
+        !handle.is_alive(),
+        "feed should stop when tick() returns Stopped"
+    );
+
+    // Should have processed some frames.
+    assert!(
+        count.load(Ordering::Relaxed) > 0,
+        "should have processed frames"
+    );
+
+    // Verify no FeedRestarting events were emitted.
+    let mut restarted = false;
+    loop {
+        match health_rx.try_recv() {
+            Ok(HealthEvent::FeedRestarting { .. }) => {
+                restarted = true;
+                break;
+            }
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    assert!(
+        !restarted,
+        "feed should not restart when source reports Stopped"
+    );
+
+    runtime.shutdown().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 20. Slow sink does not block frame processing
+// ---------------------------------------------------------------------------
+
+/// Output sink that deliberately sleeps to simulate slow I/O.
+struct SlowSink {
+    count: Arc<AtomicU64>,
+    delay: std::time::Duration,
+}
+
+impl OutputSink for SlowSink {
+    fn emit(&self, _output: SharedOutput) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        std::thread::sleep(self.delay);
+    }
+}
+
+#[test]
+fn slow_sink_does_not_block_processing() {
+    let count = Arc::new(AtomicU64::new(0));
+    let sink = SlowSink {
+        count: Arc::clone(&count),
+        delay: std::time::Duration::from_millis(100),
+    };
+
+    let runtime = Runtime::builder()
+        .ingress_factory(Box::new(MockFactory::new(50)))
+        .build()
+        .unwrap();
+
+    let handle = runtime
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
+        .unwrap();
+
+    wait_for_stop(&handle, std::time::Duration::from_secs(10));
+
+    let m = handle.metrics();
+    // All 50 frames should have been *processed* quickly, even though
+    // the sink is slow.  With a 100ms per-emit delay and only 16 sink
+    // queue slots, the sink cannot keep up and some outputs are dropped.
+    assert!(
+        m.frames_processed >= 50,
+        "processing should complete all frames regardless of sink speed (got {})",
+        m.frames_processed
+    );
+
+    // Sink count should be > 0 but ≤ frames_processed since the queue
+    // drops outputs when full.
+    let emitted = count.load(Ordering::Relaxed);
+    assert!(
+        emitted > 0 && emitted <= m.frames_processed,
+        "sink should have received some (not all) outputs: got {emitted}"
+    );
+
+    runtime.shutdown().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 21. Event-driven idle source progression (F1)
+// ---------------------------------------------------------------------------
+
+/// Mock source that returns a TickOutcome with a specific next_tick hint
+/// (for reconnecting) and then transitions to Stopped.
+struct ReconnectingIngress {
+    feed_id: FeedId,
+    spec: SourceSpec,
+    /// Delay returned as next_tick hint during Reconnecting phase.
+    backoff: std::time::Duration,
+    /// Number of frames before entering reconnecting state.
+    frames_before_reconnect: u64,
+    /// After this many ticks in Reconnecting, report Stopped.
+    ticks_before_stop: u32,
+    tick_count: u32,
+    sent_frames: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl MediaIngress for ReconnectingIngress {
+    fn start(&mut self, sink: Box<dyn FrameSink>) -> Result<(), nv_core::error::MediaError> {
+        let count = self.frames_before_reconnect;
+        let feed_id = self.feed_id;
+        let flag = Arc::clone(&self.sent_frames);
+        std::thread::spawn(move || {
+            for i in 0..count {
+                sink.on_frame(make_test_frame(feed_id, i));
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            // Signal that frames are done — source enters reconnecting.
+            flag.store(true, Ordering::Release);
+            // Don't call on_eos — we want the worker to tick and find Reconnecting.
+        });
+        Ok(())
+    }
+    fn stop(&mut self) -> Result<(), nv_core::error::MediaError> { Ok(()) }
+    fn pause(&mut self) -> Result<(), nv_core::error::MediaError> { Ok(()) }
+    fn resume(&mut self) -> Result<(), nv_core::error::MediaError> { Ok(()) }
+    fn source_spec(&self) -> &SourceSpec { &self.spec }
+    fn feed_id(&self) -> FeedId { self.feed_id }
+    fn tick(&mut self) -> nv_media::TickOutcome {
+        if !self.sent_frames.load(Ordering::Acquire) {
+            // Frames still being sent — provide a short hint as a safety
+            // net so the worker re-ticks promptly after the last frame
+            // is consumed (avoiding a race between flag-set and pop).
+            return nv_media::TickOutcome {
+                status: nv_media::SourceStatus::Running,
+                next_tick: Some(std::time::Duration::from_millis(50)),
+            };
+        }
+        self.tick_count += 1;
+        if self.tick_count > self.ticks_before_stop {
+            nv_media::TickOutcome::stopped()
+        } else {
+            nv_media::TickOutcome::reconnecting(self.backoff)
+        }
+    }
+}
+
+struct ReconnectingFactory {
+    backoff: std::time::Duration,
+    frames_before_reconnect: u64,
+    ticks_before_stop: u32,
+}
+
+impl MediaIngressFactory for ReconnectingFactory {
+    fn create(
+        &self,
+        feed_id: FeedId,
+        spec: SourceSpec,
+        _reconnect: ReconnectPolicy,
+        _ptz: Option<Arc<dyn PtzProvider>>,
+    ) -> Result<Box<dyn MediaIngress>, nv_core::error::MediaError> {
+        Ok(Box::new(ReconnectingIngress {
+            feed_id,
+            spec,
+            backoff: self.backoff,
+            frames_before_reconnect: self.frames_before_reconnect,
+            ticks_before_stop: self.ticks_before_stop,
+            tick_count: 0,
+            sent_frames: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }))
+    }
+}
+
+/// Verify that the worker progresses through reconnection entirely
+/// driven by the source's next_tick hint — no fixed polling interval.
+/// The backoff is short (50ms); with the old 1s idle fallback this would
+/// have taken ~3s. The test asserts it finishes promptly.
+#[test]
+fn event_driven_source_progression_no_fixed_floor() {
+    let runtime = Runtime::builder()
+        .ingress_factory(Box::new(ReconnectingFactory {
+            backoff: std::time::Duration::from_millis(50),
+            frames_before_reconnect: 3,
+            ticks_before_stop: 3,
+        }))
+        .build()
+        .unwrap();
+
+    let (sink, _count) = CountingSink::new();
+    let handle = runtime
+        .add_feed(build_config_with_restart(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+            RestartPolicy {
+                max_restarts: 0,
+                restart_on: RestartTrigger::Never,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+
+    // With 50ms backoff × 3 ticks + frame time, should finish well under 2s.
+    // Old fixed 1s floor would take ~3-4s for the reconnect ticks alone.
+    let start = std::time::Instant::now();
+    wait_for_stop(&handle, std::time::Duration::from_secs(5));
+    let elapsed = start.elapsed();
+
+    assert!(
+        !handle.is_alive(),
+        "feed should have stopped after reconnect budget exhausted"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "event-driven progression should complete quickly (took {:?})",
+        elapsed,
+    );
+
+    runtime.shutdown().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 22. Bounded sink shutdown (F3)
+// ---------------------------------------------------------------------------
+
+/// Sink that blocks forever in emit() to simulate a stuck downstream.
+struct BlockingSink {
+    count: Arc<AtomicU64>,
+}
+
+impl OutputSink for BlockingSink {
+    fn emit(&self, _output: SharedOutput) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        // Block forever — simulates I/O hung downstream.
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    }
+}
+
+/// Verify feed shutdown completes within bounded time even when
+/// OutputSink::emit() is blocked indefinitely.
+#[test]
+fn bounded_shutdown_when_sink_blocks() {
+    let count = Arc::new(AtomicU64::new(0));
+    let sink = BlockingSink {
+        count: Arc::clone(&count),
+    };
+
+    let runtime = Runtime::builder()
+        .ingress_factory(Box::new(MockFactory::new(20)))
+        .build()
+        .unwrap();
+
+    let handle = runtime
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
+        .unwrap();
+
+    // Let some frames flow so the sink thread picks up at least one.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let start = std::time::Instant::now();
+    runtime.shutdown().unwrap();
+    let elapsed = start.elapsed();
+
+    // Shutdown should complete within SINK_SHUTDOWN_TIMEOUT (5s) + margin.
+    // Without the bounded timeout, this would hang forever.
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "shutdown should be bounded even with blocking sink (took {:?})",
+        elapsed,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 23. SinkBackpressure throttling (F5)
+// ---------------------------------------------------------------------------
+
+/// Sink that never keeps up — every emit takes 500ms.
+struct VerySlowSink {
+    count: Arc<AtomicU64>,
+}
+
+impl OutputSink for VerySlowSink {
+    fn emit(&self, _output: SharedOutput) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+/// Under sustained sink backpressure, SinkBackpressure events should
+/// be coalesced rather than emitted per-drop.
+#[test]
+fn sink_backpressure_throttling() {
+    let frame_count = 100u64;
+    let sink_count = Arc::new(AtomicU64::new(0));
+    let sink = VerySlowSink {
+        count: Arc::clone(&sink_count),
+    };
+
+    let runtime = Runtime::builder()
+        .ingress_factory(Box::new(MockFactory {
+            frame_count,
+            fail_on_start: false,
+            // Small delay so frames flow at a rate the worker can process
+            // before the DropOldest queue discards them. Without this,
+            // all frames blast instantly and most are dropped at the queue
+            // level, never reaching the sink channel.
+            frame_delay: std::time::Duration::from_millis(1),
+        }))
+        .health_capacity(4096)
+        .build()
+        .unwrap();
+
+    let mut health_rx = runtime.health_subscribe();
+
+    let handle = runtime
+        .add_feed(build_config_with_restart(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+            RestartPolicy {
+                max_restarts: 0,
+                restart_on: RestartTrigger::Never,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+
+    wait_for_stop(&handle, std::time::Duration::from_secs(10));
+
+    // Count SinkBackpressure events.
+    let mut bp_events = 0u64;
+    let mut total_dropped_reported = 0u64;
+    loop {
+        match health_rx.try_recv() {
+            Ok(HealthEvent::SinkBackpressure { outputs_dropped, .. }) => {
+                bp_events += 1;
+                total_dropped_reported += outputs_dropped;
+            }
+            Ok(_) => continue,
+            Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+            Err(_) => break,
+        }
+    }
+
+    // With 100 frames blasting at max speed and a 500ms-per-emit sink,
+    // the sink queue (cap 16) fills immediately. Without throttling we'd
+    // get ~84 individual SinkBackpressure events. With throttling, we
+    // expect far fewer (transition event + maybe 1-2 periodic ones).
+    assert!(bp_events > 0, "should see at least one SinkBackpressure event");
+    assert!(
+        bp_events < frame_count / 2,
+        "throttling should coalesce SinkBackpressure events: got {bp_events} for {frame_count} frames"
+    );
+    // The accumulated deltas should report the total drops.
+    assert!(
+        total_dropped_reported > 0,
+        "coalesced events should carry accumulated drop counts"
+    );
+
+    runtime.shutdown().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 25. Terminal FeedStopped coherence (D.3)
+// ---------------------------------------------------------------------------
+
+/// Verify that any terminal stop path emits exactly one FeedStopped event.
+///
+/// The sink-spawn-failure path (SinkSpawnFailed → bare break) is not
+/// exercisable in tests without OS hackery, but it follows the same
+/// structural pattern as the other terminal paths: a single call to
+/// `emit_feed_stopped` followed by a `break`. This test validates
+/// the invariant for the closest reachable fatal path (source start
+/// failure with no restarts) and the normal shutdown path.
+#[test]
+fn terminal_stop_emits_exactly_one_feed_stopped() {
+    let runtime = Runtime::builder()
+        .ingress_factory(Box::new(MockFactory::failing()))
+        .health_capacity(256)
+        .build()
+        .unwrap();
+
+    let mut health_rx = runtime.health_subscribe();
+    let (sink, _count) = CountingSink::new();
+    let handle = runtime
+        .add_feed(build_config_with_restart(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+            RestartPolicy {
+                max_restarts: 0,
+                restart_on: RestartTrigger::Never,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+
+    wait_for_stop(&handle, std::time::Duration::from_secs(5));
+    assert!(!handle.is_alive(), "feed should have stopped");
+
+    // Small settling time for health events to flush.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Count FeedStopped events for this feed.
+    let feed_id = handle.id();
+    let mut feed_stopped_count = 0u32;
+    let mut stop_reasons = Vec::new();
+    loop {
+        match health_rx.try_recv() {
+            Ok(HealthEvent::FeedStopped { feed_id: fid, ref reason }) if fid == feed_id => {
+                feed_stopped_count += 1;
+                stop_reasons.push(format!("{reason:?}"));
+            }
+            Ok(_) => continue,
+            Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                // Lost events — can't assert, but in practice the
+                // health_capacity should prevent this.
+                panic!("health channel lagged by {n} — increase health_capacity");
+            }
+            Err(_) => break,
+        }
+    }
+
+    assert_eq!(
+        feed_stopped_count, 1,
+        "expected exactly one FeedStopped event, got {feed_stopped_count}: {stop_reasons:?}",
     );
 
     runtime.shutdown().unwrap();

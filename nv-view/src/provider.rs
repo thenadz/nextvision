@@ -27,6 +27,16 @@ pub struct MotionReport {
     /// If `None`, the view system infers motion from the `ptz` deltas
     /// or `frame_transform` displacement magnitude.
     pub motion_hint: Option<CameraMotionState>,
+
+    /// Discrete PTZ control events received since the previous frame.
+    ///
+    /// Empty when no PTZ command stream is available. Providers that
+    /// monitor an ONVIF event channel or serial command bus populate
+    /// this with the events that arrived between frames.
+    ///
+    /// The epoch policy considers these events alongside telemetry and
+    /// inferred motion to make segmentation decisions.
+    pub ptz_events: Vec<crate::ptz::PtzEvent>,
 }
 
 /// Context given to [`ViewStateProvider::poll`].

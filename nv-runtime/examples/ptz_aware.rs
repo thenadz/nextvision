@@ -14,6 +14,8 @@ use nv_runtime::{FeedConfig, OutputEnvelope, OutputSink, Runtime};
 use nv_view::provider::{MotionPollContext, MotionReport, ViewStateProvider};
 use nv_view::{CameraMotionState, PtzTelemetry, ViewEpoch};
 
+use std::sync::Arc;
+
 /// A mock PTZ telemetry provider.
 ///
 /// In production, this would poll an ONVIF endpoint or serial port
@@ -40,6 +42,7 @@ impl ViewStateProvider for MockPtzProvider {
             } else {
                 CameraMotionState::Stable
             }),
+            ..Default::default()
         }
     }
 }
@@ -84,7 +87,7 @@ impl Stage for EpochAwareStage {
 struct ViewProvenanceLogger;
 
 impl OutputSink for ViewProvenanceLogger {
-    fn emit(&self, output: OutputEnvelope) {
+    fn emit(&self, output: Arc<OutputEnvelope>) {
         let vp = &output.provenance.view_provenance;
         println!(
             "seq={} epoch={:?} motion={:?} transition={:?} stability={:.2}",

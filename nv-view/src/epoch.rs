@@ -90,6 +90,13 @@ impl Default for DefaultEpochPolicy {
 
 impl EpochPolicy for DefaultEpochPolicy {
     fn decide(&self, ctx: &EpochPolicyContext<'_>) -> EpochDecision {
+        // A preset recall is always a full discontinuity.
+        for event in &ctx.current_report.ptz_events {
+            if matches!(event, crate::ptz::PtzEvent::PresetRecall { .. }) {
+                return EpochDecision::Segment;
+            }
+        }
+
         // Check PTZ telemetry for large moves.
         if let (Some(prev_ptz), Some(curr_ptz)) = (
             ctx.previous_view.ptz.as_ref(),
@@ -147,5 +154,209 @@ impl EpochPolicy for DefaultEpochPolicy {
         }
 
         EpochDecision::Continue
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ptz::{PtzEvent, PtzTelemetry};
+    use crate::transform::{GlobalTransformEstimate, TransformEstimationMethod};
+    use crate::view_state::{ViewState, ViewVersion};
+    use nv_core::MonotonicTs;
+
+    fn stable_ctx<'a>(
+        prev: &'a ViewState,
+        report: &'a MotionReport,
+    ) -> EpochPolicyContext<'a> {
+        EpochPolicyContext {
+            previous_view: prev,
+            current_report: report,
+            motion_state: CameraMotionState::Stable,
+            state_duration: Duration::from_secs(10),
+        }
+    }
+
+    fn moving_ctx<'a>(
+        prev: &'a ViewState,
+        report: &'a MotionReport,
+        displacement: f32,
+    ) -> EpochPolicyContext<'a> {
+        EpochPolicyContext {
+            previous_view: prev,
+            current_report: report,
+            motion_state: CameraMotionState::Moving {
+                angular_velocity: None,
+                displacement: Some(displacement),
+            },
+            state_duration: Duration::from_secs(1),
+        }
+    }
+
+    // -- Continue --
+
+    #[test]
+    fn stable_camera_continues() {
+        let policy = DefaultEpochPolicy::default();
+        let prev = ViewState::fixed_initial();
+        let report = MotionReport::default();
+        let ctx = stable_ctx(&prev, &report);
+        assert!(matches!(policy.decide(&ctx), EpochDecision::Continue));
+    }
+
+    // -- PTZ thresholds --
+
+    #[test]
+    fn large_ptz_pan_segments() {
+        let policy = DefaultEpochPolicy::default();
+        let mut prev = ViewState::observed_initial();
+        prev.ptz = Some(PtzTelemetry {
+            pan: 0.0,
+            tilt: 0.0,
+            zoom: 0.5,
+            ts: MonotonicTs::from_nanos(0),
+        });
+        let report = MotionReport {
+            ptz: Some(PtzTelemetry {
+                pan: 20.0, // > 15.0 threshold
+                tilt: 0.0,
+                zoom: 0.5,
+                ts: MonotonicTs::from_nanos(33_000_000),
+            }),
+            ..Default::default()
+        };
+        let ctx = stable_ctx(&prev, &report);
+        assert!(matches!(policy.decide(&ctx), EpochDecision::Segment));
+    }
+
+    #[test]
+    fn small_ptz_move_degrades() {
+        let policy = DefaultEpochPolicy::default();
+        let mut prev = ViewState::observed_initial();
+        prev.ptz = Some(PtzTelemetry {
+            pan: 0.0,
+            tilt: 0.0,
+            zoom: 0.5,
+            ts: MonotonicTs::from_nanos(0),
+        });
+        let report = MotionReport {
+            ptz: Some(PtzTelemetry {
+                pan: 2.0, // < 15.0 threshold, > 0
+                tilt: 0.0,
+                zoom: 0.5,
+                ts: MonotonicTs::from_nanos(33_000_000),
+            }),
+            ..Default::default()
+        };
+        let ctx = stable_ctx(&prev, &report);
+        let d = policy.decide(&ctx);
+        assert!(
+            matches!(d, EpochDecision::Degrade { .. }),
+            "small PTZ move should degrade, got: {d:?}"
+        );
+    }
+
+    #[test]
+    fn large_ptz_with_high_confidence_transform_compensates() {
+        let policy = DefaultEpochPolicy::default();
+        let mut prev = ViewState::observed_initial();
+        prev.ptz = Some(PtzTelemetry {
+            pan: 0.0,
+            tilt: 0.0,
+            zoom: 0.5,
+            ts: MonotonicTs::from_nanos(0),
+        });
+        let report = MotionReport {
+            ptz: Some(PtzTelemetry {
+                pan: 20.0,
+                tilt: 0.0,
+                zoom: 0.5,
+                ts: MonotonicTs::from_nanos(33_000_000),
+            }),
+            frame_transform: Some(GlobalTransformEstimate {
+                transform: nv_core::AffineTransform2D::IDENTITY,
+                confidence: 0.95, // > 0.8 threshold
+                method: TransformEstimationMethod::FeatureMatching,
+                computed_at: ViewVersion::INITIAL,
+            }),
+            ..Default::default()
+        };
+        let ctx = stable_ctx(&prev, &report);
+        assert!(matches!(policy.decide(&ctx), EpochDecision::Compensate { .. }));
+    }
+
+    // -- Inferred displacement thresholds --
+
+    #[test]
+    fn large_inferred_displacement_segments() {
+        let policy = DefaultEpochPolicy::default();
+        let prev = ViewState::observed_initial();
+        let report = MotionReport::default();
+        let ctx = moving_ctx(&prev, &report, 0.3); // > 0.25 threshold
+        assert!(matches!(policy.decide(&ctx), EpochDecision::Segment));
+    }
+
+    #[test]
+    fn small_inferred_displacement_degrades() {
+        let policy = DefaultEpochPolicy::default();
+        let prev = ViewState::observed_initial();
+        let report = MotionReport::default();
+        let ctx = moving_ctx(&prev, &report, 0.05); // > 0 but < 0.25
+        let d = policy.decide(&ctx);
+        assert!(
+            matches!(d, EpochDecision::Degrade { .. }),
+            "small displacement should degrade, got: {d:?}"
+        );
+    }
+
+    // -- PTZ events --
+
+    #[test]
+    fn preset_recall_event_segments() {
+        let policy = DefaultEpochPolicy::default();
+        let prev = ViewState::observed_initial();
+        let report = MotionReport {
+            ptz_events: vec![PtzEvent::PresetRecall {
+                preset_id: 3,
+                ts: MonotonicTs::from_nanos(100_000),
+            }],
+            ..Default::default()
+        };
+        let ctx = stable_ctx(&prev, &report);
+        assert!(
+            matches!(policy.decide(&ctx), EpochDecision::Segment),
+            "preset recall should force segment"
+        );
+    }
+
+    #[test]
+    fn move_start_event_alone_does_not_segment() {
+        let policy = DefaultEpochPolicy::default();
+        let prev = ViewState::observed_initial();
+        let report = MotionReport {
+            ptz_events: vec![PtzEvent::MoveStart {
+                ts: MonotonicTs::from_nanos(100_000),
+            }],
+            ..Default::default()
+        };
+        let ctx = stable_ctx(&prev, &report);
+        // MoveStart alone doesn't change telemetry or displacement,
+        // so the policy falls through to Continue.
+        assert!(matches!(policy.decide(&ctx), EpochDecision::Continue));
+    }
+
+    // -- Configuration --
+
+    #[test]
+    fn degrade_on_small_motion_can_be_disabled() {
+        let policy = DefaultEpochPolicy {
+            degrade_on_small_motion: false,
+            ..DefaultEpochPolicy::default()
+        };
+        let prev = ViewState::observed_initial();
+        let report = MotionReport::default();
+        let ctx = moving_ctx(&prev, &report, 0.05);
+        // With degrade disabled, small motion should continue.
+        assert!(matches!(policy.decide(&ctx), EpochDecision::Continue));
     }
 }

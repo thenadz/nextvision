@@ -7,7 +7,7 @@ use nv_core::error::{ConfigError, NvError};
 use nv_core::id::FeedId;
 use nv_core::metrics::FeedMetrics;
 use nv_media::PtzProvider;
-use nv_perception::Stage;
+use nv_perception::{Stage, StagePipeline};
 use nv_temporal::RetentionPolicy;
 use nv_view::{EpochPolicy, ViewStateProvider};
 
@@ -102,6 +102,16 @@ impl FeedConfigBuilder {
         self
     }
 
+    /// Set the perception pipeline from a [`StagePipeline`].
+    ///
+    /// This is a convenience alternative to [`stages()`](Self::stages)
+    /// that accepts a pre-composed pipeline.
+    #[must_use]
+    pub fn pipeline(mut self, pipeline: StagePipeline) -> Self {
+        self.stages = Some(pipeline.into_stages());
+        self
+    }
+
     /// Set the view state provider (required for `CameraMode::Observed`).
     #[must_use]
     pub fn view_state_provider(mut self, provider: Box<dyn ViewStateProvider>) -> Self {
@@ -168,15 +178,15 @@ impl FeedConfigBuilder {
     /// - `MissingRequired` if `source`, `camera_mode`, `stages`, or `output_sink` are not set.
     /// - `CameraModeConflict` if `Observed` is set without a provider, or `Fixed` with a provider.
     pub fn build(self) -> Result<FeedConfig, NvError> {
-        let source = self
-            .source
-            .ok_or(ConfigError::MissingRequired { field: "source" })?;
+        let source = self.source.ok_or(ConfigError::MissingRequired {
+            field: "source",
+        })?;
         let camera_mode = self.camera_mode.ok_or(ConfigError::MissingRequired {
             field: "camera_mode",
         })?;
-        let stages = self
-            .stages
-            .ok_or(ConfigError::MissingRequired { field: "stages" })?;
+        let stages = self.stages.ok_or(ConfigError::MissingRequired {
+            field: "stages",
+        })?;
         if stages.is_empty() {
             return Err(ConfigError::InvalidPolicy {
                 detail: "at least one perception stage is required".into(),
@@ -267,7 +277,9 @@ impl FeedHandle {
     /// Whether the worker thread is still alive.
     #[must_use]
     pub fn is_alive(&self) -> bool {
-        self.shared.alive.load(std::sync::atomic::Ordering::Relaxed)
+        self.shared
+            .alive
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Get a snapshot of the feed's current metrics.

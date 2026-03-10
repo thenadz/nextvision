@@ -28,17 +28,16 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full specification.
 ```rust
 use nv_runtime::{Runtime, FeedConfig};
 use nv_core::{SourceSpec, CameraMode};
-use nv_runtime::{BackpressurePolicy, OutputSink, OutputEnvelope};
+use nv_runtime::{BackpressurePolicy, OutputSink, SharedOutput};
 
 struct MyOutputSink;
 impl OutputSink for MyOutputSink {
-    fn emit(&self, _output: OutputEnvelope) {
+    fn emit(&self, _output: SharedOutput) {
         // forward to Kafka, gRPC, file, etc.
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::builder().build()?;
 
     let _feed = runtime.add_feed(
@@ -51,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // feed is now running
-    // runtime.shutdown().await?;
+    // runtime.shutdown();
     Ok(())
 }
 ```
