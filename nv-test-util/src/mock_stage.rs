@@ -119,3 +119,28 @@ impl Stage for FailingStage {
         })
     }
 }
+
+/// A mock stage that panics on every `process()` call.
+///
+/// Used to test panic-catching and restart behavior in the runtime.
+pub struct PanicStage {
+    id: StageId,
+}
+
+impl PanicStage {
+    /// Create a panic stage with the given name.
+    #[must_use]
+    pub fn new(name: &'static str) -> Self {
+        Self { id: StageId(name) }
+    }
+}
+
+impl Stage for PanicStage {
+    fn id(&self) -> StageId {
+        self.id
+    }
+
+    fn process(&mut self, _ctx: &StageContext<'_>) -> Result<StageOutput, StageError> {
+        panic!("intentional test panic in stage {:?}", self.id);
+    }
+}

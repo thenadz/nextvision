@@ -10,3 +10,10 @@ license.workspace = true
 nv-core.workspace = true
 nv-perception.workspace = true
 nv-view.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "temporal_bench"
+harness = false

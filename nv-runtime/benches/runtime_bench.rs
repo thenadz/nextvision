@@ -1,0 +1,140 @@
+//! Benchmarks for key runtime hot paths: queue operations and output fanout.
+
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use std::sync::Arc;
+
+use nv_core::{FeedId, MonotonicTs, TypedMetadata, WallTs};
+
+fn output_envelope_construction(c: &mut Criterion) {
+    use nv_core::timestamp::WallTs;
+    use nv_perception::DetectionSet;
+    use nv_runtime::{OutputEnvelope, Provenance, ViewProvenance};
+    use nv_view::view_state::{ViewEpoch, ViewState, ViewVersion};
+    use nv_view::{MotionSource, TransitionPhase};
+
+    c.bench_function("output_envelope_construct", |b| {
+        b.iter(|| {
+            black_box(OutputEnvelope {
+                feed_id: FeedId::new(1),
+                frame_seq: 0,
+                ts: MonotonicTs::from_nanos(0),
+                wall_ts: WallTs::from_micros(0),
+                detections: DetectionSet::empty(),
+                tracks: Vec::new(),
+                signals: Vec::new(),
+                scene_features: Vec::new(),
+                view: ViewState::fixed_initial(),
+                provenance: Provenance {
+                    stages: Vec::new(),
+                    view_provenance: ViewProvenance {
+                        motion_source: MotionSource::None,
+                        epoch_decision: None,
+                        transition: TransitionPhase::Settled,
+                        stability_score: 1.0,
+                        epoch: ViewEpoch::INITIAL,
+                        version: ViewVersion::INITIAL,
+                    },
+                    frame_receive_ts: MonotonicTs::from_nanos(0),
+                    pipeline_complete_ts: MonotonicTs::from_nanos(0),
+                    total_latency: nv_core::Duration::from_nanos(0),
+                },
+                metadata: TypedMetadata::new(),
+            });
+        });
+    });
+}
+
+fn output_arc_clone(c: &mut Criterion) {
+    use nv_core::timestamp::WallTs;
+    use nv_perception::DetectionSet;
+    use nv_runtime::{OutputEnvelope, Provenance, SharedOutput, ViewProvenance};
+    use nv_view::view_state::{ViewEpoch, ViewState, ViewVersion};
+    use nv_view::{MotionSource, TransitionPhase};
+
+    let shared: SharedOutput = Arc::new(OutputEnvelope {
+        feed_id: FeedId::new(1),
+        frame_seq: 0,
+        ts: MonotonicTs::from_nanos(0),
+        wall_ts: WallTs::from_micros(0),
+        detections: DetectionSet::empty(),
+        tracks: Vec::new(),
+        signals: Vec::new(),
+        scene_features: Vec::new(),
+        view: ViewState::fixed_initial(),
+        provenance: Provenance {
+            stages: Vec::new(),
+            view_provenance: ViewProvenance {
+                motion_source: MotionSource::None,
+                epoch_decision: None,
+                transition: TransitionPhase::Settled,
+                stability_score: 1.0,
+                epoch: ViewEpoch::INITIAL,
+                version: ViewVersion::INITIAL,
+            },
+            frame_receive_ts: MonotonicTs::from_nanos(0),
+            pipeline_complete_ts: MonotonicTs::from_nanos(0),
+            total_latency: nv_core::Duration::from_nanos(0),
+        },
+        metadata: TypedMetadata::new(),
+    });
+
+    c.bench_function("shared_output_arc_clone", |b| {
+        b.iter(|| {
+            black_box(shared.clone());
+        });
+    });
+}
+
+fn broadcast_fanout(c: &mut Criterion) {
+    use nv_core::timestamp::WallTs;
+    use nv_perception::DetectionSet;
+    use nv_runtime::{OutputEnvelope, Provenance, SharedOutput, ViewProvenance};
+    use nv_view::view_state::{ViewEpoch, ViewState, ViewVersion};
+    use nv_view::{MotionSource, TransitionPhase};
+    use tokio::sync::broadcast;
+
+    let (tx, _rx1) = broadcast::channel::<SharedOutput>(64);
+    let _rx2 = tx.subscribe();
+    let _rx3 = tx.subscribe();
+
+    let shared: SharedOutput = Arc::new(OutputEnvelope {
+        feed_id: FeedId::new(1),
+        frame_seq: 0,
+        ts: MonotonicTs::from_nanos(0),
+        wall_ts: WallTs::from_micros(0),
+        detections: DetectionSet::empty(),
+        tracks: Vec::new(),
+        signals: Vec::new(),
+        scene_features: Vec::new(),
+        view: ViewState::fixed_initial(),
+        provenance: Provenance {
+            stages: Vec::new(),
+            view_provenance: ViewProvenance {
+                motion_source: MotionSource::None,
+                epoch_decision: None,
+                transition: TransitionPhase::Settled,
+                stability_score: 1.0,
+                epoch: ViewEpoch::INITIAL,
+                version: ViewVersion::INITIAL,
+            },
+            frame_receive_ts: MonotonicTs::from_nanos(0),
+            pipeline_complete_ts: MonotonicTs::from_nanos(0),
+            total_latency: nv_core::Duration::from_nanos(0),
+        },
+        metadata: TypedMetadata::new(),
+    });
+
+    c.bench_function("broadcast_send_3_subscribers", |b| {
+        b.iter(|| {
+            let _ = black_box(tx.send(shared.clone()));
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    output_envelope_construction,
+    output_arc_clone,
+    broadcast_fanout
+);
+criterion_main!(benches);
