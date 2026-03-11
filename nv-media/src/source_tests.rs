@@ -796,3 +796,28 @@ fn no_liveness_returns_no_next_tick() {
         "no liveness should produce no next_tick hint"
     );
 }
+/// Attempt counter must accumulate across repeated errors without
+/// resetting until a StreamStarted event confirms the stream is live.
+#[test]
+fn attempt_counter_accumulates_without_stream_started() {
+    let (mut src, _, _, _) = started_source(test_spec(), test_reconnect());
+
+    // Simulate 5 consecutive errors (pipeline created but stream never starts).
+    for i in 1..=5 {
+        src.handle_event(MediaEvent::Error {
+            error: MediaError::DecodeFailed {
+                detail: format!("fail {i}"),
+            },
+            debug: None,
+        });
+        assert_eq!(
+            src.current_attempt(),
+            i,
+            "attempt counter should be {i} after {i} errors"
+        );
+    }
+
+    // StreamStarted resets the counter.
+    src.handle_event(MediaEvent::StreamStarted);
+    assert_eq!(src.current_attempt(), 0, "StreamStarted should reset attempts");
+}

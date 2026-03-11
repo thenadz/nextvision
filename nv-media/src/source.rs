@@ -270,8 +270,10 @@ impl MediaSource {
     pub(crate) fn handle_event(&mut self, event: MediaEvent) -> Option<Duration> {
         match event {
             MediaEvent::StreamStarted => {
-                // Stream is confirmed flowing — clear the liveness watchdog.
+                // Stream is confirmed flowing — clear the liveness watchdog
+                // and reset the reconnection attempt counter unconditionally.
                 self.liveness_deadline = None;
+                self.reconnect.reset_attempts();
                 if self.state == SourceState::Running {
                     // Already running — suppress duplicate emission.
                     // This can happen when start() transitions to Running
@@ -279,7 +281,6 @@ impl MediaSource {
                     return None;
                 }
                 self.state = SourceState::Running;
-                self.reconnect.reset_attempts();
                 self.reconnect_deadline = None;
                 tracing::info!(feed_id = %self.feed_id, "stream started");
                 self.emit_health(HealthEvent::SourceConnected {
@@ -548,7 +549,12 @@ impl MediaSource {
         match self.create_session() {
             Ok(()) => {
                 self.state = SourceState::Running;
-                self.reconnect.reset_attempts();
+                // NOTE: attempt counter is NOT reset here. Pipeline
+                // construction succeeding does not mean the stream is
+                // actually flowing — the camera may still be unreachable
+                // and GStreamer will surface a bus error shortly.
+                // reset_attempts() happens in handle_event(StreamStarted)
+                // once frames are confirmed flowing.
                 tracing::info!(
                     feed_id = %self.feed_id,
                     "reconnected successfully"
@@ -771,6 +777,10 @@ impl MediaSource {
 
     pub(crate) fn set_liveness_deadline(&mut self, deadline: Option<Instant>) {
         self.liveness_deadline = deadline;
+    }
+
+    pub(crate) fn current_attempt(&self) -> u32 {
+        self.reconnect.current_attempt()
     }
 }
 
