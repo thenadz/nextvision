@@ -215,12 +215,27 @@ pub trait FrameSink: Send + Sync + 'static {
     /// timeouts, etc. without parsing strings.
     fn on_error(&self, error: MediaError);
 
-    /// End of stream — the source has no more frames to produce.
+    /// End of stream — the source has no more frames to produce from
+    /// the current session.
     ///
-    /// This signals clean termination (e.g., a file source reaching its end).
-    /// After `on_eos()`, no further `on_frame()` calls will occur unless the
-    /// source is restarted.
+    /// Called by the source FSM only when the session is definitively
+    /// over: a non-looping file reaching its end, or a live source whose
+    /// reconnection budget is exhausted. This is a terminal signal.
+    ///
+    /// Implementations should close the frame queue so the worker thread
+    /// observes the `Closed` state and exits the processing loop.
     fn on_eos(&self);
+
+    /// Wake the consumer thread for control-plane processing.
+    ///
+    /// Called by the backend when a lifecycle-relevant bus event occurs
+    /// (error, EOS) to ensure the consumer thread ticks the source
+    /// promptly — even when no frames are flowing and the queue pop
+    /// has no deadline.
+    ///
+    /// The default implementation is a no-op. Implementations backed by
+    /// a frame queue should notify the queue's consumer condvar.
+    fn wake(&self) {}
 }
 
 /// Factory for creating [`MediaIngress`] instances from a source spec.

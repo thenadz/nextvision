@@ -9,6 +9,19 @@ members = [
     "nv-view",
     "nv-runtime",
     "nv-test-util",
+    "samples/nv-byo-yolox",
+    "samples/nv-byo-ocsort",
+    "samples/nv-sample-yolox-ocsort",
+]
+default-members = [
+    "nv-core",
+    "nv-frame",
+    "nv-media",
+    "nv-perception",
+    "nv-temporal",
+    "nv-view",
+    "nv-runtime",
+    "nv-test-util",
 ]
 
 [workspace.package]
@@ -27,6 +40,8 @@ nv-temporal = { path = "nv-temporal" }
 nv-view = { path = "nv-view" }
 nv-runtime = { path = "nv-runtime" }
 nv-test-util = { path = "nv-test-util" }
+nv-byo-yolox = { path = "samples/nv-byo-yolox" }
+nv-byo-ocsort = { path = "samples/nv-byo-ocsort" }
 
 # External
 criterion = { version = "0.5", features = ["html_reports"] }

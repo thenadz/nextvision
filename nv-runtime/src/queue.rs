@@ -15,7 +15,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use nv_frame::FrameEnvelope;
 
@@ -41,12 +41,20 @@ pub(crate) enum PopResult {
     Closed,
     /// The deadline elapsed with no frame available.
     Timeout,
+    /// The consumer was explicitly woken for control-plane processing
+    /// (e.g., a bus error or EOS that requires the worker to tick the
+    /// source). No frame is available, but the caller should take action.
+    Wake,
 }
 
 /// Internal mutable state behind the lock.
 struct QueueInner {
     buf: VecDeque<FrameEnvelope>,
     closed: bool,
+    /// Set by [`wake_consumer()`](FrameQueue::wake_consumer) to signal a
+    /// control-plane wake. Cleared by [`pop()`](FrameQueue::pop) when it
+    /// returns [`PopResult::Wake`].
+    woken: bool,
     total_received: u64,
     total_dropped: u64,
 }
@@ -79,6 +87,7 @@ impl FrameQueue {
             inner: Mutex::new(QueueInner {
                 buf: VecDeque::with_capacity(depth),
                 closed: false,
+                woken: false,
                 total_received: 0,
                 total_dropped: 0,
             }),
@@ -147,13 +156,21 @@ impl FrameQueue {
     pub fn pop(&self, shutdown: &AtomicBool, deadline: Option<Instant>) -> PopResult {
         let mut inner = self.inner.lock().unwrap();
         loop {
+            // Highest priority: deliver any buffered frame.
             if let Some(frame) = inner.buf.pop_front() {
                 self.not_full.notify_one();
                 return PopResult::Frame(frame);
             }
+            // Terminal: closed or shutdown.
             if inner.closed || shutdown.load(Ordering::Relaxed) {
                 return PopResult::Closed;
             }
+            // Control-plane wake: the backend signaled a lifecycle event.
+            if inner.woken {
+                inner.woken = false;
+                return PopResult::Wake;
+            }
+            // Nothing ready — wait for a frame, wake, close, or deadline.
             match deadline {
                 Some(dl) => {
                     let now = Instant::now();
@@ -163,10 +180,13 @@ impl FrameQueue {
                     let (guard, result) =
                         self.not_empty.wait_timeout(inner, dl - now).unwrap();
                     inner = guard;
-                    // If timed out and still empty, return Timeout.
                     if result.timed_out() && inner.buf.is_empty() {
                         if inner.closed || shutdown.load(Ordering::Relaxed) {
                             return PopResult::Closed;
+                        }
+                        if inner.woken {
+                            inner.woken = false;
+                            return PopResult::Wake;
                         }
                         return PopResult::Timeout;
                     }
@@ -180,9 +200,16 @@ impl FrameQueue {
 
     /// Wake the consumer without pushing a frame.
     ///
-    /// Used by the shutdown path to break the consumer out of a
-    /// `Condvar::wait` without the fixed polling delay.
+    /// Sets the `woken` flag so that [`pop()`](Self::pop) returns
+    /// [`PopResult::Wake`] instead of re-entering the wait loop.
+    /// Used by the media backend (via [`FrameSink::on_eos()`] /
+    /// [`FrameSink::wake()`]) to signal lifecycle events that require
+    /// the worker to tick the source.
     pub fn wake_consumer(&self) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.woken = true;
+        }
         self.not_empty.notify_all();
     }
 
@@ -194,26 +221,24 @@ impl FrameQueue {
         self.not_full.notify_all();
     }
 
-    /// Returns `(total_received, total_dropped)`.
+}
+
+#[cfg(test)]
+impl FrameQueue {
     pub fn stats(&self) -> (u64, u64) {
         let inner = self.inner.lock().unwrap();
         (inner.total_received, inner.total_dropped)
     }
 
-    /// Current number of buffered frames.
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().buf.len()
-    }
-
-    /// Whether the queue has been closed.
-    pub fn is_closed(&self) -> bool {
-        self.inner.lock().unwrap().closed
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use nv_core::{FeedId, MonotonicTs, TypedMetadata, WallTs};
     use nv_frame::PixelFormat;
 

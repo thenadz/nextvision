@@ -1,0 +1,18 @@
+[package]
+name = "nv-byo-ocsort"
+description = "OC-SORT multi-object tracker adapter implementing the nv-perception Stage trait."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+nv-core.workspace = true
+nv-frame.workspace = true
+nv-perception.workspace = true
+nv-view.workspace = true
+
+tracing.workspace = true
+
+[dev-dependencies]
+nv-test-util.workspace = true

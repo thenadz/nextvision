@@ -5,6 +5,11 @@
 	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
 	"image": "mcr.microsoft.com/devcontainers/rust:2-1-trixie",
 
-	// Install GStreamer development libraries required by nv-media.
-	"postCreateCommand": "sudo apt-get update && sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly gstreamer1.0-libav"
+	// Forward host X11 display (Windows: X server on host.docker.internal).
+	"containerEnv": {
+		"DISPLAY": "host.docker.internal:0"
+	},
+
+	// Install GStreamer development libraries and X11 runtime deps.
+	"postCreateCommand": "sudo apt-get update && sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly gstreamer1.0-libav libxkbcommon-dev x11-apps"
 }

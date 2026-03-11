@@ -93,9 +93,12 @@ pub(crate) mod worker;
 // Re-export key types at crate root.
 pub use backpressure::BackpressurePolicy;
 pub use feed::{FeedConfig, FeedConfigBuilder, FeedHandle};
-pub use output::{OutputEnvelope, OutputSink, SharedOutput};
+pub use output::{FrameInclusion, OutputEnvelope, OutputSink, SharedOutput};
 pub use provenance::{
     Provenance, StageOutcomeCategory, StageProvenance, StageResult, ViewProvenance,
 };
 pub use runtime::{Runtime, RuntimeBuilder, RuntimeHandle};
 pub use shutdown::{RestartPolicy, RestartTrigger};
+
+// Re-export validation types from nv-perception for convenience.
+pub use nv_perception::{ValidationMode, ValidationWarning};

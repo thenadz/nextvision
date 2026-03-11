@@ -160,12 +160,10 @@ impl FrameSink for FeedFrameSink {
         }
     }
 
-    fn on_error(&self, error: MediaError) {
-        // Forward to health channel so runtime observers see the error.
-        let _ = self.health_tx.send(HealthEvent::SourceDisconnected {
-            feed_id: self.feed_id,
-            reason: error,
-        });
+    fn on_error(&self, _error: MediaError) {
+        // SourceDisconnected is emitted by the source FSM via its
+        // HealthSink — no duplicate emission here.
+        //
         // Wake the consumer so the worker thread ticks the source and
         // advances the reconnection FSM promptly. Without this, an
         // indefinite-deadline pop() would never return.
@@ -174,6 +172,10 @@ impl FrameSink for FeedFrameSink {
 
     fn on_eos(&self) {
         self.queue.close();
+    }
+
+    fn wake(&self) {
+        self.queue.wake_consumer();
     }
 }
 
@@ -269,32 +271,11 @@ impl BackpressureThrottle {
             });
         }
     }
-
-    /// Flush any pending accumulated drops. Called when the session ends.
-    fn flush(&self, health_tx: &broadcast::Sender<HealthEvent>, feed_id: FeedId) {
-        let Ok(mut inner) = self.inner.lock() else {
-            return;
-        };
-        if inner.accumulated > 0 {
-            let delta = inner.accumulated;
-            inner.accumulated = 0;
-            inner.in_backpressure = false;
-            let _ = health_tx.send(HealthEvent::BackpressureDrop {
-                feed_id,
-                frames_dropped: delta,
-            });
-        } else {
-            inner.in_backpressure = false;
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
 // SinkWorker — decoupled per-feed sink thread
 // ---------------------------------------------------------------------------
-
-/// Capacity of the per-feed bounded sink queue.
-const SINK_QUEUE_CAPACITY: usize = 16;
 
 /// Maximum time to wait for the sink worker thread to finish during
 /// shutdown. If the sink's `emit()` is blocked (e.g., on network I/O),
@@ -317,8 +298,9 @@ impl SinkWorker {
         feed_id: FeedId,
         sink: Box<dyn OutputSink>,
         health_tx: broadcast::Sender<HealthEvent>,
+        capacity: usize,
     ) -> Result<Self, RuntimeError> {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<SharedOutput>(SINK_QUEUE_CAPACITY);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<SharedOutput>(capacity);
         let thread = std::thread::Builder::new()
             .name(format!("nv-sink-{}", feed_id))
             .spawn(move || Self::run(feed_id, sink, rx, health_tx))
@@ -486,6 +468,7 @@ pub(crate) fn spawn_feed_worker(
                     config.camera_mode,
                     config.view_state_provider,
                     config.epoch_policy,
+                    config.frame_inclusion,
                 ),
                 output_sink: config.output_sink,
                 ptz_provider: config.ptz_provider,
@@ -495,6 +478,7 @@ pub(crate) fn spawn_feed_worker(
                 is_file_nonloop,
                 lag_detector,
                 had_external_subscribers: false,
+                sink_queue_capacity: config.sink_queue_capacity,
             };
             worker.run();
         })
@@ -529,11 +513,25 @@ struct FeedWorker {
     /// Used to detect the transition to no-subscribers so we can realign
     /// the lag detector even when the send is skipped.
     had_external_subscribers: bool,
+    /// Per-feed output sink queue capacity (bounded channel to sink thread).
+    sink_queue_capacity: usize,
+}
+
+/// Drop guard that ensures `FeedSharedState::alive` is set to `false`
+/// when the worker exits — even on panic.
+struct AliveGuard(Arc<FeedSharedState>);
+
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.alive.store(false, Ordering::Relaxed);
+    }
 }
 
 impl FeedWorker {
     /// Main entry point — runs until shutdown or restart budget exhausted.
     fn run(&mut self) {
+        // Guard ensures alive is set false even on unexpected panic.
+        let _guard = AliveGuard(Arc::clone(&self.shared));
         let mut restart_count: u32 = 0;
         let mut session_start = Instant::now();
 
@@ -639,6 +637,7 @@ impl FeedWorker {
             let exit_reason = self.processing_loop(&queue, &mut *source);
 
             // Cleanup.
+            queue.close();
             self.shared.set_queue(None);
             let _ = source.stop();
             self.executor.stop_stages();
@@ -657,10 +656,20 @@ impl FeedWorker {
                     break;
                 }
                 ExitReason::SourceStopped => {
-                    // Source permanently stopped (reconnection budget exhausted).
-                    self.emit_feed_stopped(StopReason::Fatal {
-                        detail: "source stopped (reconnection budget exhausted)".into(),
-                    });
+                    // Source FSM reported permanently stopped.
+                    // For non-looping files this is terminal EndOfStream.
+                    // For everything else it means reconnect budget was
+                    // exhausted — also terminal.
+                    if self.is_file_nonloop {
+                        let _ = self.health_tx.send(HealthEvent::SourceEos {
+                            feed_id: self.feed_id,
+                        });
+                        self.emit_feed_stopped(StopReason::EndOfStream);
+                    } else {
+                        self.emit_feed_stopped(StopReason::Fatal {
+                            detail: "source stopped (reconnection budget exhausted)".into(),
+                        });
+                    }
                     break;
                 }
                 ExitReason::SinkSpawnFailed => {
@@ -690,7 +699,7 @@ impl FeedWorker {
             }
         }
 
-        self.shared.alive.store(false, Ordering::Relaxed);
+        // `alive` is set to `false` by the AliveGuard drop.
     }
 
     /// Frame processing loop: pop → execute stages → emit output.
@@ -717,6 +726,7 @@ impl FeedWorker {
             self.feed_id,
             sink,
             self.health_tx.clone(),
+            self.sink_queue_capacity,
         ) {
             Ok(w) => w,
             Err(e) => {
@@ -763,12 +773,30 @@ impl FeedWorker {
                 return ExitReason::Shutdown;
             }
 
-            // Handle pause: wait on condvar until resumed or shutdown.
+            // Handle pause: pause the source, wait on condvar, then resume.
             if self.shared.paused.load(Ordering::Relaxed) {
+                // Pause the media source to stop decoding/network I/O.
+                if let Err(e) = source.pause() {
+                    tracing::warn!(
+                        feed_id = %self.feed_id,
+                        error = %e,
+                        "source pause failed (continuing paused state)"
+                    );
+                }
                 let (lock, cvar) = &self.shared.pause_condvar;
                 let mut paused = lock.lock().unwrap();
                 while *paused && !self.shared.shutdown.load(Ordering::Relaxed) {
                     paused = cvar.wait(paused).unwrap();
+                }
+                // Resume the source when leaving paused state.
+                if !self.shared.shutdown.load(Ordering::Relaxed) {
+                    if let Err(e) = source.resume() {
+                        tracing::warn!(
+                            feed_id = %self.feed_id,
+                            error = %e,
+                            "source resume failed"
+                        );
+                    }
                 }
                 continue;
             }
@@ -789,7 +817,7 @@ impl FeedWorker {
                     }
                     return ExitReason::SourceEnded;
                 }
-                PopResult::Timeout => {
+                PopResult::Timeout | PopResult::Wake => {
                     // No frame available — tick the source to drive
                     // bus polling and reconnection.
                     let outcome = source.tick();
@@ -800,13 +828,6 @@ impl FeedWorker {
                     continue;
                 }
             };
-
-            // Tick the source on every frame to drain any pending bus events.
-            let outcome = source.tick();
-            next_tick_hint = outcome.next_tick;
-            if outcome.status == SourceStatus::Stopped {
-                return ExitReason::SourceStopped;
-            }
 
             // Run the pipeline.
             let (maybe_output, health_events) = self.executor.process_frame(&frame);
@@ -852,6 +873,17 @@ impl FeedWorker {
                 // Enqueue for the sink worker (non-blocking).
                 sink_worker.send(shared_out, &mut sink_bp, &self.health_tx, self.feed_id);
             }
+
+            // Tick the source after processing to drain any pending bus
+            // events and update the next_tick_hint for the next pop
+            // deadline.  Do NOT exit immediately when the source reports
+            // Stopped — buffered frames in the queue must be drained
+            // first.  The next pop() will return either another Frame
+            // (continue processing) or Closed/Timeout/Wake, at which
+            // point the stopped status is picked up and the loop exits
+            // cleanly.
+            let outcome = source.tick();
+            next_tick_hint = outcome.next_tick;
 
             // Subscriber transition: external subscribers were present on
             // a prior frame but are gone now. Realign the lag detector to

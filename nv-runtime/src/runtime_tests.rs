@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use nv_core::config::{CameraMode, ReconnectPolicy, SourceSpec};
-use nv_core::error::StageError;
 use nv_core::health::StopReason;
 use nv_core::id::StageId;
 use nv_frame::PixelFormat;
@@ -17,7 +16,7 @@ use nv_test_util::mock_stage::{NoOpStage, PanicStage};
 use std::sync::atomic::Ordering;
 use tokio::sync::broadcast;
 
-use crate::output::{OutputEnvelope, OutputSink, SharedOutput};
+use crate::output::{OutputSink, SharedOutput};
 use crate::shutdown::{RestartPolicy, RestartTrigger};
 
 // ---------------------------------------------------------------------------
@@ -31,6 +30,9 @@ struct MockIngress {
     frame_count: u64,
     fail_on_start: bool,
     frame_delay: std::time::Duration,
+    /// Set by the producer thread when all frames are sent. `tick()`
+    /// checks this and transitions to Stopped.
+    eos_signaled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MediaIngress for MockIngress {
@@ -44,6 +46,7 @@ impl MediaIngress for MockIngress {
         let count = self.frame_count;
         let feed_id = self.feed_id;
         let delay = self.frame_delay;
+        let eos_flag = Arc::clone(&self.eos_signaled);
         std::thread::spawn(move || {
             for i in 0..count {
                 let frame = make_test_frame(feed_id, i);
@@ -52,6 +55,7 @@ impl MediaIngress for MockIngress {
                     std::thread::sleep(delay);
                 }
             }
+            eos_flag.store(true, Ordering::Release);
             sink.on_eos();
         });
         Ok(())
@@ -66,6 +70,15 @@ impl MediaIngress for MockIngress {
     fn resume(&mut self) -> Result<(), nv_core::error::MediaError> {
         Ok(())
     }
+
+    fn tick(&mut self) -> nv_media::ingress::TickOutcome {
+        if self.eos_signaled.load(Ordering::Acquire) {
+            nv_media::ingress::TickOutcome::stopped()
+        } else {
+            nv_media::ingress::TickOutcome::running()
+        }
+    }
+
     fn source_spec(&self) -> &SourceSpec {
         &self.spec
     }
@@ -113,6 +126,7 @@ impl MediaIngressFactory for MockFactory {
             frame_count: self.frame_count,
             fail_on_start: self.fail_on_start,
             frame_delay: self.frame_delay,
+            eos_signaled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }))
     }
 }
@@ -1341,7 +1355,7 @@ fn shutdown_wakes_paused_feed() {
         .unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(20));
-    handle.pause();
+    let _ = handle.pause();
     std::thread::sleep(std::time::Duration::from_millis(20));
 
     let start = std::time::Instant::now();
@@ -1389,6 +1403,108 @@ fn restarts_metric_is_cumulative() {
     );
 
     runtime.shutdown().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// FeedConfigBuilder — validation_mode, add_stage helpers
+// ---------------------------------------------------------------------------
+
+/// `ValidationMode::Error` rejects a misordered pipeline.
+#[test]
+fn validation_mode_error_rejects_bad_ordering() {
+    use nv_perception::{StageCapabilities, ValidationMode};
+
+    struct DetStage;
+    impl Stage for DetStage {
+        fn id(&self) -> StageId { StageId("det") }
+        fn process(&mut self, _: &StageContext<'_>) -> Result<StageOutput, nv_core::error::StageError> {
+            Ok(StageOutput::empty())
+        }
+        fn capabilities(&self) -> Option<StageCapabilities> {
+            Some(StageCapabilities::new().produces_detections())
+        }
+    }
+
+    struct TrkStage;
+    impl Stage for TrkStage {
+        fn id(&self) -> StageId { StageId("trk") }
+        fn process(&mut self, _: &StageContext<'_>) -> Result<StageOutput, nv_core::error::StageError> {
+            Ok(StageOutput::empty())
+        }
+        fn capabilities(&self) -> Option<StageCapabilities> {
+            Some(StageCapabilities::new().consumes_detections().produces_tracks())
+        }
+    }
+
+    // Wrong order: tracker before detector.
+    let result = FeedConfig::builder()
+        .source(SourceSpec::rtsp("rtsp://mock/test"))
+        .camera_mode(CameraMode::Fixed)
+        .stages(vec![Box::new(TrkStage), Box::new(DetStage)])
+        .output_sink(Box::new(CountingSink::new().0))
+        .validation_mode(ValidationMode::Error)
+        .build();
+    assert!(result.is_err(), "misordered pipeline must be rejected in Error mode");
+
+    // Correct order: detector then tracker.
+    let result = FeedConfig::builder()
+        .source(SourceSpec::rtsp("rtsp://mock/test"))
+        .camera_mode(CameraMode::Fixed)
+        .stages(vec![Box::new(DetStage), Box::new(TrkStage)])
+        .output_sink(Box::new(CountingSink::new().0))
+        .validation_mode(ValidationMode::Error)
+        .build();
+    assert!(result.is_ok(), "correctly ordered pipeline must pass in Error mode");
+}
+
+/// `ValidationMode::Off` (default) does not reject a misordered pipeline.
+#[test]
+fn validation_mode_off_allows_bad_ordering() {
+    use nv_perception::{StageCapabilities, ValidationMode};
+
+    struct BadStage;
+    impl Stage for BadStage {
+        fn id(&self) -> StageId { StageId("bad") }
+        fn process(&mut self, _: &StageContext<'_>) -> Result<StageOutput, nv_core::error::StageError> {
+            Ok(StageOutput::empty())
+        }
+        fn capabilities(&self) -> Option<StageCapabilities> {
+            Some(StageCapabilities::new().consumes_detections())
+        }
+    }
+
+    let result = FeedConfig::builder()
+        .source(SourceSpec::rtsp("rtsp://mock/test"))
+        .camera_mode(CameraMode::Fixed)
+        .stages(vec![Box::new(BadStage)])
+        .output_sink(Box::new(CountingSink::new().0))
+        .validation_mode(ValidationMode::Off)
+        .build();
+    assert!(result.is_ok(), "Off mode must not reject");
+}
+
+/// `add_stage` / `add_boxed_stage` build a valid feed config.
+#[test]
+fn add_stage_helpers_build_valid_config() {
+    let result = FeedConfig::builder()
+        .source(SourceSpec::rtsp("rtsp://mock/test"))
+        .camera_mode(CameraMode::Fixed)
+        .add_stage(NoOpStage::new("a"))
+        .add_boxed_stage(Box::new(NoOpStage::new("b")))
+        .output_sink(Box::new(CountingSink::new().0))
+        .build();
+    assert!(result.is_ok(), "add_stage helpers must produce valid config");
+}
+
+/// `add_stage` without any stage call fails (empty stages).
+#[test]
+fn add_stage_empty_is_rejected() {
+    let result = FeedConfig::builder()
+        .source(SourceSpec::rtsp("rtsp://mock/test"))
+        .camera_mode(CameraMode::Fixed)
+        .output_sink(Box::new(CountingSink::new().0))
+        .build();
+    assert!(result.is_err(), "missing stages must be rejected");
 }
 
 // ---------------------------------------------------------------------------
@@ -1996,7 +2112,7 @@ fn bounded_shutdown_when_sink_blocks() {
         .build()
         .unwrap();
 
-    let handle = runtime
+    let _handle = runtime
         .add_feed(build_config(
             vec![Box::new(NoOpStage::new("noop"))],
             Box::new(sink),
@@ -2174,4 +2290,49 @@ fn terminal_stop_emits_exactly_one_feed_stopped() {
     );
 
     runtime.shutdown().unwrap();
+}
+
+// ===========================================================================
+// P7: sink_queue_capacity is configurable
+// ===========================================================================
+
+#[test]
+fn sink_queue_capacity_configurable() {
+    let (sink, _) = CountingSink::new();
+    let config = FeedConfig::builder()
+        .source(SourceSpec::rtsp("rtsp://mock/stream"))
+        .camera_mode(CameraMode::Fixed)
+        .stages(vec![Box::new(nv_test_util::mock_stage::NoOpStage::new("noop")) as Box<dyn Stage>])
+        .output_sink(Box::new(sink))
+        .sink_queue_capacity(32)
+        .build()
+        .expect("valid config");
+    assert_eq!(config.sink_queue_capacity, 32);
+}
+
+#[test]
+fn sink_queue_capacity_defaults_to_16() {
+    let (sink, _) = CountingSink::new();
+    let config = FeedConfig::builder()
+        .source(SourceSpec::rtsp("rtsp://mock/stream"))
+        .camera_mode(CameraMode::Fixed)
+        .stages(vec![Box::new(nv_test_util::mock_stage::NoOpStage::new("noop")) as Box<dyn Stage>])
+        .output_sink(Box::new(sink))
+        .build()
+        .expect("valid config");
+    assert_eq!(config.sink_queue_capacity, 16);
+}
+
+#[test]
+fn sink_queue_capacity_clamped_to_min_1() {
+    let (sink, _) = CountingSink::new();
+    let config = FeedConfig::builder()
+        .source(SourceSpec::rtsp("rtsp://mock/stream"))
+        .camera_mode(CameraMode::Fixed)
+        .stages(vec![Box::new(nv_test_util::mock_stage::NoOpStage::new("noop")) as Box<dyn Stage>])
+        .output_sink(Box::new(sink))
+        .sink_queue_capacity(0)
+        .build()
+        .expect("valid config");
+    assert_eq!(config.sink_queue_capacity, 1);
 }

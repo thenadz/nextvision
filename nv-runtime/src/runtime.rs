@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use nv_core::error::{NvError, RuntimeError};
 use nv_core::health::HealthEvent;
@@ -30,6 +31,10 @@ const DEFAULT_HEALTH_CAPACITY: usize = 256;
 
 /// Default output broadcast channel capacity.
 const DEFAULT_OUTPUT_CAPACITY: usize = 256;
+
+/// Maximum time to wait for a feed worker thread to join during
+/// remove/shutdown. If exceeded, the thread is detached.
+const FEED_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Builder for constructing a [`Runtime`].
 ///
@@ -227,7 +232,7 @@ impl RuntimeInner {
         drop(feeds);
 
         if let Some(handle) = entry.thread {
-            let _ = handle.join();
+            bounded_join(handle, feed_id, &self.health_tx);
         }
         Ok(())
     }
@@ -247,17 +252,62 @@ impl RuntimeInner {
         let entries: Vec<_> = feeds.drain().collect();
         drop(feeds);
 
-        for (_, mut entry) in entries {
+        for (id, mut entry) in entries {
             if let Some(handle) = entry.thread.take() {
-                let _ = handle.join();
+                bounded_join(handle, id, &self.health_tx);
             }
         }
 
-        // All worker threads have stopped. Flush any pending sentinel-
-        // observed delta that was throttled but never emitted.
+        // All worker threads have stopped (or detached). Flush any pending
+        // sentinel-observed delta that was throttled but never emitted.
         self.lag_detector.flush(&self.health_tx);
 
         Ok(())
+    }
+}
+
+/// Join a feed worker thread with a bounded timeout.
+///
+/// If the thread does not finish within [`FEED_JOIN_TIMEOUT`], it is
+/// detached (the helper thread will eventually join when the worker
+/// finishes) and a `FeedStopped` health event with a timeout reason
+/// is emitted.
+fn bounded_join(
+    handle: std::thread::JoinHandle<()>,
+    feed_id: FeedId,
+    health_tx: &broadcast::Sender<HealthEvent>,
+) {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let _joiner = std::thread::Builder::new()
+        .name(format!("nv-join-{feed_id}"))
+        .spawn(move || {
+            let result = handle.join();
+            let _ = done_tx.send(result);
+        });
+    match done_rx.recv_timeout(FEED_JOIN_TIMEOUT) {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => {
+            tracing::error!(
+                feed_id = %feed_id,
+                "feed worker thread panicked during join",
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                feed_id = %feed_id,
+                timeout_secs = FEED_JOIN_TIMEOUT.as_secs(),
+                "feed worker thread did not finish within timeout — detaching",
+            );
+            let _ = health_tx.send(HealthEvent::FeedStopped {
+                feed_id,
+                reason: nv_core::health::StopReason::Fatal {
+                    detail: format!(
+                        "worker thread did not join within {}s — detached",
+                        FEED_JOIN_TIMEOUT.as_secs()
+                    ),
+                },
+            });
+        }
     }
 }
 

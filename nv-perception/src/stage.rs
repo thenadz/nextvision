@@ -81,6 +81,110 @@ pub enum StageCategory {
     Custom,
 }
 
+/// Declares what artifact types a stage produces and consumes.
+///
+/// Used by [`StagePipeline::validate()`](crate::StagePipeline::validate) to
+/// detect unsatisfied dependencies (e.g., a tracker that consumes detections
+/// placed before the detector that produces them).
+///
+/// Stages report capabilities via [`Stage::capabilities()`]. The default
+/// implementation returns `None`, meaning the stage opts out of validation.
+///
+/// # Validated fields
+///
+/// Currently, [`validate_stages()`](crate::validate_stages) checks:
+/// - `consumes_detections` / `produces_detections`
+/// - `consumes_tracks` / `produces_tracks`
+///
+/// The remaining fields (`consumes_temporal`, `produces_signals`,
+/// `produces_scene_features`) are informational — they are available
+/// for external tooling and future validation but are not enforced
+/// by the built-in validator.
+///
+/// # Example
+///
+/// ```
+/// use nv_perception::StageCapabilities;
+///
+/// let caps = StageCapabilities::new()
+///     .consumes_detections()
+///     .produces_tracks();
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct StageCapabilities {
+    /// Stage reads detections from the artifact accumulator.
+    pub consumes_detections: bool,
+    /// Stage reads tracks from the artifact accumulator.
+    pub consumes_tracks: bool,
+    /// Stage reads temporal state.
+    pub consumes_temporal: bool,
+    /// Stage produces detections.
+    pub produces_detections: bool,
+    /// Stage produces tracks.
+    pub produces_tracks: bool,
+    /// Stage produces signals.
+    pub produces_signals: bool,
+    /// Stage produces scene features.
+    pub produces_scene_features: bool,
+}
+
+impl StageCapabilities {
+    /// Create empty capabilities (nothing consumed or produced).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Mark this stage as consuming detections.
+    #[must_use]
+    pub fn consumes_detections(mut self) -> Self {
+        self.consumes_detections = true;
+        self
+    }
+
+    /// Mark this stage as consuming tracks.
+    #[must_use]
+    pub fn consumes_tracks(mut self) -> Self {
+        self.consumes_tracks = true;
+        self
+    }
+
+    /// Mark this stage as consuming temporal state.
+    #[must_use]
+    pub fn consumes_temporal(mut self) -> Self {
+        self.consumes_temporal = true;
+        self
+    }
+
+    /// Mark this stage as producing detections.
+    #[must_use]
+    pub fn produces_detections(mut self) -> Self {
+        self.produces_detections = true;
+        self
+    }
+
+    /// Mark this stage as producing tracks.
+    #[must_use]
+    pub fn produces_tracks(mut self) -> Self {
+        self.produces_tracks = true;
+        self
+    }
+
+    /// Mark this stage as producing signals.
+    #[must_use]
+    pub fn produces_signals(mut self) -> Self {
+        self.produces_signals = true;
+        self
+    }
+
+    /// Mark this stage as producing scene features.
+    #[must_use]
+    pub fn produces_scene_features(mut self) -> Self {
+        self.produces_scene_features = true;
+        self
+    }
+}
+
 /// Context provided to every stage invocation.
 ///
 /// Contains the current frame, accumulated artifacts from prior stages,
@@ -189,6 +293,96 @@ impl StageOutput {
             ..Self::default()
         }
     }
+
+    /// Create a stage output containing a single typed artifact.
+    ///
+    /// This is useful for stages that produce a single custom artifact
+    /// type for downstream consumption.
+    #[must_use]
+    pub fn with_artifact<T: Clone + Send + Sync + 'static>(value: T) -> Self {
+        let mut artifacts = TypedMetadata::new();
+        artifacts.insert(value);
+        Self {
+            artifacts,
+            ..Self::default()
+        }
+    }
+
+    /// Start building a [`StageOutput`] incrementally.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use nv_perception::StageOutput;
+    ///
+    /// let output = StageOutput::build()
+    ///     .detections(Default::default())
+    ///     .artifact(42_u32)
+    ///     .finish();
+    /// ```
+    #[must_use]
+    pub fn build() -> StageOutputBuilder {
+        StageOutputBuilder {
+            inner: Self::default(),
+        }
+    }
+}
+
+/// Incremental builder for [`StageOutput`].
+///
+/// Created via [`StageOutput::build()`]. Each setter returns `self` for chaining.
+pub struct StageOutputBuilder {
+    inner: StageOutput,
+}
+
+impl StageOutputBuilder {
+    /// Set the detection set.
+    #[must_use]
+    pub fn detections(mut self, detections: DetectionSet) -> Self {
+        self.inner.detections = Some(detections);
+        self
+    }
+
+    /// Set the track set.
+    #[must_use]
+    pub fn tracks(mut self, tracks: Vec<Track>) -> Self {
+        self.inner.tracks = Some(tracks);
+        self
+    }
+
+    /// Append a signal.
+    #[must_use]
+    pub fn signal(mut self, signal: DerivedSignal) -> Self {
+        self.inner.signals.push(signal);
+        self
+    }
+
+    /// Append signals.
+    #[must_use]
+    pub fn signals(mut self, signals: Vec<DerivedSignal>) -> Self {
+        self.inner.signals.extend(signals);
+        self
+    }
+
+    /// Append a scene feature.
+    #[must_use]
+    pub fn scene_feature(mut self, feature: SceneFeature) -> Self {
+        self.inner.scene_features.push(feature);
+        self
+    }
+
+    /// Insert a typed artifact.
+    #[must_use]
+    pub fn artifact<T: Clone + Send + Sync + 'static>(mut self, value: T) -> Self {
+        self.inner.artifacts.insert(value);
+        self
+    }
+
+    /// Consume the builder and produce the [`StageOutput`].
+    #[must_use]
+    pub fn finish(self) -> StageOutput {
+        self.inner
+    }
 }
 
 /// The core user-implementable perception trait.
@@ -275,5 +469,60 @@ pub trait Stage: Send + 'static {
     /// composition validation and category-aware metrics.
     fn category(&self) -> StageCategory {
         StageCategory::Custom
+    }
+
+    /// Declare this stage's input/output capabilities for pipeline validation.
+    ///
+    /// Returns `None` by default, opting the stage out of dependency
+    /// validation. Override to enable
+    /// [`StagePipeline::validate()`](crate::StagePipeline::validate).
+    fn capabilities(&self) -> Option<StageCapabilities> {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_output_with_artifact() {
+        #[derive(Clone, Debug, PartialEq)]
+        struct CustomScore(f64);
+
+        let output = StageOutput::with_artifact(CustomScore(0.42));
+        assert!(output.detections.is_none());
+        assert!(output.tracks.is_none());
+        assert_eq!(
+            output.artifacts.get::<CustomScore>(),
+            Some(&CustomScore(0.42))
+        );
+    }
+
+    #[test]
+    fn stage_output_builder() {
+        #[derive(Clone, Debug, PartialEq)]
+        struct Tag(u32);
+
+        let dets = DetectionSet::empty();
+        let output = StageOutput::build()
+            .detections(dets)
+            .artifact(Tag(7))
+            .finish();
+
+        assert!(output.detections.is_some());
+        assert_eq!(output.artifacts.get::<Tag>(), Some(&Tag(7)));
+    }
+
+    #[test]
+    fn stage_capabilities_builder() {
+        let caps = StageCapabilities::new()
+            .consumes_detections()
+            .produces_tracks();
+
+        assert!(caps.consumes_detections);
+        assert!(!caps.consumes_tracks);
+        assert!(caps.produces_tracks);
+        assert!(!caps.produces_detections);
     }
 }

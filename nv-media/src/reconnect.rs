@@ -67,7 +67,10 @@ impl ReconnectTracker {
         self.attempt
     }
 
-    /// Lifetime reconnection count.
+}
+
+#[cfg(test)]
+impl ReconnectTracker {
     pub(crate) fn total_reconnects(&self) -> u32 {
         self.total_reconnects
     }

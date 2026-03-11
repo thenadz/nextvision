@@ -40,8 +40,10 @@ pub(crate) enum OutputFormat {
     /// 8-bit RGB (3 bytes per pixel).
     Rgb,
     /// 8-bit BGR (3 bytes per pixel, OpenCV-native ordering).
+    #[allow(dead_code)] // used in gst-backend format negotiation
     Bgr,
     /// 8-bit RGBA (4 bytes per pixel).
+    #[allow(dead_code)] // used in gst-backend format negotiation
     Rgba,
 }
 
@@ -108,33 +110,6 @@ impl PipelineBuilder {
         self
     }
 
-    /// Set the latency hint for live source jitter buffers (milliseconds).
-    pub fn latency_ms(mut self, ms: u32) -> Self {
-        self.latency_ms = ms;
-        self
-    }
-
-    /// Determine the GStreamer source element name for the configured spec.
-    pub fn source_element_name(&self) -> &'static str {
-        match &self.spec {
-            SourceSpec::Rtsp { .. } => "rtspsrc",
-            SourceSpec::File { .. } => "filesrc",
-            SourceSpec::V4l2 { .. } => "v4l2src",
-            SourceSpec::Custom { .. } => "custom",
-        }
-    }
-
-    /// RTSP transport property value, if applicable.
-    fn rtsp_protocols(&self) -> Option<&'static str> {
-        match &self.spec {
-            SourceSpec::Rtsp { transport, .. } => Some(match transport {
-                RtspTransport::Tcp => "tcp",
-                RtspTransport::UdpUnicast => "udp",
-            }),
-            _ => None,
-        }
-    }
-
     /// Construct the GStreamer pipeline, appsink, and bus handle.
     ///
     /// # Pipeline construction steps
@@ -161,11 +136,11 @@ impl PipelineBuilder {
             SourceSpec::Rtsp { url, transport } => gst::ElementFactory::make("rtspsrc")
                 .property("location", url.as_str())
                 .property("latency", self.latency_ms)
-                .property(
+                .property_from_str(
                     "protocols",
                     match transport {
                         RtspTransport::Tcp => "tcp",
-                        RtspTransport::UdpUnicast => "udp",
+                        RtspTransport::UdpUnicast => "udp-unicast",
                     },
                 )
                 .build()
@@ -384,6 +359,33 @@ pub(crate) struct BuiltPipeline {
 #[cfg(not(feature = "gst-backend"))]
 pub(crate) struct BuiltPipeline {
     _private: (),
+}
+
+#[cfg(test)]
+impl PipelineBuilder {
+    pub fn latency_ms(mut self, ms: u32) -> Self {
+        self.latency_ms = ms;
+        self
+    }
+
+    pub fn source_element_name(&self) -> &'static str {
+        match &self.spec {
+            SourceSpec::Rtsp { .. } => "rtspsrc",
+            SourceSpec::File { .. } => "filesrc",
+            SourceSpec::V4l2 { .. } => "v4l2src",
+            SourceSpec::Custom { .. } => "custom",
+        }
+    }
+
+    fn rtsp_protocols(&self) -> Option<&'static str> {
+        match &self.spec {
+            SourceSpec::Rtsp { transport, .. } => Some(match transport {
+                RtspTransport::Tcp => "tcp",
+                RtspTransport::UdpUnicast => "udp",
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

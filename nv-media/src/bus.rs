@@ -34,7 +34,9 @@ pub(crate) enum BusMessage {
 
     /// A pipeline element changed state.
     StateChanged {
+        #[allow(dead_code)] // read under gst-backend
         old: ElementState,
+        #[allow(dead_code)] // read under gst-backend
         new: ElementState,
     },
 
@@ -45,7 +47,10 @@ pub(crate) enum BusMessage {
     Latency,
 
     /// Buffering progress (e.g., for network sources with jitter buffers).
-    Buffering { percent: u32 },
+    Buffering {
+        #[allow(dead_code)] // read under gst-backend
+        percent: u32,
+    },
 }
 
 /// GStreamer element state (library-internal mirror).

@@ -52,18 +52,18 @@
 //! thread and converted to [`MonotonicTs`] offsets from the pipeline
 //! epoch so they sit in the same clock domain as frame timestamps.
 
-use std::sync::Arc;
+use std::collections::HashSet;
 use std::time::Instant;
 
-use nv_core::TypedMetadata;
 use nv_core::config::CameraMode;
 use nv_core::error::StageError;
 use nv_core::health::HealthEvent;
 use nv_core::id::FeedId;
 use nv_core::metrics::StageMetrics;
 use nv_core::timestamp::{Duration, MonotonicTs};
+use nv_core::TrackId;
 use nv_frame::FrameEnvelope;
-use nv_perception::{PerceptionArtifacts, Stage, StageContext, StageOutput};
+use nv_perception::{PerceptionArtifacts, Stage, StageContext};
 use nv_temporal::{RetentionPolicy, TemporalStore};
 use nv_view::{
     CameraMotionState, EpochDecision, EpochPolicy, EpochPolicyContext, MotionPollContext,
@@ -71,6 +71,7 @@ use nv_view::{
 };
 
 use crate::output::OutputEnvelope;
+use crate::output::FrameInclusion;
 use crate::provenance::{
     Provenance, StageOutcomeCategory, StageProvenance, StageResult, ViewProvenance,
 };
@@ -98,6 +99,12 @@ pub(crate) struct PipelineExecutor {
     clock_anchor_ts: MonotonicTs,
     /// Duration the camera has been in the current motion state.
     motion_state_start: Instant,
+    /// Whether to include the source frame in output envelopes.
+    frame_inclusion: FrameInclusion,
+    /// Reusable buffer for track-ending: current frame's track IDs.
+    track_id_buf: HashSet<TrackId>,
+    /// Reusable buffer for track-ending: IDs of tracks to end.
+    ended_buf: Vec<TrackId>,
 }
 
 impl PipelineExecutor {
@@ -110,6 +117,7 @@ impl PipelineExecutor {
         camera_mode: CameraMode,
         view_state_provider: Option<Box<dyn ViewStateProvider>>,
         epoch_policy: Box<dyn EpochPolicy>,
+        frame_inclusion: FrameInclusion,
     ) -> Self {
         let view_state = match camera_mode {
             CameraMode::Fixed => ViewState::fixed_initial(),
@@ -138,38 +146,79 @@ impl PipelineExecutor {
             clock_anchor: now,
             clock_anchor_ts: MonotonicTs::from_nanos(0),
             motion_state_start: now,
+            frame_inclusion,
+            track_id_buf: HashSet::new(),
+            ended_buf: Vec::new(),
         }
     }
 
     /// Call `on_start()` on each stage in order.
     ///
-    /// If any stage fails, previously-started stages are stopped (best-effort)
-    /// and the error is returned.
+    /// If any stage fails or panics, previously-started stages are stopped
+    /// (best-effort) and the error is returned.
     pub fn start_stages(&mut self) -> Result<(), StageError> {
-        let mut started = 0;
-        for stage in &mut self.stages {
-            if let Err(e) = stage.on_start() {
-                // Best-effort stop of already-started stages.
-                for s in &mut self.stages[..started] {
-                    let _ = s.on_stop();
+        for i in 0..self.stages.len() {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.stages[i].on_start()
+            }));
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    self.rollback_started_stages(i);
+                    return Err(e);
                 }
-                return Err(e);
+                Err(_) => {
+                    let stage_id = self.stages[i].id();
+                    tracing::error!(
+                        feed_id = %self.feed_id,
+                        stage_id = %stage_id,
+                        "stage on_start() panicked"
+                    );
+                    self.rollback_started_stages(i);
+                    return Err(StageError::ProcessingFailed {
+                        stage_id,
+                        detail: "on_start() panicked".into(),
+                    });
+                }
             }
-            started += 1;
         }
         Ok(())
     }
 
-    /// Call `on_stop()` on each stage — best-effort, errors are logged.
+    /// Best-effort stop of stages `[0..count)`. Used on startup failure.
+    fn rollback_started_stages(&mut self, count: usize) {
+        for s in &mut self.stages[..count] {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = s.on_stop();
+            }));
+        }
+    }
+
+    /// Call `on_stop()` on each stage — best-effort, errors and panics
+    /// are logged.
     pub fn stop_stages(&mut self) {
         for stage in &mut self.stages {
-            if let Err(e) = stage.on_stop() {
-                tracing::warn!(
-                    feed_id = %self.feed_id,
-                    stage_id = %stage.id(),
-                    error = %e,
-                    "stage on_stop error (ignored)"
-                );
+            let stage_id = stage.id();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                stage.on_stop()
+            }));
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        feed_id = %self.feed_id,
+                        stage_id = %stage_id,
+                        error = %e,
+                        "stage on_stop error (ignored)"
+                    );
+                }
+                Err(_) => {
+                    tracing::error!(
+                        feed_id = %self.feed_id,
+                        stage_id = %stage_id,
+                        "stage on_stop() panicked (ignored)"
+                    );
+                }
             }
         }
     }
@@ -299,13 +348,26 @@ impl PipelineExecutor {
 
                 // Notify stages.
                 for stage in &mut self.stages {
-                    if let Err(e) = stage.on_view_epoch_change(new_epoch) {
-                        tracing::warn!(
-                            feed_id = %self.feed_id,
-                            stage_id = %stage.id(),
-                            error = %e,
-                            "stage on_view_epoch_change error (ignored)"
-                        );
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        stage.on_view_epoch_change(new_epoch)
+                    }));
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                feed_id = %self.feed_id,
+                                stage_id = %stage.id(),
+                                error = %e,
+                                "stage on_view_epoch_change error (ignored)"
+                            );
+                        }
+                        Err(_) => {
+                            tracing::error!(
+                                feed_id = %self.feed_id,
+                                stage_id = %stage.id(),
+                                "stage on_view_epoch_change panicked (ignored)"
+                            );
+                        }
                     }
                 }
 
@@ -451,8 +513,13 @@ impl PipelineExecutor {
         }
 
         // --- Temporal commit (Issue 6) ---
-        // Commit the merged track set via TemporalStore's encapsulated
-        // commit_track + enforce_retention methods.
+        //
+        // Tracks in the output envelope are **stage-authoritative**: they
+        // reflect exactly what the perception stages produced, regardless
+        // of temporal-store admission. If the store rejects a track
+        // (e.g., capacity limit), a health event is emitted but the track
+        // still appears in the output. Consumers who need to know which
+        // tracks have temporal history should consult the store snapshot.
         let now_ts = frame.ts();
         let current_epoch = self.view_state.epoch;
 
@@ -470,16 +537,17 @@ impl PipelineExecutor {
         // any track previously in the temporal store but absent from
         // this frame's track set is considered normally ended.
         if artifacts.tracks_authoritative {
-            let current_ids: std::collections::HashSet<nv_core::TrackId> =
-                artifacts.tracks.iter().map(|t| t.id).collect();
-            let ended: Vec<nv_core::TrackId> = self
-                .temporal
-                .track_ids()
-                .filter(|id| !current_ids.contains(id))
-                .copied()
-                .collect();
-            for id in ended {
-                self.temporal.end_track(&id);
+            self.track_id_buf.clear();
+            self.track_id_buf.extend(artifacts.tracks.iter().map(|t| t.id));
+            self.ended_buf.clear();
+            self.ended_buf.extend(
+                self.temporal
+                    .track_ids()
+                    .filter(|id| !self.track_id_buf.contains(id))
+                    .copied(),
+            );
+            for id in &self.ended_buf {
+                self.temporal.end_track(id);
             }
         }
 
@@ -515,14 +583,13 @@ impl PipelineExecutor {
                 total_latency,
             },
             metadata: artifacts.stage_artifacts,
+            frame: match self.frame_inclusion {
+                FrameInclusion::Always => Some(frame.clone()),
+                FrameInclusion::Never => None,
+            },
         };
 
         (Some(output), health_events)
-    }
-
-    /// Number of frames processed by this executor.
-    pub fn frames_processed(&self) -> u64 {
-        self.frames_processed
     }
 
     /// Clear temporal state and increment epoch (called on feed restart).
@@ -624,10 +691,19 @@ fn derive_motion_state(report: &MotionReport) -> CameraMotionState {
 }
 
 #[cfg(test)]
+impl PipelineExecutor {
+    pub fn frames_processed(&self) -> u64 {
+        self.frames_processed
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use nv_core::config::CameraMode;
-    use nv_core::id::FeedId;
+    use nv_core::id::{FeedId, StageId};
+    use nv_perception::StageOutput;
     use nv_temporal::RetentionPolicy;
     use nv_view::{DefaultEpochPolicy, ViewEpoch};
 
@@ -644,6 +720,7 @@ mod tests {
             CameraMode::Fixed,
             None,
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         )
     }
 
@@ -808,6 +885,7 @@ mod tests {
             CameraMode::Fixed,
             None,
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         );
         exec.start_stages().unwrap();
 
@@ -865,6 +943,7 @@ mod tests {
             CameraMode::Fixed,
             None,
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         );
         exec.start_stages().unwrap();
 
@@ -1061,6 +1140,7 @@ mod tests {
             CameraMode::Fixed,
             None,
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         );
         exec.start_stages().unwrap();
 
@@ -1122,6 +1202,7 @@ mod tests {
             CameraMode::Fixed,
             None,
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         );
         exec.start_stages().unwrap();
 
@@ -1166,6 +1247,7 @@ mod tests {
             CameraMode::Fixed,
             None,
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         );
         exec.start_stages().unwrap();
 
@@ -1232,6 +1314,7 @@ mod tests {
             CameraMode::Fixed,
             None,
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         );
 
         let frame = nv_test_util::synthetic::solid_gray(
@@ -1279,6 +1362,7 @@ mod tests {
             CameraMode::Observed,
             Some(Box::new(StableProvider)),
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         );
 
         let frame = nv_test_util::synthetic::solid_gray(
@@ -1337,6 +1421,7 @@ mod tests {
             CameraMode::Observed,
             Some(Box::new(SmallPtzProvider)),
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         );
 
         // First frame initializes PTZ baseline (no previous ptz → Continue on
@@ -1417,6 +1502,7 @@ mod tests {
             CameraMode::Fixed,
             None,
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         );
         exec.start_stages().unwrap();
 
@@ -1450,6 +1536,7 @@ mod tests {
             CameraMode::Fixed,
             None,
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         );
         exec.start_stages().unwrap();
 
@@ -1517,6 +1604,7 @@ mod tests {
             CameraMode::Fixed,
             None,
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         );
         exec.start_stages().unwrap();
 
@@ -1595,6 +1683,7 @@ mod tests {
             CameraMode::Fixed,
             None,
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         );
         exec.start_stages().unwrap();
 
@@ -1633,6 +1722,7 @@ mod tests {
             CameraMode::Fixed,
             None,
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         );
         exec.start_stages().unwrap();
 
@@ -1664,6 +1754,7 @@ mod tests {
             CameraMode::Fixed,
             None,
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         );
         exec.start_stages().unwrap();
 
@@ -1718,6 +1809,7 @@ mod tests {
             CameraMode::Fixed,
             None,
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         );
         exec.start_stages().unwrap();
 
@@ -1757,6 +1849,7 @@ mod tests {
             CameraMode::Fixed,
             None,
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         );
         let mut exec_b = PipelineExecutor::new(
             FeedId::new(2),
@@ -1768,6 +1861,7 @@ mod tests {
             CameraMode::Fixed,
             None,
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         );
         exec_a.start_stages().unwrap();
         exec_b.start_stages().unwrap();
@@ -1830,6 +1924,7 @@ mod tests {
             CameraMode::Fixed,
             None,
             Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
         );
         exec.start_stages().unwrap();
 
@@ -1845,5 +1940,130 @@ mod tests {
         let out = output.expect("should produce output");
         assert_eq!(out.detections.len(), 4);
         assert_eq!(out.tracks.len(), 4);
+    }
+
+    // ---------------------------------------------------------------
+    // Frame inclusion policy tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn frame_inclusion_never_produces_no_frame() {
+        let mut exec = make_executor();
+        exec.start_stages().unwrap();
+
+        let frame = nv_test_util::synthetic::solid_gray(
+            FeedId::new(1),
+            0,
+            MonotonicTs::from_nanos(1_000_000),
+            2,
+            2,
+            128,
+        );
+        let (output, _) = exec.process_frame(&frame);
+        let out = output.expect("should produce output");
+        assert!(out.frame.is_none());
+    }
+
+    #[test]
+    fn frame_inclusion_always_includes_frame() {
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(1),
+            Vec::new(),
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Always,
+        );
+        exec.start_stages().unwrap();
+
+        let frame = nv_test_util::synthetic::solid_gray(
+            FeedId::new(1),
+            0,
+            MonotonicTs::from_nanos(1_000_000),
+            2,
+            2,
+            128,
+        );
+        let (output, _) = exec.process_frame(&frame);
+        let out = output.expect("should produce output");
+        assert!(out.frame.is_some());
+        // Zero-copy: same backing data (Arc bump, not pixel copy).
+        assert_eq!(out.frame.as_ref().unwrap().seq(), frame.seq());
+    }
+
+    // ---------------------------------------------------------------
+    // P2: Panic containment in start_stages / stop_stages
+    // ---------------------------------------------------------------
+
+    /// A stage that panics in on_start.
+    struct PanicOnStartStage;
+    impl Stage for PanicOnStartStage {
+        fn id(&self) -> StageId { StageId("panic-start") }
+        fn process(&mut self, _ctx: &StageContext<'_>) -> Result<StageOutput, StageError> {
+            Ok(StageOutput::empty())
+        }
+        fn on_start(&mut self) -> Result<(), StageError> {
+            panic!("intentional on_start panic");
+        }
+    }
+
+    /// A stage that panics in on_stop.
+    struct PanicOnStopStage {
+        started: bool,
+    }
+    impl PanicOnStopStage {
+        fn new() -> Self { Self { started: false } }
+    }
+    impl Stage for PanicOnStopStage {
+        fn id(&self) -> StageId { StageId("panic-stop") }
+        fn process(&mut self, _ctx: &StageContext<'_>) -> Result<StageOutput, StageError> {
+            Ok(StageOutput::empty())
+        }
+        fn on_start(&mut self) -> Result<(), StageError> {
+            self.started = true;
+            Ok(())
+        }
+        fn on_stop(&mut self) -> Result<(), StageError> {
+            panic!("intentional on_stop panic");
+        }
+    }
+
+    #[test]
+    fn start_stages_catches_panic() {
+        let stages: Vec<Box<dyn Stage>> = vec![Box::new(PanicOnStartStage)];
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(1),
+            stages,
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
+        );
+        let result = exec.start_stages();
+        assert!(result.is_err(), "start_stages should return error on panic");
+        let err = result.unwrap_err();
+        assert!(
+            format!("{err}").contains("panicked"),
+            "error should mention panic: {err}"
+        );
+    }
+
+    #[test]
+    fn stop_stages_catches_panic() {
+        let stages: Vec<Box<dyn Stage>> = vec![Box::new(PanicOnStopStage::new())];
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(1),
+            stages,
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
+        );
+        exec.start_stages().unwrap();
+        // Should not panic — catches the panic internally.
+        exec.stop_stages();
     }
 }

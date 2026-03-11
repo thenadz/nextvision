@@ -1265,6 +1265,8 @@ pub struct OutputEnvelope {
     pub view: ViewState,
     pub provenance: Provenance,
     pub metadata: TypedMetadata,
+    /// Present only when `FrameInclusion::Always` is set on the feed.
+    pub frame: Option<FrameEnvelope>,
 }
 ```
 

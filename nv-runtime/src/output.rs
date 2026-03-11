@@ -7,11 +7,30 @@ use nv_core::health::HealthEvent;
 use nv_core::id::FeedId;
 use nv_core::timestamp::{MonotonicTs, WallTs};
 use nv_core::TypedMetadata;
+use nv_frame::FrameEnvelope;
 use nv_perception::{DerivedSignal, DetectionSet, SceneFeature, Track};
 use nv_view::ViewState;
 use tokio::sync::broadcast;
 
 use crate::provenance::Provenance;
+
+/// Controls whether the source [`FrameEnvelope`] is included in the
+/// [`OutputEnvelope`].
+///
+/// Default is [`Never`](FrameInclusion::Never) — output contains only
+/// perception artifacts. Use [`Always`](FrameInclusion::Always) when
+/// downstream consumers need access to the pixel data (e.g., annotation
+/// overlays, frame archival, or visual debugging).
+///
+/// Because `FrameEnvelope` is `Arc`-backed, inclusion is zero-copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FrameInclusion {
+    /// Never include frames in output (default).
+    #[default]
+    Never,
+    /// Always include the source frame in output.
+    Always,
+}
 
 /// Structured output for one processed frame.
 ///
@@ -45,6 +64,11 @@ pub struct OutputEnvelope {
     pub provenance: Provenance,
     /// Extensible output metadata.
     pub metadata: TypedMetadata,
+    /// The source frame, present only when [`FrameInclusion::Always`] is
+    /// configured on the feed.
+    ///
+    /// This is a zero-copy `Arc` clone of the frame the pipeline processed.
+    pub frame: Option<FrameEnvelope>,
 }
 
 /// User-implementable trait: receives structured outputs from the pipeline.
@@ -376,6 +400,7 @@ mod tests {
                 total_latency: nv_core::Duration::from_nanos(0),
             },
             metadata: TypedMetadata::new(),
+            frame: None,
         })
     }
 

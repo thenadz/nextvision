@@ -37,6 +37,24 @@
 use crate::stage::{Stage, StageCategory};
 use nv_core::id::StageId;
 
+/// Controls whether [`StagePipeline::validate`] / [`validate_stages`]
+/// warnings are ignored, logged, or promoted to hard errors.
+///
+/// Used by [`FeedConfigBuilder`](nv_runtime) to wire validation into
+/// the normal build path without requiring callers to invoke
+/// `validate()` manually.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ValidationMode {
+    /// Validation is skipped entirely (default).
+    #[default]
+    Off,
+    /// Validation runs; warnings are returned but do not prevent
+    /// pipeline construction.
+    Warn,
+    /// Validation runs; any warning is promoted to a hard error.
+    Error,
+}
+
 /// An ordered, validated collection of perception stages.
 ///
 /// Built via [`StagePipeline::builder()`]. The pipeline can be inspected
@@ -89,6 +107,91 @@ impl StagePipeline {
     pub fn into_stages(self) -> Vec<Box<dyn Stage>> {
         self.stages
     }
+
+    /// Validate stage ordering based on declared [`StageCapabilities`].
+    ///
+    /// Returns a (possibly empty) list of warnings. Stages that return
+    /// `None` from [`Stage::capabilities()`] are silently skipped.
+    ///
+    /// Warnings are advisory — the pipeline will still execute regardless.
+    /// This allows pipeline builders to catch common ordering mistakes
+    /// (e.g., placing a tracker before a detector) at construction time.
+    #[must_use]
+    pub fn validate(&self) -> Vec<ValidationWarning> {
+        validate_stages(&self.stages)
+    }
+}
+
+/// Advisory warning from [`StagePipeline::validate()`].
+///
+/// These do **not** prevent pipeline execution. They flag likely
+/// composition mistakes that the builder may want to address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValidationWarning {
+    /// A stage declares that it consumes an artifact type that no
+    /// earlier stage produces.
+    UnsatisfiedDependency {
+        /// The stage with the unsatisfied dependency.
+        stage_id: StageId,
+        /// Human-readable name of the missing artifact type.
+        missing: &'static str,
+    },
+    /// Two or more stages share the same [`StageId`].
+    DuplicateStageId {
+        /// The duplicated stage ID.
+        stage_id: StageId,
+    },
+}
+
+/// Validate an ordered stage slice and return advisory warnings.
+///
+/// This is the same logic as [`StagePipeline::validate`] but operates
+/// on a borrowed slice, making it usable by [`FeedConfigBuilder`]
+/// without requiring a `StagePipeline`.
+#[must_use]
+pub fn validate_stages(stages: &[Box<dyn Stage>]) -> Vec<ValidationWarning> {
+    let mut warnings = Vec::new();
+    let mut detections_available = false;
+    let mut tracks_available = false;
+
+    for stage in stages {
+        let caps = match stage.capabilities() {
+            Some(c) => c,
+            None => continue,
+        };
+        let id = stage.id();
+
+        if caps.consumes_detections && !detections_available {
+            warnings.push(ValidationWarning::UnsatisfiedDependency {
+                stage_id: id,
+                missing: "detections",
+            });
+        }
+        if caps.consumes_tracks && !tracks_available {
+            warnings.push(ValidationWarning::UnsatisfiedDependency {
+                stage_id: id,
+                missing: "tracks",
+            });
+        }
+
+        if caps.produces_detections {
+            detections_available = true;
+        }
+        if caps.produces_tracks {
+            tracks_available = true;
+        }
+    }
+
+    // Check for duplicate stage IDs.
+    let mut seen = std::collections::HashSet::new();
+    for stage in stages {
+        let id = stage.id();
+        if !seen.insert(id) {
+            warnings.push(ValidationWarning::DuplicateStageId { stage_id: id });
+        }
+    }
+
+    warnings
 }
 
 /// Builder for [`StagePipeline`].
@@ -123,6 +226,7 @@ impl StagePipelineBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stage::StageCapabilities;
     use crate::{StageContext, StageOutput};
     use nv_core::error::StageError;
 
@@ -213,5 +317,171 @@ mod tests {
         let pipeline = StagePipeline::builder().build();
         assert!(pipeline.is_empty());
         assert_eq!(pipeline.len(), 0);
+    }
+
+    /// A test stage with configurable capabilities.
+    struct CapStage {
+        name: &'static str,
+        caps: Option<StageCapabilities>,
+    }
+
+    impl Stage for CapStage {
+        fn id(&self) -> StageId {
+            StageId(self.name)
+        }
+        fn process(
+            &mut self,
+            _ctx: &StageContext<'_>,
+        ) -> Result<StageOutput, StageError> {
+            Ok(StageOutput::empty())
+        }
+        fn capabilities(&self) -> Option<StageCapabilities> {
+            self.caps
+        }
+    }
+
+    #[test]
+    fn validate_happy_path() {
+        let pipeline = StagePipeline::builder()
+            .add(CapStage {
+                name: "det",
+                caps: Some(StageCapabilities::new().produces_detections()),
+            })
+            .add(CapStage {
+                name: "trk",
+                caps: Some(
+                    StageCapabilities::new()
+                        .consumes_detections()
+                        .produces_tracks(),
+                ),
+            })
+            .build();
+
+        let warnings = pipeline.validate();
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn validate_unsatisfied_detections() {
+        let pipeline = StagePipeline::builder()
+            .add(CapStage {
+                name: "trk",
+                caps: Some(StageCapabilities::new().consumes_detections()),
+            })
+            .add(CapStage {
+                name: "det",
+                caps: Some(StageCapabilities::new().produces_detections()),
+            })
+            .build();
+
+        let warnings = pipeline.validate();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0],
+            ValidationWarning::UnsatisfiedDependency {
+                stage_id: StageId("trk"),
+                missing: "detections",
+            }
+        );
+    }
+
+    #[test]
+    fn validate_unsatisfied_tracks() {
+        let pipeline = StagePipeline::builder()
+            .add(CapStage {
+                name: "temporal",
+                caps: Some(StageCapabilities::new().consumes_tracks()),
+            })
+            .build();
+
+        let warnings = pipeline.validate();
+        assert_eq!(warnings.len(), 1);
+        assert!(matches!(
+            &warnings[0],
+            ValidationWarning::UnsatisfiedDependency { missing: "tracks", .. }
+        ));
+    }
+
+    #[test]
+    fn validate_skips_stages_without_capabilities() {
+        let pipeline = StagePipeline::builder()
+            .add(CapStage {
+                name: "noop",
+                caps: None,
+            })
+            .add(CapStage {
+                name: "det",
+                caps: Some(StageCapabilities::new().produces_detections()),
+            })
+            .build();
+
+        let warnings = pipeline.validate();
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn validate_duplicate_stage_ids() {
+        let pipeline = StagePipeline::builder()
+            .add(CapStage {
+                name: "det",
+                caps: None,
+            })
+            .add(CapStage {
+                name: "det",
+                caps: None,
+            })
+            .build();
+
+        let warnings = pipeline.validate();
+        assert_eq!(warnings.len(), 1);
+        assert!(matches!(
+            &warnings[0],
+            ValidationWarning::DuplicateStageId { stage_id } if *stage_id == StageId("det")
+        ));
+    }
+
+    #[test]
+    fn validate_stages_fn_matches_pipeline_validate() {
+        let stages: Vec<Box<dyn Stage>> = vec![
+            Box::new(CapStage {
+                name: "trk",
+                caps: Some(StageCapabilities::new().consumes_detections()),
+            }),
+            Box::new(CapStage {
+                name: "det",
+                caps: Some(StageCapabilities::new().produces_detections()),
+            }),
+        ];
+
+        let warnings = validate_stages(&stages);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0],
+            ValidationWarning::UnsatisfiedDependency {
+                stage_id: StageId("trk"),
+                missing: "detections",
+            }
+        );
+    }
+
+    #[test]
+    fn validate_stages_fn_happy_path() {
+        let stages: Vec<Box<dyn Stage>> = vec![
+            Box::new(CapStage {
+                name: "det",
+                caps: Some(StageCapabilities::new().produces_detections()),
+            }),
+            Box::new(CapStage {
+                name: "trk",
+                caps: Some(
+                    StageCapabilities::new()
+                        .consumes_detections()
+                        .produces_tracks(),
+                ),
+            }),
+        ];
+
+        let warnings = validate_stages(&stages);
+        assert!(warnings.is_empty());
     }
 }

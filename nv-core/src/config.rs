@@ -54,6 +54,17 @@ impl SourceSpec {
         }
     }
 
+    /// Convenience constructor for a looping local video file.
+    ///
+    /// The source seeks back to the start on EOS instead of stopping.
+    #[must_use]
+    pub fn file_looping(path: impl Into<PathBuf>) -> Self {
+        Self::File {
+            path: path.into(),
+            loop_: true,
+        }
+    }
+
     /// Returns `true` if this is a non-looping file source.
     ///
     /// Non-looping file sources treat EOS as terminal (not an error):
@@ -127,4 +138,40 @@ pub enum BackoffKind {
     Exponential,
     /// Delay increases linearly by `base_delay` each attempt.
     Linear,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_looping_creates_looping_file_spec() {
+        let spec = SourceSpec::file_looping("/tmp/test.mp4");
+        match &spec {
+            SourceSpec::File { path, loop_ } => {
+                assert_eq!(path.to_str().unwrap(), "/tmp/test.mp4");
+                assert!(*loop_, "file_looping should create a looping spec");
+            }
+            _ => panic!("expected File variant"),
+        }
+        assert!(!spec.is_file_nonloop());
+    }
+
+    #[test]
+    fn file_creates_nonlooping_file_spec() {
+        let spec = SourceSpec::file("/tmp/test.mp4");
+        assert!(spec.is_file_nonloop());
+    }
+
+    #[test]
+    fn rtsp_creates_tcp_spec() {
+        let spec = SourceSpec::rtsp("rtsp://example.com/stream");
+        match &spec {
+            SourceSpec::Rtsp { url, transport } => {
+                assert_eq!(url, "rtsp://example.com/stream");
+                assert_eq!(*transport, RtspTransport::Tcp);
+            }
+            _ => panic!("expected Rtsp variant"),
+        }
+    }
 }

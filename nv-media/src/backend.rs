@@ -99,11 +99,13 @@ pub(crate) enum SessionState {
 /// management thread. The appsink callback runs on GStreamer's streaming
 /// thread and delivers frames through the `Arc<dyn FrameSink>`.
 pub(crate) struct GstSession {
+    #[allow(dead_code)] // used only via Debug impl
     feed_id: FeedId,
     #[allow(dead_code)]
     config: SessionConfig,
     state: SessionState,
     /// Monotonic frame sequence counter (shared with appsink callback).
+    #[allow(dead_code)] // held to keep Arc alive for appsink callback
     frame_seq: Arc<AtomicU64>,
 
     // GStreamer handles — only present when the feature is enabled.
@@ -169,6 +171,7 @@ impl GstSession {
         // Wire the appsink new-sample callback
         let seq_counter = Arc::clone(&frame_seq);
         let sink_clone = Arc::clone(&sink);
+        let sink_wake = Arc::clone(&sink);
         let pts_clone = Arc::clone(&pts_tracker);
         let eq_clone = Arc::clone(&event_queue);
         built.appsink.set_callbacks(
@@ -235,10 +238,34 @@ impl GstSession {
                     }
                 })
                 .eos(move |_appsink| {
-                    sink.on_eos();
+                    // Wake the consumer so the worker ticks the source.
+                    // The source FSM (poll_bus/handle_event) decides whether
+                    // to reconnect or stop. Do NOT close the queue here.
+                    sink.wake();
                 })
                 .build(),
         );
+
+        // Install a bus sync handler so actionable messages (Error, EOS)
+        // immediately wake the consumer thread. The sync handler runs on
+        // the thread that posted the message \u2014 wake_consumer() is safe
+        // from any thread (condvar notify + atomic flag).
+        //
+        // Messages are kept on the bus (BusSyncReply::Pass) for
+        // poll_bus() to process through the normal source FSM path.
+        let sink_bus = Arc::downgrade(&sink_wake);
+        built.bus.set_sync_handler(move |_bus, msg| {
+            use gstreamer::MessageView;
+            match msg.view() {
+                MessageView::Error(_) | MessageView::Eos(_) => {
+                    if let Some(s) = sink_bus.upgrade() {
+                        s.wake();
+                    }
+                }
+                _ => {}
+            }
+            gst::BusSyncReply::Pass
+        });
 
         // Start the pipeline
         built
@@ -297,7 +324,6 @@ impl GstSession {
             frame_seq: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "gst-backend")]
             pipeline: {
-                use gstreamer::prelude::*;
                 gstreamer::init().unwrap();
                 gstreamer::Pipeline::new()
             },
@@ -458,15 +484,12 @@ impl GstSession {
         Ok(())
     }
 
-    /// Current session state.
+}
+
+#[cfg(test)]
+impl GstSession {
     pub fn state(&self) -> SessionState {
         self.state
-    }
-
-    /// Feed ID this session belongs to.
-    #[allow(dead_code)]
-    pub fn feed_id(&self) -> FeedId {
-        self.feed_id
     }
 }
 

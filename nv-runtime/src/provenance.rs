@@ -3,7 +3,7 @@
 use nv_core::id::StageId;
 use nv_core::timestamp::{Duration, MonotonicTs};
 use nv_view::view_state::{ViewEpoch, ViewVersion};
-use nv_view::{CameraMotionState, EpochDecision, MotionSource, TransitionPhase};
+use nv_view::{EpochDecision, MotionSource, TransitionPhase};
 
 /// Full provenance for one processed frame.
 ///

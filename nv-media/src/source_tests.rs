@@ -51,20 +51,14 @@ impl FrameSink for CountingSink {
 
 /// Captures the last error received by the sink (preserving variant info).
 struct CapturingSink {
-    last_error: Mutex<Option<String>>,
     last_error_variant: Mutex<Option<MediaError>>,
 }
 
 impl CapturingSink {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            last_error: Mutex::new(None),
             last_error_variant: Mutex::new(None),
         })
-    }
-
-    fn last_error_detail(&self) -> Option<String> {
-        self.last_error.lock().unwrap().clone()
     }
 
     fn last_error_variant(&self) -> Option<MediaError> {
@@ -75,7 +69,6 @@ impl CapturingSink {
 impl FrameSink for CapturingSink {
     fn on_frame(&self, _frame: FrameEnvelope) {}
     fn on_error(&self, error: MediaError) {
-        *self.last_error.lock().unwrap() = Some(error.to_string());
         *self.last_error_variant.lock().unwrap() = Some(error);
     }
     fn on_eos(&self) {}
@@ -364,6 +357,8 @@ fn health_emits_feed_stopped_on_budget_exhausted() {
     health.drain(); // clear first batch
 
     // Second error exhausts budget → stopped.
+    // FeedStopped is now emitted by the worker, not the source.
+    // The source emits SourceDisconnected for the error.
     src.handle_event(MediaEvent::Error {
         error: MediaError::DecodeFailed {
             detail: "second".into(),
@@ -371,16 +366,24 @@ fn health_emits_feed_stopped_on_budget_exhausted() {
         debug: None,
     });
     let events = health.drain();
-    // Disconnect + FeedStopped (no reconnecting since budget exhausted)
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, HealthEvent::FeedStopped { .. }))
+            .any(|e| matches!(e, HealthEvent::SourceDisconnected { .. })),
+        "expected SourceDisconnected event"
     );
+    // Source no longer emits FeedStopped — worker is the canonical owner.
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, HealthEvent::FeedStopped { .. })),
+        "source must not emit FeedStopped"
+    );
+    assert_eq!(src.source_state(), SourceState::Stopped);
 }
 
 #[test]
-fn health_emits_feed_stopped_on_file_eos() {
+fn health_emits_no_feed_stopped_on_file_eos() {
     let spec = SourceSpec::File {
         path: "/tmp/test.mp4".into(),
         loop_: false,
@@ -388,9 +391,9 @@ fn health_emits_feed_stopped_on_file_eos() {
     let (mut src, _, _, _, health) = started_source_with_health(spec, test_reconnect());
     src.handle_event(MediaEvent::Eos);
     let events = health.drain();
-    assert_eq!(events.len(), 1);
-    assert!(matches!(&events[0], HealthEvent::FeedStopped { reason, .. }
-            if matches!(reason, nv_core::health::StopReason::EndOfStream)));
+    // Source no longer emits FeedStopped — worker is the canonical owner.
+    assert_eq!(events.len(), 0, "source must not emit FeedStopped; events: {:?}", events);
+    assert_eq!(src.source_state(), SourceState::Stopped);
 }
 
 #[test]

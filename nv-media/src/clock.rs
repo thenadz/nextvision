@@ -58,15 +58,6 @@ impl PtsTracker {
         }
     }
 
-    /// Create a PTS tracker with a custom discontinuity threshold.
-    pub fn with_threshold_ns(threshold_ns: u64) -> Self {
-        Self {
-            last_pts_ns: None,
-            frame_count: 0,
-            discontinuity_threshold_ns: threshold_ns,
-        }
-    }
-
     /// Process a new presentation timestamp and classify the result.
     pub fn observe(&mut self, pts_ns: u64) -> PtsResult {
         self.frame_count += 1;
@@ -94,15 +85,22 @@ impl PtsTracker {
         result
     }
 
-    /// Total number of frames observed (cumulative, survives `reset()`).
+}
+
+#[cfg(test)]
+impl PtsTracker {
+    pub fn with_threshold_ns(threshold_ns: u64) -> Self {
+        Self {
+            last_pts_ns: None,
+            frame_count: 0,
+            discontinuity_threshold_ns: threshold_ns,
+        }
+    }
+
     pub fn frame_count(&self) -> u64 {
         self.frame_count
     }
 
-    /// Reset the tracker (e.g., after a reconnection).
-    ///
-    /// Clears the last PTS so the next frame is classified as `First`.
-    /// `frame_count` is preserved for metrics continuity.
     pub fn reset(&mut self) {
         self.last_pts_ns = None;
     }

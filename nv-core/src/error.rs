@@ -164,4 +164,8 @@ pub enum ConfigError {
     /// A capacity or depth value is zero (which would deadlock or panic).
     #[error("invalid capacity: {field} must be > 0")]
     InvalidCapacity { field: &'static str },
+
+    /// Stage capability validation failed.
+    #[error("stage validation failed: {detail}")]
+    StageValidation { detail: String },
 }

@@ -29,7 +29,9 @@ use nv_core::TypedMetadata;
 use nv_core::error::MediaError;
 use nv_core::id::FeedId;
 use nv_core::timestamp::{MonotonicTs, WallTs};
-use nv_frame::{FrameEnvelope, PixelFormat};
+use nv_frame::FrameEnvelope;
+#[cfg(test)]
+use nv_frame::PixelFormat;
 
 // Re-export PtzTelemetry from nv-view — this is the canonical PTZ type
 // used everywhere in the library. No separate definition in nv-media.
@@ -38,20 +40,13 @@ pub use nv_view::PtzTelemetry;
 use crate::pipeline::OutputFormat;
 
 /// Metadata extracted from a GStreamer sample's caps and buffer.
-///
-/// The bridge parses `GstVideoInfo` into this struct before constructing the
-/// `FrameEnvelope`. All GStreamer types are erased at this boundary.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct SampleMetadata {
-    /// Frame width in pixels.
     pub width: u32,
-    /// Frame height in pixels.
     pub height: u32,
-    /// Row stride in bytes.
     pub stride: u32,
-    /// Pixel format (mapped from `GstVideoFormat`).
     pub format: PixelFormat,
-    /// Presentation timestamp from the GStreamer buffer (nanoseconds).
     pub pts_ns: u64,
 }
 
@@ -147,6 +142,7 @@ pub(crate) fn bridge_gst_sample(
 ///
 /// Used when GStreamer's zero-copy mapping is not available (tests,
 /// non-GStreamer builds, synthetic frames).
+#[cfg(test)]
 pub(crate) fn bridge_sample(
     feed_id: FeedId,
     seq: u64,

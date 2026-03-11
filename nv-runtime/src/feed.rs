@@ -7,12 +7,12 @@ use nv_core::error::{ConfigError, NvError};
 use nv_core::id::FeedId;
 use nv_core::metrics::FeedMetrics;
 use nv_media::PtzProvider;
-use nv_perception::{Stage, StagePipeline};
+use nv_perception::{Stage, StagePipeline, ValidationMode, validate_stages};
 use nv_temporal::RetentionPolicy;
 use nv_view::{EpochPolicy, ViewStateProvider};
 
 use crate::backpressure::BackpressurePolicy;
-use crate::output::OutputSink;
+use crate::output::{FrameInclusion, OutputSink};
 use crate::shutdown::RestartPolicy;
 
 /// Configuration for a single video feed.
@@ -30,6 +30,8 @@ pub struct FeedConfig {
     pub(crate) reconnect: ReconnectPolicy,
     pub(crate) restart: RestartPolicy,
     pub(crate) ptz_provider: Option<Arc<dyn PtzProvider>>,
+    pub(crate) frame_inclusion: FrameInclusion,
+    pub(crate) sink_queue_capacity: usize,
 }
 
 /// Builder for [`FeedConfig`].
@@ -58,6 +60,9 @@ pub struct FeedConfigBuilder {
     reconnect: ReconnectPolicy,
     restart: RestartPolicy,
     ptz_provider: Option<Arc<dyn PtzProvider>>,
+    frame_inclusion: FrameInclusion,
+    validation_mode: ValidationMode,
+    sink_queue_capacity: usize,
 }
 
 impl FeedConfig {
@@ -76,6 +81,9 @@ impl FeedConfig {
             reconnect: ReconnectPolicy::default(),
             restart: RestartPolicy::default(),
             ptz_provider: None,
+            frame_inclusion: FrameInclusion::default(),
+            validation_mode: ValidationMode::default(),
+            sink_queue_capacity: 16,
         }
     }
 }
@@ -171,6 +179,55 @@ impl FeedConfigBuilder {
         self
     }
 
+    /// Set the frame inclusion policy.
+    ///
+    /// When set to [`FrameInclusion::Always`], each [`OutputEnvelope`]
+    /// includes a zero-copy reference to the source [`FrameEnvelope`].
+    /// Default is [`FrameInclusion::Never`].
+    #[must_use]
+    pub fn frame_inclusion(mut self, policy: FrameInclusion) -> Self {
+        self.frame_inclusion = policy;
+        self
+    }
+
+    /// Set the stage capability validation mode.
+    ///
+    /// - [`ValidationMode::Off`] (default) — no validation.
+    /// - [`ValidationMode::Warn`] — log warnings via `tracing::warn!`.
+    /// - [`ValidationMode::Error`] — any warning becomes a build error.
+    #[must_use]
+    pub fn validation_mode(mut self, mode: ValidationMode) -> Self {
+        self.validation_mode = mode;
+        self
+    }
+
+    /// Set the per-feed output sink queue capacity.
+    ///
+    /// This is the bounded channel between the feed worker thread and
+    /// the sink thread. Default: `16`. Must be at least 1.
+    #[must_use]
+    pub fn sink_queue_capacity(mut self, capacity: usize) -> Self {
+        self.sink_queue_capacity = capacity;
+        self
+    }
+
+    /// Append a single stage to the pipeline.
+    ///
+    /// Convenience alternative to [`stages()`](Self::stages) when
+    /// building one stage at a time.
+    #[must_use]
+    pub fn add_stage(mut self, stage: impl Stage) -> Self {
+        self.stages.get_or_insert_with(Vec::new).push(Box::new(stage));
+        self
+    }
+
+    /// Append a boxed stage to the pipeline.
+    #[must_use]
+    pub fn add_boxed_stage(mut self, stage: Box<dyn Stage>) -> Self {
+        self.stages.get_or_insert_with(Vec::new).push(stage);
+        self
+    }
+
     /// Build the feed configuration.
     ///
     /// # Errors
@@ -196,6 +253,27 @@ impl FeedConfigBuilder {
         let output_sink = self.output_sink.ok_or(ConfigError::MissingRequired {
             field: "output_sink",
         })?;
+
+        // Stage capability validation.
+        match self.validation_mode {
+            ValidationMode::Off => {}
+            ValidationMode::Warn => {
+                for w in validate_stages(&stages) {
+                    tracing::warn!("stage validation: {w:?}");
+                }
+            }
+            ValidationMode::Error => {
+                let warnings = validate_stages(&stages);
+                if !warnings.is_empty() {
+                    let detail = warnings
+                        .iter()
+                        .map(|w| format!("{w:?}"))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(ConfigError::StageValidation { detail }.into());
+                }
+            }
+        }
 
         // Validate queue depth.
         if self.backpressure.queue_depth() == 0 {
@@ -239,6 +317,8 @@ impl FeedConfigBuilder {
             reconnect: self.reconnect,
             restart: self.restart,
             ptz_provider: self.ptz_provider,
+            frame_inclusion: self.frame_inclusion,
+            sink_queue_capacity: self.sink_queue_capacity.max(1),
         })
     }
 }

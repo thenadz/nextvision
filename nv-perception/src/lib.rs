@@ -10,6 +10,22 @@
 //! - **[`PerceptionArtifacts`]** — accumulated outputs of all stages for a frame.
 //! - **[`DerivedSignal`]**, **[`SignalValue`]** — generic named signals.
 //! - **[`SceneFeature`]**, **[`SceneFeatureValue`]** — scene-level feature observations.
+//! - **[`StagePipeline`]** — ordered pipeline builder with **[`validate()`](StagePipeline::validate)**.
+//! - **[`StageCapabilities`]** — declared stage inputs/outputs for validation.
+//!
+//! ## Ergonomic entity construction
+//!
+//! Use [`Detection::builder()`] and [`Track::new()`] to avoid manual struct
+//! construction. [`StageOutput::build()`] provides an incremental builder
+//! for assembling multi-field outputs, and [`StageOutput::with_artifact()`]
+//! is a shorthand for typed artifact-only output.
+//!
+//! ## Convenience re-exports
+//!
+//! This crate re-exports types that appear in [`Stage`] trait signatures
+//! so that stage authors can import everything from a single crate:
+//! [`StageId`], [`StageError`], [`FeedId`], [`ViewEpoch`], [`ViewSnapshot`],
+//! [`FrameEnvelope`], [`TypedMetadata`], and [`StageMetrics`].
 //!
 //! ## Stage execution model
 //!
@@ -47,10 +63,22 @@ pub mod temporal_access;
 pub mod track;
 
 pub use artifact::PerceptionArtifacts;
-pub use detection::{Detection, DetectionSet};
-pub use pipeline::{StagePipeline, StagePipelineBuilder};
+pub use detection::{Detection, DetectionBuilder, DetectionSet};
+pub use pipeline::{StagePipeline, StagePipelineBuilder, ValidationMode, ValidationWarning, validate_stages};
 pub use scene::{SceneFeature, SceneFeatureValue};
 pub use signal::{DerivedSignal, SignalValue};
-pub use stage::{Stage, StageCategory, StageContext, StageOutput};
+pub use stage::{
+    Stage, StageCapabilities, StageCategory, StageContext, StageOutput, StageOutputBuilder,
+};
 pub use temporal_access::TemporalAccess;
 pub use track::{Track, TrackObservation, TrackState};
+
+// Re-export types that appear in Stage trait signatures and StageContext,
+// so that stage authors can import everything from `nv_perception` without
+// needing direct dependencies on nv-core, nv-frame, or nv-view.
+pub use nv_core::error::StageError;
+pub use nv_core::id::{FeedId, StageId};
+pub use nv_core::metrics::StageMetrics;
+pub use nv_core::TypedMetadata;
+pub use nv_frame::FrameEnvelope;
+pub use nv_view::{ViewEpoch, ViewSnapshot};

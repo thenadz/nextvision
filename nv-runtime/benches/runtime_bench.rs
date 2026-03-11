@@ -3,7 +3,7 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::sync::Arc;
 
-use nv_core::{FeedId, MonotonicTs, TypedMetadata, WallTs};
+use nv_core::{FeedId, MonotonicTs, TypedMetadata};
 
 fn output_envelope_construction(c: &mut Criterion) {
     use nv_core::timestamp::WallTs;
@@ -39,6 +39,7 @@ fn output_envelope_construction(c: &mut Criterion) {
                     total_latency: nv_core::Duration::from_nanos(0),
                 },
                 metadata: TypedMetadata::new(),
+            frame: None,
             });
         });
     });
@@ -76,6 +77,7 @@ fn output_arc_clone(c: &mut Criterion) {
             total_latency: nv_core::Duration::from_nanos(0),
         },
         metadata: TypedMetadata::new(),
+            frame: None,
     });
 
     c.bench_function("shared_output_arc_clone", |b| {
@@ -122,6 +124,7 @@ fn broadcast_fanout(c: &mut Criterion) {
             total_latency: nv_core::Duration::from_nanos(0),
         },
         metadata: TypedMetadata::new(),
+            frame: None,
     });
 
     c.bench_function("broadcast_send_3_subscribers", |b| {

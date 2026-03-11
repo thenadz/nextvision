@@ -300,10 +300,8 @@ impl MediaSource {
                             sink.on_eos();
                         }
                         self.state = SourceState::Stopped;
-                        self.emit_health(HealthEvent::FeedStopped {
-                            feed_id: self.feed_id,
-                            reason: nv_core::health::StopReason::EndOfStream,
-                        });
+                        // FeedStopped is emitted by the worker thread
+                        // (the canonical owner of feed lifecycle events).
                         None
                     }
                     _ => {
@@ -383,28 +381,11 @@ impl MediaSource {
                 if let Some(ref sink) = self.sink {
                     sink.on_eos();
                 }
-                self.emit_health(HealthEvent::FeedStopped {
-                    feed_id: self.feed_id,
-                    reason: nv_core::health::StopReason::Fatal {
-                        detail: format!(
-                            "reconnection budget exhausted after {} attempts",
-                            self.reconnect.current_attempt()
-                        ),
-                    },
-                });
+                // FeedStopped is emitted by the worker thread
+                // (the canonical owner of feed lifecycle events).
                 None
             }
         }
-    }
-
-    /// Current lifecycle state (for testing and observability).
-    pub(crate) fn source_state(&self) -> SourceState {
-        self.state
-    }
-
-    /// Lifetime reconnection count (for metrics).
-    pub(crate) fn total_reconnects(&self) -> u32 {
-        self.reconnect.total_reconnects()
     }
 
     /// Poll the GStreamer bus for pending messages and process them.
@@ -532,15 +513,8 @@ impl MediaSource {
                         if let Some(ref sink) = self.sink {
                             sink.on_eos();
                         }
-                        self.emit_health(HealthEvent::FeedStopped {
-                            feed_id: self.feed_id,
-                            reason: nv_core::health::StopReason::Fatal {
-                                detail: format!(
-                                    "reconnection budget exhausted after {} attempts",
-                                    self.reconnect.current_attempt()
-                                ),
-                            },
-                        });
+                        // FeedStopped is emitted by the worker thread
+                        // (the canonical owner of feed lifecycle events).
                         Err(None)
                     }
                 }
@@ -682,6 +656,17 @@ impl MediaIngress for MediaSource {
 // ---------------------------------------------------------------------------
 // Tests (extracted to source_tests.rs for maintainability)
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+impl MediaSource {
+    pub(crate) fn source_state(&self) -> SourceState {
+        self.state
+    }
+
+    pub(crate) fn total_reconnects(&self) -> u32 {
+        self.reconnect.total_reconnects()
+    }
+}
 
 #[cfg(test)]
 #[path = "source_tests.rs"]

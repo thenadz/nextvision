@@ -1,0 +1,26 @@
+[package]
+name = "nv-sample-yolox-ocsort"
+description = "Sample binary: YOLOX-s detection + OC-SORT tracking pipeline using the NextVision runtime."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "yolox-ocsort-sample"
+path = "src/main.rs"
+
+[dependencies]
+nv-core.workspace = true
+nv-perception.workspace = true
+nv-runtime.workspace = true
+nv-byo-yolox.workspace = true
+nv-byo-ocsort.workspace = true
+
+clap = { version = "4", features = ["derive"] }
+minifb = "0.27"
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+nv-test-util.workspace = true
