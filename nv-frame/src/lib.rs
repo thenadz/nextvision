@@ -20,6 +20,5 @@
 
 pub mod convert;
 pub mod frame;
-pub mod pool;
 
 pub use frame::{FrameEnvelope, PixelFormat};

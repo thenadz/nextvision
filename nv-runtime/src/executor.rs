@@ -1013,10 +1013,10 @@ mod tests {
             hist.trajectory.active_segment().is_none(),
             "segment should be closed"
         );
-        let seg = hist.trajectory.segments.last().unwrap();
+        let seg = hist.trajectory.segments().last().unwrap();
         assert_eq!(
-            seg.closed_by,
-            Some(nv_temporal::SegmentBoundary::FeedRestart),
+            seg.closed_by(),
+            Some(&nv_temporal::SegmentBoundary::FeedRestart),
             "segment should be closed with FeedRestart boundary"
         );
     }
@@ -1073,9 +1073,9 @@ mod tests {
             2,
             "epoch change should create a new trajectory segment"
         );
-        assert!(!hist.trajectory.segments[0].is_active());
-        assert!(hist.trajectory.segments[1].is_active());
-        assert_eq!(hist.trajectory.segments[1].view_epoch, epoch1);
+        assert!(!hist.trajectory.segments()[0].is_active());
+        assert!(hist.trajectory.segments()[1].is_active());
+        assert_eq!(hist.trajectory.segments()[1].view_epoch(), epoch1);
     }
 
     // ------------------------------------------------------------------
@@ -1270,10 +1270,10 @@ mod tests {
             .temporal
             .get_track(&nv_core::TrackId::new(1))
             .expect("Lost track should still be in store");
-        let last_seg = hist.trajectory.segments.last().unwrap();
+        let last_seg = hist.trajectory.segments().last().unwrap();
         assert_eq!(
-            last_seg.closed_by,
-            Some(nv_temporal::SegmentBoundary::TrackLost),
+            last_seg.closed_by(),
+            Some(&nv_temporal::SegmentBoundary::TrackLost),
             "explicit Lost track should have TrackLost boundary, not TrackEnded"
         );
     }

@@ -716,7 +716,7 @@ fn liveness_armed_after_reconnect() {
     assert_eq!(src.source_state(), SourceState::Reconnecting);
     // Simulate reconnect success
     src.create_session_stub();
-    src.try_reconnect().unwrap();
+    assert!(matches!(src.try_reconnect(), ReconnectOutcome::Connected));
     assert_eq!(src.source_state(), SourceState::Running);
     // Liveness deadline should be armed after create_session_stub
     // (create_session_stub does NOT go through create_session, so arm it

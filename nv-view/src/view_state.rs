@@ -339,15 +339,7 @@ mod tests {
     fn snapshot_clone_is_cheap() {
         let snap = ViewSnapshot::new(ViewState::fixed_initial());
         let snap2 = snap.clone();
-        // Both should reference the same allocation.
-        assert!(std::sync::Arc::ptr_eq(
-            // Access inner Arc via the public interface check:
-            // Can't directly compare Arcs, but same epoch/version proves identity.
-            &std::sync::Arc::new(()),
-            &std::sync::Arc::new(())
-        ) == false); // This is just to verify clone compiles; real identity
-        // is guaranteed by `Arc::clone` semantics.
-        assert_eq!(snap.epoch(), snap2.epoch());
-        assert_eq!(snap.version(), snap2.version());
+        // Both should point to the same Arc allocation.
+        assert!(std::ptr::eq(snap.as_view_state(), snap2.as_view_state()));
     }
 }

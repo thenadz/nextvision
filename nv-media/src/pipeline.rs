@@ -170,8 +170,8 @@ impl PipelineBuilder {
                     detail: format!("failed to create v4l2src: {e}"),
                 })?,
             SourceSpec::Custom {
-                gst_launch_fragment,
-            } => gst::parse::bin_from_description(gst_launch_fragment, true)
+                pipeline_fragment,
+            } => gst::parse::bin_from_description(pipeline_fragment, true)
                 .map_err(|e| MediaError::Unsupported {
                     detail: format!("failed to parse custom pipeline fragment: {e}"),
                 })?

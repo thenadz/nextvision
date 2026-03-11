@@ -22,7 +22,6 @@
 //! - **[`ViewBoundContext`]** — binds user data to a specific view for staleness checks.
 
 pub mod bound;
-pub mod camera_mode;
 pub mod camera_motion;
 pub mod epoch;
 pub mod provider;

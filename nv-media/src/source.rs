@@ -81,6 +81,19 @@ pub(crate) enum SourceState {
 // MediaSource
 // ---------------------------------------------------------------------------
 
+/// Outcome of a [`MediaSource::try_reconnect`] call.
+#[derive(Debug)]
+pub(crate) enum ReconnectOutcome {
+    /// A new session was created and is running.
+    Connected,
+    /// Session creation failed but another attempt is allowed after `delay`.
+    Retry { delay: Duration },
+    /// Reconnection budget exhausted or source stopped — no more retries.
+    Exhausted,
+}
+
+// ---------------------------------------------------------------------------
+
 /// Handle to a running media source for a single feed.
 ///
 /// Owns the GStreamer session (pipeline lifecycle) and manages reconnection
@@ -414,7 +427,23 @@ impl MediaSource {
     /// Returns `Some(delay)` if a reconnection should be scheduled after
     /// waiting, or `None` if nothing actionable occurred.
     pub fn poll_bus(&mut self) -> Option<Duration> {
-        // Drain discontinuity events produced by the appsink callback thread.
+        if let Some(delay) = self.drain_queued_events() {
+            return Some(delay);
+        }
+
+        let reconnect_delay = self.drain_bus_messages();
+
+        if reconnect_delay.is_none() {
+            return self.check_reconnect();
+        }
+
+        reconnect_delay
+    }
+
+    /// Drain discontinuity events produced by the appsink callback thread.
+    ///
+    /// Returns `Some(delay)` if an event triggered a reconnection.
+    fn drain_queued_events(&mut self) -> Option<Duration> {
         let queued_events: Vec<MediaEvent> = match self.event_queue.lock() {
             Ok(mut q) => q.drain(..).collect(),
             Err(_) => {
@@ -430,7 +459,7 @@ impl MediaSource {
             tracing::debug!(
                 feed_id = %self.feed_id,
                 count = queued_events.len(),
-                "poll_bus: draining queued discontinuity events"
+                "draining queued discontinuity events"
             );
         }
 
@@ -441,7 +470,13 @@ impl MediaSource {
             }
         }
 
-        // Drain GStreamer bus messages.
+        None
+    }
+
+    /// Drain GStreamer bus messages and process any media events.
+    ///
+    /// Returns `Some(delay)` if a message triggered a reconnection.
+    fn drain_bus_messages(&mut self) -> Option<Duration> {
         let mut messages = Vec::new();
         if let Some(ref session) = self.session {
             while let Some(bus_msg) = session.poll_bus() {
@@ -451,7 +486,7 @@ impl MediaSource {
             tracing::debug!(
                 feed_id = %self.feed_id,
                 state = ?self.state,
-                "poll_bus: no session — skipping bus drain"
+                "no session — skipping bus drain"
             );
         }
 
@@ -459,91 +494,92 @@ impl MediaSource {
             tracing::trace!(
                 feed_id = %self.feed_id,
                 count = messages.len(),
-                "poll_bus: draining GStreamer bus messages"
+                "draining GStreamer bus messages"
             );
         }
 
-        let mut reconnect_delay = None;
         for bus_msg in messages {
             tracing::trace!(
                 feed_id = %self.feed_id,
                 bus_msg = ?bus_msg,
-                "poll_bus: processing bus message"
+                "processing bus message"
             );
             if let Some(event) = bus_msg.into_media_event() {
                 tracing::debug!(
                     feed_id = %self.feed_id,
                     event = ?event,
-                    "poll_bus: mapped to media event"
+                    "mapped to media event"
                 );
                 if let Some(delay) = self.handle_event(event) {
                     self.reconnect_deadline = Some(Instant::now() + delay);
-                    reconnect_delay = Some(delay);
-                    break;
+                    return Some(delay);
                 }
             }
         }
 
-        // If in Reconnecting state and no new delay was just scheduled,
-        // attempt reconnection only if the backoff deadline has elapsed.
-        if reconnect_delay.is_none() && self.state == SourceState::Reconnecting {
-            let deadline_elapsed = self
-                .reconnect_deadline
-                .map_or(true, |d| Instant::now() >= d);
-            tracing::debug!(
-                feed_id = %self.feed_id,
-                deadline_elapsed,
-                reconnect_deadline = ?self.reconnect_deadline,
-                "poll_bus: in Reconnecting state, checking deadline"
-            );
-            if deadline_elapsed {
-                match self.try_reconnect() {
-                    Ok(()) => {
-                        tracing::info!(
-                            feed_id = %self.feed_id,
-                            "poll_bus: reconnection succeeded"
-                        );
-                        self.reconnect_deadline = None;
-                    }
-                    Err(Some(delay)) => {
-                        tracing::debug!(
-                            feed_id = %self.feed_id,
-                            delay_ms = delay.as_millis() as u64,
-                            "poll_bus: reconnection failed, scheduling retry"
-                        );
-                        self.reconnect_deadline = Some(Instant::now() + delay);
-                        reconnect_delay = Some(delay);
-                    }
-                    Err(None) => {
-                        tracing::warn!(
-                            feed_id = %self.feed_id,
-                            "poll_bus: reconnection budget exhausted, stopped"
-                        );
-                    }
-                }
-            }
+        None
+    }
+
+    /// If in Reconnecting state, attempt reconnection when the backoff
+    /// deadline has elapsed.
+    ///
+    /// Returns `Some(delay)` if a retry was scheduled, `None` otherwise.
+    fn check_reconnect(&mut self) -> Option<Duration> {
+        if self.state != SourceState::Reconnecting {
+            return None;
         }
 
-        reconnect_delay
+        let deadline_elapsed = self
+            .reconnect_deadline
+            .map_or(true, |d| Instant::now() >= d);
+        tracing::debug!(
+            feed_id = %self.feed_id,
+            deadline_elapsed,
+            reconnect_deadline = ?self.reconnect_deadline,
+            "in Reconnecting state, checking deadline"
+        );
+        if !deadline_elapsed {
+            return None;
+        }
+
+        match self.try_reconnect() {
+            ReconnectOutcome::Connected => {
+                tracing::info!(
+                    feed_id = %self.feed_id,
+                    "reconnection succeeded"
+                );
+                self.reconnect_deadline = None;
+                None
+            }
+            ReconnectOutcome::Retry { delay } => {
+                tracing::debug!(
+                    feed_id = %self.feed_id,
+                    delay_ms = delay.as_millis() as u64,
+                    "reconnection failed, scheduling retry"
+                );
+                self.reconnect_deadline = Some(Instant::now() + delay);
+                Some(delay)
+            }
+            ReconnectOutcome::Exhausted => {
+                tracing::warn!(
+                    feed_id = %self.feed_id,
+                    "reconnection budget exhausted, stopped"
+                );
+                None
+            }
+        }
     }
 
     /// Attempt a single reconnection: tear down the old session and create a new one.
     ///
     /// This method is meant to be called by the runtime after the backoff delay
     /// returned by [`handle_event()`] or [`poll_bus()`] has elapsed.
-    ///
-    /// Returns:
-    /// - `Ok(())` if a new session was successfully created and is running.
-    /// - `Err(delay)` if the session creation failed but another attempt is
-    ///   allowed — the caller should wait `delay` before trying again.
-    /// - `Err` where `self.state == Stopped` means the reconnection budget is
-    ///   exhausted and the source is permanently stopped.
-    pub fn try_reconnect(&mut self) -> Result<(), Option<Duration>> {
+    pub(crate) fn try_reconnect(&mut self) -> ReconnectOutcome {
         if self.state == SourceState::Stopped {
-            return Err(None);
+            return ReconnectOutcome::Exhausted;
         }
         if self.state != SourceState::Reconnecting {
-            return Ok(());
+            return ReconnectOutcome::Connected;
         }
 
         match self.create_session() {
@@ -561,7 +597,7 @@ impl MediaSource {
                 );
                 // SourceConnected is emitted when handle_event receives
                 // StreamStarted from the bus; no duplicate emission here.
-                Ok(())
+                ReconnectOutcome::Connected
             }
             Err(e) => {
                 tracing::warn!(
@@ -580,7 +616,7 @@ impl MediaSource {
                             feed_id: self.feed_id,
                             attempt: self.reconnect.current_attempt(),
                         });
-                        Err(Some(delay))
+                        ReconnectOutcome::Retry { delay }
                     }
                     Err(_) => {
                         self.state = SourceState::Stopped;
@@ -589,7 +625,7 @@ impl MediaSource {
                         }
                         // FeedStopped is emitted by the worker thread
                         // (the canonical owner of feed lifecycle events).
-                        Err(None)
+                        ReconnectOutcome::Exhausted
                     }
                 }
             }

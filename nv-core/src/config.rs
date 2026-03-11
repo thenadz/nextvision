@@ -28,11 +28,11 @@ pub enum SourceSpec {
     /// A Video4Linux2 device (Linux only).
     V4l2 { device: String },
 
-    /// Escape hatch: a raw GStreamer launch-line fragment.
+    /// Escape hatch: a raw pipeline launch-line fragment.
     ///
     /// The library constructs the pipeline internally for all other variants.
     /// Use this only for exotic sources not covered above.
-    Custom { gst_launch_fragment: String },
+    Custom { pipeline_fragment: String },
 }
 
 impl SourceSpec {

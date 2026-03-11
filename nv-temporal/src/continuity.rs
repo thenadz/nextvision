@@ -7,6 +7,7 @@ use nv_view::ViewEpoch;
 /// Every segment boundary is causally explained, making trajectory
 /// continuity fully auditable.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SegmentBoundary {
     /// First segment for this track (track was newly created).
     TrackCreated,

@@ -12,7 +12,7 @@ use crate::continuity::SegmentBoundary;
 #[derive(Clone, Debug, Default)]
 pub struct Trajectory {
     /// Ordered segments. The last segment is the active (open) segment.
-    pub segments: Vec<TrajectorySegment>,
+    pub(crate) segments: Vec<TrajectorySegment>,
 }
 
 impl Trajectory {
@@ -22,6 +22,12 @@ impl Trajectory {
         Self {
             segments: Vec::new(),
         }
+    }
+
+    /// Read-only access to the ordered segments.
+    #[must_use]
+    pub fn segments(&self) -> &[TrajectorySegment] {
+        &self.segments
     }
 
     /// Returns the currently active (last) segment, if any.
@@ -85,14 +91,14 @@ impl Trajectory {
         });
     }
 
-    /// Push a point to the active segment and recompute its motion features.
+    /// Push a point to the active segment and incrementally update motion features.
     ///
     /// Returns `true` if the point was added, `false` if there is no active
     /// segment.
     pub fn push_point(&mut self, point: TrajectoryPoint) -> bool {
         if let Some(seg) = self.active_segment_mut() {
             seg.points.push(point);
-            seg.motion = MotionFeatures::compute(&seg.points);
+            seg.motion.update_incremental(&seg.points);
             true
         } else {
             false
@@ -162,24 +168,66 @@ impl Trajectory {
 #[derive(Clone, Debug)]
 pub struct TrajectorySegment {
     /// The view epoch for this segment.
-    pub view_epoch: ViewEpoch,
+    pub(crate) view_epoch: ViewEpoch,
     /// Ordered trajectory points within the segment.
-    pub points: Vec<TrajectoryPoint>,
+    pub(crate) points: Vec<TrajectoryPoint>,
     /// Computed motion features for this segment.
-    pub motion: MotionFeatures,
+    pub(crate) motion: MotionFeatures,
     /// Why this segment was opened.
-    pub opened_by: SegmentBoundary,
+    pub(crate) opened_by: SegmentBoundary,
     /// Why this segment was closed. `None` if still active.
-    pub closed_by: Option<SegmentBoundary>,
+    pub(crate) closed_by: Option<SegmentBoundary>,
     /// Cumulative compensation transform applied within this segment.
     ///
     /// `None` if no compensation has been applied.
-    pub compensation: Option<AffineTransform2D>,
+    pub(crate) compensation: Option<AffineTransform2D>,
     /// Number of times compensation was applied within this segment.
-    pub compensation_count: u32,
+    pub(crate) compensation_count: u32,
 }
 
 impl TrajectorySegment {
+    /// The view epoch for this segment.
+    #[must_use]
+    pub fn view_epoch(&self) -> ViewEpoch {
+        self.view_epoch
+    }
+
+    /// Read-only access to the ordered trajectory points.
+    #[must_use]
+    pub fn points(&self) -> &[TrajectoryPoint] {
+        &self.points
+    }
+
+    /// Computed motion features for this segment.
+    #[must_use]
+    pub fn motion(&self) -> &MotionFeatures {
+        &self.motion
+    }
+
+    /// Why this segment was opened.
+    #[must_use]
+    pub fn opened_by(&self) -> &SegmentBoundary {
+        &self.opened_by
+    }
+
+    /// Why this segment was closed. `None` if still active.
+    #[must_use]
+    pub fn closed_by(&self) -> Option<&SegmentBoundary> {
+        self.closed_by.as_ref()
+    }
+
+    /// Cumulative compensation transform, if any.
+    #[must_use]
+    pub fn compensation(&self) -> Option<&AffineTransform2D> {
+        self.compensation.as_ref()
+    }
+
+    /// Number of times compensation was applied.
+    #[must_use]
+    pub fn compensation_count(&self) -> u32 {
+        self.compensation_count
+    }
+
     /// Whether this segment is still active (not closed).
     #[must_use]
     pub fn is_active(&self) -> bool {
@@ -231,6 +279,9 @@ pub struct TrajectoryPoint {
 ///
 /// All spatial values are in normalized `[0, 1]` coordinates.
 /// Speed values are in normalized-coordinates per second.
+///
+/// Maintained incrementally on each `push_point` call (O(1) per push).
+/// Fully recomputed only after pruning or compensation (infrequent).
 #[derive(Clone, Debug)]
 pub struct MotionFeatures {
     /// Total path length along the trajectory (sum of point-to-point distances).
@@ -261,8 +312,9 @@ impl Default for MotionFeatures {
 }
 
 impl MotionFeatures {
-    /// Recompute motion features from a sequence of trajectory points.
+    /// Recompute motion features from scratch.
     ///
+    /// Used after pruning or compensation where incremental state is invalid.
     /// Returns default (stationary) features if fewer than 2 points.
     #[must_use]
     pub fn compute(points: &[TrajectoryPoint]) -> Self {
@@ -316,6 +368,49 @@ impl MotionFeatures {
             direction,
             is_stationary,
         }
+    }
+
+    /// Incrementally update motion features when a new point is appended.
+    ///
+    /// O(1) per call — avoids walking all points. The caller must supply
+    /// the full points slice (with the new point already appended) so that
+    /// first/last lookups are available.
+    fn update_incremental(&mut self, points: &[TrajectoryPoint]) {
+        let len = points.len();
+        if len < 2 {
+            return;
+        }
+
+        let prev = &points[len - 2];
+        let curr = &points[len - 1];
+        let d = prev.position.distance_to(&curr.position);
+        self.displacement += d;
+
+        let dt = curr.ts.saturating_duration_since(prev.ts).as_secs_f64() as f32;
+        if dt > 0.0 {
+            let speed = d / dt;
+            self.max_speed = self.max_speed.max(speed);
+        }
+
+        let first = &points[0];
+        self.net_displacement = first.position.distance_to(&curr.position);
+
+        let elapsed = curr.ts.saturating_duration_since(first.ts).as_secs_f64() as f32;
+        self.mean_speed = if elapsed > 0.0 {
+            self.displacement / elapsed
+        } else {
+            0.0
+        };
+
+        self.direction = if self.net_displacement > 1e-6 {
+            let dx = curr.position.x - first.position.x;
+            let dy = curr.position.y - first.position.y;
+            Some(dy.atan2(dx))
+        } else {
+            None
+        };
+
+        self.is_stationary = self.mean_speed < 0.005;
     }
 }
 

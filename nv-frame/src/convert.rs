@@ -24,19 +24,23 @@ pub fn convert(frame: &FrameEnvelope, target: PixelFormat) -> Option<FrameEnvelo
         return None; // caller should clone instead
     }
 
+    let w = frame.width();
+    let h = frame.height();
+    let src_stride = frame.stride();
+
     let converted = match (frame.format(), target) {
         (PixelFormat::Bgr8, PixelFormat::Rgb8) | (PixelFormat::Rgb8, PixelFormat::Bgr8) => {
-            swap_rb(frame.data())
+            swap_rb(frame.data(), w, h, src_stride)
         }
-        (PixelFormat::Rgba8, PixelFormat::Rgb8) => rgba_to_rgb(frame.data()),
-        (PixelFormat::Rgb8, PixelFormat::Gray8) => rgb_to_gray(frame.data()),
+        (PixelFormat::Rgba8, PixelFormat::Rgb8) => rgba_to_rgb(frame.data(), w, h, src_stride),
+        (PixelFormat::Rgb8, PixelFormat::Gray8) => rgb_to_gray(frame.data(), w, h, src_stride),
         _ => return None,
     };
 
-    let stride = match target {
-        PixelFormat::Gray8 => frame.width(),
-        PixelFormat::Rgb8 | PixelFormat::Bgr8 => frame.width() * 3,
-        PixelFormat::Rgba8 => frame.width() * 4,
+    let out_stride = match target {
+        PixelFormat::Gray8 => w,
+        PixelFormat::Rgb8 | PixelFormat::Bgr8 => w * 3,
+        PixelFormat::Rgba8 => w * 4,
         _ => return None,
     };
 
@@ -45,41 +49,68 @@ pub fn convert(frame: &FrameEnvelope, target: PixelFormat) -> Option<FrameEnvelo
         frame.seq(),
         frame.ts(),
         frame.wall_ts(),
-        frame.width(),
-        frame.height(),
+        w,
+        h,
         target,
-        stride,
+        out_stride,
         converted,
         frame.metadata().clone(),
     ))
 }
 
-/// Swap R and B channels in a 3-byte-per-pixel buffer.
-fn swap_rb(data: &[u8]) -> Vec<u8> {
-    let mut out = data.to_vec();
-    for pixel in out.chunks_exact_mut(3) {
-        pixel.swap(0, 2);
+/// Extract tightly-packed pixel rows from potentially padded data.
+///
+/// GStreamer (and other backends) may deliver rows with padding bytes
+/// at the end (stride > width × bpp). This iterator yields only the
+/// meaningful bytes of each row, skipping any trailing padding.
+fn pixel_rows(data: &[u8], width: u32, height: u32, stride: u32, bpp: u32) -> Vec<&[u8]> {
+    let row_bytes = (width * bpp) as usize;
+    let stride = stride as usize;
+    (0..height as usize)
+        .map(|y| {
+            let start = y * stride;
+            &data[start..start + row_bytes]
+        })
+        .collect()
+}
+
+/// Swap R and B channels in a 3-byte-per-pixel buffer, respecting stride.
+fn swap_rb(data: &[u8], width: u32, height: u32, stride: u32) -> Vec<u8> {
+    let rows = pixel_rows(data, width, height, stride, 3);
+    let mut out = Vec::with_capacity((width * height * 3) as usize);
+    for row in rows {
+        for pixel in row.chunks_exact(3) {
+            out.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+        }
     }
     out
 }
 
-/// Drop the alpha channel from RGBA data.
-fn rgba_to_rgb(data: &[u8]) -> Vec<u8> {
-    data.chunks_exact(4)
-        .flat_map(|px| [px[0], px[1], px[2]])
-        .collect()
+/// Drop the alpha channel from RGBA data, respecting stride.
+fn rgba_to_rgb(data: &[u8], width: u32, height: u32, stride: u32) -> Vec<u8> {
+    let rows = pixel_rows(data, width, height, stride, 4);
+    let mut out = Vec::with_capacity((width * height * 3) as usize);
+    for row in rows {
+        for px in row.chunks_exact(4) {
+            out.extend_from_slice(&[px[0], px[1], px[2]]);
+        }
+    }
+    out
 }
 
-/// Convert RGB to grayscale using luminance weights.
-fn rgb_to_gray(data: &[u8]) -> Vec<u8> {
-    data.chunks_exact(3)
-        .map(|px| {
+/// Convert RGB to grayscale using luminance weights, respecting stride.
+fn rgb_to_gray(data: &[u8], width: u32, height: u32, stride: u32) -> Vec<u8> {
+    let rows = pixel_rows(data, width, height, stride, 3);
+    let mut out = Vec::with_capacity((width * height) as usize);
+    for row in rows {
+        for px in row.chunks_exact(3) {
             let r = px[0] as f32;
             let g = px[1] as f32;
             let b = px[2] as f32;
-            (0.299 * r + 0.587 * g + 0.114 * b).round() as u8
-        })
-        .collect()
+            out.push((0.299 * r + 0.587 * g + 0.114 * b).round() as u8);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -122,6 +153,34 @@ mod tests {
         let converted = convert(&f, PixelFormat::Rgb8).unwrap();
         assert_eq!(converted.format(), PixelFormat::Rgb8);
         assert_eq!(converted.data(), &[30, 20, 10, 60, 50, 40]);
+    }
+
+    #[test]
+    fn bgr_to_rgb_with_stride_padding() {
+        // 2 pixels wide × 2 rows, BGR8 = 6 bytes/row, but stride = 8 (2 padding bytes)
+        let data = vec![
+            10, 20, 30, 40, 50, 60, 0xAA, 0xBB, // row 0 + 2 pad bytes
+            70, 80, 90, 11, 22, 33, 0xCC, 0xDD, // row 1 + 2 pad bytes
+        ];
+        let f = FrameEnvelope::new_owned(
+            FeedId::new(1),
+            0,
+            MonotonicTs::ZERO,
+            WallTs::from_micros(0),
+            2,
+            2,
+            PixelFormat::Bgr8,
+            8, // stride > width*3
+            data,
+            TypedMetadata::new(),
+        );
+        let converted = convert(&f, PixelFormat::Rgb8).unwrap();
+        // Padding bytes must NOT appear in output
+        assert_eq!(
+            converted.data(),
+            &[30, 20, 10, 60, 50, 40, 90, 80, 70, 33, 22, 11]
+        );
+        assert_eq!(converted.stride(), 6); // tightly packed output
     }
 
     #[test]

@@ -505,7 +505,7 @@ pub enum SourceSpec {
     Rtsp { url: String, transport: RtspTransport },
     File { path: PathBuf, loop_: bool },
     V4l2 { device: String },
-    Custom { gst_launch_fragment: String },
+    Custom { pipeline_fragment: String },
 }
 
 pub enum RtspTransport {

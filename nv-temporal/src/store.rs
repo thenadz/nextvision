@@ -144,6 +144,33 @@ impl TemporalStore {
         self.tracks.keys()
     }
 
+    /// Find the best eviction victim by priority.
+    ///
+    /// Priority: Lost (oldest) → Coasted (oldest) → Tentative (oldest).
+    /// Confirmed tracks are never selected. Returns `None` if only
+    /// Confirmed tracks remain.
+    fn find_eviction_victim(&self) -> Option<TrackId> {
+        self.tracks
+            .iter()
+            .filter(|(_, h)| h.track.state == nv_perception::TrackState::Lost)
+            .min_by_key(|(_, h)| h.last_seen)
+            .map(|(id, _)| *id)
+            .or_else(|| {
+                self.tracks
+                    .iter()
+                    .filter(|(_, h)| h.track.state == nv_perception::TrackState::Coasted)
+                    .min_by_key(|(_, h)| h.last_seen)
+                    .map(|(id, _)| *id)
+            })
+            .or_else(|| {
+                self.tracks
+                    .iter()
+                    .filter(|(_, h)| h.track.state == nv_perception::TrackState::Tentative)
+                    .min_by_key(|(_, h)| h.last_seen)
+                    .map(|(id, _)| *id)
+            })
+    }
+
     /// Commit a track update from the latest frame.
     ///
     /// This is the canonical way to upsert track history after stage
@@ -179,29 +206,7 @@ impl TemporalStore {
         if self.get_track(&track_id).is_none() {
             // New track — enforce strict cap via pre-eviction.
             if self.tracks.len() >= self.retention.max_concurrent_tracks {
-                // Find the best eviction victim:
-                // Lost (oldest) → Coasted (oldest) → Tentative (oldest).
-                let victim = self
-                    .tracks
-                    .iter()
-                    .filter(|(_, h)| h.track.state == nv_perception::TrackState::Lost)
-                    .min_by_key(|(_, h)| h.last_seen)
-                    .map(|(id, _)| *id)
-                    .or_else(|| {
-                        self.tracks
-                            .iter()
-                            .filter(|(_, h)| h.track.state == nv_perception::TrackState::Coasted)
-                            .min_by_key(|(_, h)| h.last_seen)
-                            .map(|(id, _)| *id)
-                    })
-                    .or_else(|| {
-                        self.tracks
-                            .iter()
-                            .filter(|(_, h)| h.track.state == nv_perception::TrackState::Tentative)
-                            .min_by_key(|(_, h)| h.last_seen)
-                            .map(|(id, _)| *id)
-                    });
-                match victim {
+                match self.find_eviction_victim() {
                     Some(id) => {
                         self.tracks.remove(&id);
                     }
@@ -330,27 +335,7 @@ impl TemporalStore {
         // Eviction priority: Lost (oldest) → Coasted (oldest) → Tentative (oldest).
         // Confirmed tracks are never evicted.
         while self.tracks.len() > max_tracks {
-            let victim = self
-                .tracks
-                .iter()
-                .filter(|(_, h)| h.track.state == nv_perception::TrackState::Lost)
-                .min_by_key(|(_, h)| h.last_seen)
-                .map(|(id, _)| *id)
-                .or_else(|| {
-                    self.tracks
-                        .iter()
-                        .filter(|(_, h)| h.track.state == nv_perception::TrackState::Coasted)
-                        .min_by_key(|(_, h)| h.last_seen)
-                        .map(|(id, _)| *id)
-                })
-                .or_else(|| {
-                    self.tracks
-                        .iter()
-                        .filter(|(_, h)| h.track.state == nv_perception::TrackState::Tentative)
-                        .min_by_key(|(_, h)| h.last_seen)
-                        .map(|(id, _)| *id)
-                });
-            match victim {
+            match self.find_eviction_victim() {
                 Some(id) => {
                     self.tracks.remove(&id);
                 }

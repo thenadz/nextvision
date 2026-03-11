@@ -74,6 +74,12 @@ pub struct DefaultEpochPolicy {
     /// If `true`, small motions below segment thresholds produce `Degrade`
     /// instead of `Continue`. Default: `true`.
     pub degrade_on_small_motion: bool,
+
+    /// Minimum PTZ telemetry delta (degrees for pan/tilt, ratio for zoom)
+    /// below which changes are treated as sensor noise and ignored.
+    /// Prevents floating-point jitter from triggering spurious `Degrade`
+    /// events when the camera is at rest. Default: `0.01`.
+    pub ptz_deadband: f32,
 }
 
 impl Default for DefaultEpochPolicy {
@@ -84,6 +90,7 @@ impl Default for DefaultEpochPolicy {
             segment_displacement_threshold: 0.25,
             compensate_min_confidence: 0.8,
             degrade_on_small_motion: true,
+            ptz_deadband: 0.01,
         }
     }
 }
@@ -123,7 +130,9 @@ impl EpochPolicy for DefaultEpochPolicy {
             }
 
             if self.degrade_on_small_motion
-                && (pan_delta > 0.0 || tilt_delta > 0.0 || zoom_delta > 0.0)
+                && (pan_delta > self.ptz_deadband
+                    || tilt_delta > self.ptz_deadband
+                    || zoom_delta > self.ptz_deadband)
             {
                 return EpochDecision::Degrade {
                     reason: DegradationReason::PtzMoving,
@@ -358,5 +367,32 @@ mod tests {
         let ctx = moving_ctx(&prev, &report, 0.05);
         // With degrade disabled, small motion should continue.
         assert!(matches!(policy.decide(&ctx), EpochDecision::Continue));
+    }
+
+    #[test]
+    fn ptz_jitter_within_deadband_continues() {
+        let policy = DefaultEpochPolicy::default();
+        let mut prev = ViewState::observed_initial();
+        prev.ptz = Some(PtzTelemetry {
+            pan: 10.0,
+            tilt: 5.0,
+            zoom: 0.5,
+            ts: MonotonicTs::from_nanos(0),
+        });
+        let report = MotionReport {
+            ptz: Some(PtzTelemetry {
+                // Tiny jitter below the 0.01 deadband
+                pan: 10.005,
+                tilt: 5.003,
+                zoom: 0.5002,
+                ts: MonotonicTs::from_nanos(33_000_000),
+            }),
+            ..Default::default()
+        };
+        let ctx = stable_ctx(&prev, &report);
+        assert!(
+            matches!(policy.decide(&ctx), EpochDecision::Continue),
+            "floating-point jitter within deadband should not degrade"
+        );
     }
 }
