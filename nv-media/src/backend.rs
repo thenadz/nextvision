@@ -337,50 +337,58 @@ impl GstSession {
         }
     }
 
-    /// Poll the bus for a pending message (non-blocking).
+    /// Poll the bus for the next actionable message (non-blocking).
     ///
-    /// Returns `None` if no message is available. Maps GStreamer bus
-    /// messages to [`BusMessage`].
+    /// Returns `None` when the bus is empty. Internally skips messages
+    /// that don't map to a [`BusMessage`] (e.g., sub-element state
+    /// changes) so that the caller's drain loop is never prematurely
+    /// terminated by an unmapped message hiding behind actionable ones.
     #[cfg(feature = "gst-backend")]
     pub fn poll_bus(&self) -> Option<BusMessage> {
         use gstreamer::MessageView;
         use gstreamer::prelude::*;
 
-        let msg = self.bus.pop()?;
         let pipeline_obj: &gstreamer::Object = self.pipeline.upcast_ref();
-        match msg.view() {
-            MessageView::Eos(_) => Some(BusMessage::Eos),
-            MessageView::Error(e) => {
-                let debug = e.debug().map(|d| d.to_string());
-                Some(BusMessage::Error {
-                    message: e.error().to_string(),
-                    debug,
-                })
-            }
-            MessageView::Warning(w) => {
-                let debug = w.debug().map(|d| d.to_string());
-                Some(BusMessage::Warning {
-                    message: w.error().to_string(),
-                    debug,
-                })
-            }
-            MessageView::StateChanged(sc) => {
-                // Only report state changes from the pipeline element itself
-                if msg.src() == Some(pipeline_obj) {
-                    Some(BusMessage::StateChanged {
-                        old: map_gst_state(sc.old()),
-                        new: map_gst_state(sc.current()),
+        loop {
+            let msg = self.bus.pop()?;
+            let mapped = match msg.view() {
+                MessageView::Eos(_) => Some(BusMessage::Eos),
+                MessageView::Error(e) => {
+                    let debug = e.debug().map(|d| d.to_string());
+                    Some(BusMessage::Error {
+                        message: e.error().to_string(),
+                        debug,
                     })
-                } else {
-                    None
                 }
+                MessageView::Warning(w) => {
+                    let debug = w.debug().map(|d| d.to_string());
+                    Some(BusMessage::Warning {
+                        message: w.error().to_string(),
+                        debug,
+                    })
+                }
+                MessageView::StateChanged(sc) => {
+                    // Only report state changes from the pipeline element itself
+                    if msg.src() == Some(pipeline_obj) {
+                        Some(BusMessage::StateChanged {
+                            old: map_gst_state(sc.old()),
+                            new: map_gst_state(sc.current()),
+                        })
+                    } else {
+                        None
+                    }
+                }
+                MessageView::StreamStart(_) => Some(BusMessage::StreamStart),
+                MessageView::Latency(_) => Some(BusMessage::Latency),
+                MessageView::Buffering(b) => Some(BusMessage::Buffering {
+                    percent: b.percent() as u32,
+                }),
+                _ => None,
+            };
+            // Skip unmapped messages and continue draining.
+            if let Some(bus_msg) = mapped {
+                return Some(bus_msg);
             }
-            MessageView::StreamStart(_) => Some(BusMessage::StreamStart),
-            MessageView::Latency(_) => Some(BusMessage::Latency),
-            MessageView::Buffering(b) => Some(BusMessage::Buffering {
-                percent: b.percent() as u32,
-            }),
-            _ => None,
         }
     }
 

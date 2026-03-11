@@ -49,9 +49,14 @@ use crate::backend::{EventQueue, GstSession, SessionConfig};
 use crate::ingress::PtzProvider;
 use crate::decode::DecoderSelection;
 use crate::event::MediaEvent;
-use crate::ingress::{FrameSink, HealthSink, MediaIngress};
+use crate::ingress::{FrameSink, HealthSink, MediaIngress, SourceStatus};
 use crate::pipeline::OutputFormat;
 use crate::reconnect::ReconnectTracker;
+
+/// Maximum time to wait for a stream to start producing frames after a
+/// successful (re)connection before treating the session as dead. This
+/// ensures the worker keeps polling the bus even when no frames arrive.
+const LIVENESS_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
 // Source state machine
@@ -100,6 +105,11 @@ pub struct MediaSource {
     /// Earliest `Instant` at which the next reconnect attempt is allowed.
     /// Set when a backoff delay is computed; cleared on successful connect.
     reconnect_deadline: Option<Instant>,
+    /// Liveness watchdog: deadline by which the new session must produce a
+    /// `StreamStarted` event. Set after a successful (re)connect; cleared
+    /// once the stream is confirmed flowing. If it expires, a reconnection
+    /// is forced.
+    liveness_deadline: Option<Instant>,
 }
 
 impl MediaSource {
@@ -117,6 +127,7 @@ impl MediaSource {
             ptz_provider: None,
             event_queue: Arc::new(std::sync::Mutex::new(VecDeque::new())),
             reconnect_deadline: None,
+            liveness_deadline: None,
         }
     }
 
@@ -200,6 +211,9 @@ impl MediaSource {
 
         let session = GstSession::start(config, sink, Arc::clone(&self.event_queue))?;
         self.session = Some(session);
+        // Arm the liveness watchdog — the new session must produce a
+        // StreamStarted within LIVENESS_TIMEOUT or we force a reconnect.
+        self.liveness_deadline = Some(Instant::now() + LIVENESS_TIMEOUT);
         Ok(())
     }
 
@@ -256,6 +270,8 @@ impl MediaSource {
     pub(crate) fn handle_event(&mut self, event: MediaEvent) -> Option<Duration> {
         match event {
             MediaEvent::StreamStarted => {
+                // Stream is confirmed flowing — clear the liveness watchdog.
+                self.liveness_deadline = None;
                 if self.state == SourceState::Running {
                     // Already running — suppress duplicate emission.
                     // This can happen when start() transitions to Running
@@ -409,6 +425,14 @@ impl MediaSource {
             }
         };
 
+        if !queued_events.is_empty() {
+            tracing::debug!(
+                feed_id = %self.feed_id,
+                count = queued_events.len(),
+                "poll_bus: draining queued discontinuity events"
+            );
+        }
+
         for event in queued_events {
             if let Some(delay) = self.handle_event(event) {
                 self.reconnect_deadline = Some(Instant::now() + delay);
@@ -422,11 +446,35 @@ impl MediaSource {
             while let Some(bus_msg) = session.poll_bus() {
                 messages.push(bus_msg);
             }
+        } else {
+            tracing::debug!(
+                feed_id = %self.feed_id,
+                state = ?self.state,
+                "poll_bus: no session — skipping bus drain"
+            );
+        }
+
+        if !messages.is_empty() {
+            tracing::trace!(
+                feed_id = %self.feed_id,
+                count = messages.len(),
+                "poll_bus: draining GStreamer bus messages"
+            );
         }
 
         let mut reconnect_delay = None;
         for bus_msg in messages {
+            tracing::trace!(
+                feed_id = %self.feed_id,
+                bus_msg = ?bus_msg,
+                "poll_bus: processing bus message"
+            );
             if let Some(event) = bus_msg.into_media_event() {
+                tracing::debug!(
+                    feed_id = %self.feed_id,
+                    event = ?event,
+                    "poll_bus: mapped to media event"
+                );
                 if let Some(delay) = self.handle_event(event) {
                     self.reconnect_deadline = Some(Instant::now() + delay);
                     reconnect_delay = Some(delay);
@@ -441,16 +489,36 @@ impl MediaSource {
             let deadline_elapsed = self
                 .reconnect_deadline
                 .map_or(true, |d| Instant::now() >= d);
+            tracing::debug!(
+                feed_id = %self.feed_id,
+                deadline_elapsed,
+                reconnect_deadline = ?self.reconnect_deadline,
+                "poll_bus: in Reconnecting state, checking deadline"
+            );
             if deadline_elapsed {
                 match self.try_reconnect() {
                     Ok(()) => {
+                        tracing::info!(
+                            feed_id = %self.feed_id,
+                            "poll_bus: reconnection succeeded"
+                        );
                         self.reconnect_deadline = None;
                     }
                     Err(Some(delay)) => {
+                        tracing::debug!(
+                            feed_id = %self.feed_id,
+                            delay_ms = delay.as_millis() as u64,
+                            "poll_bus: reconnection failed, scheduling retry"
+                        );
                         self.reconnect_deadline = Some(Instant::now() + delay);
                         reconnect_delay = Some(delay);
                     }
-                    Err(None) => {} // stopped permanently
+                    Err(None) => {
+                        tracing::warn!(
+                            feed_id = %self.feed_id,
+                            "poll_bus: reconnection budget exhausted, stopped"
+                        );
+                    }
                 }
             }
         }
@@ -634,10 +702,38 @@ impl MediaIngress for MediaSource {
         // pending discontinuity events, advancing the reconnection FSM.
         let _reconnect_delay = self.poll_bus();
 
+        // Check liveness watchdog: if armed and expired, force reconnect.
+        if self.state == SourceState::Running {
+            if let Some(deadline) = self.liveness_deadline {
+                if Instant::now() >= deadline {
+                    tracing::warn!(
+                        feed_id = %self.feed_id,
+                        "liveness watchdog expired — no stream started, forcing reconnect"
+                    );
+                    self.liveness_deadline = None;
+                    self.emit_health(HealthEvent::SourceDisconnected {
+                        feed_id: self.feed_id,
+                        reason: MediaError::Timeout,
+                    });
+                    if let Some(ref sink) = self.sink {
+                        sink.on_error(MediaError::Timeout);
+                    }
+                    self.try_reconnect_or_stop();
+                    // Re-poll to pick up the reconnection state.
+                    let _delay = self.poll_bus();
+                }
+            }
+        }
+
         // Map the resulting state and compute the next-tick hint.
-        match self.state {
+        let outcome = match self.state {
             SourceState::Running | SourceState::Paused | SourceState::Idle => {
-                TickOutcome::running()
+                // If liveness watchdog is armed, schedule a tick so the
+                // worker keeps polling instead of waiting indefinitely.
+                let next = self.liveness_deadline.map(|d| {
+                    d.saturating_duration_since(Instant::now())
+                });
+                TickOutcome { status: SourceStatus::Running, next_tick: next }
             }
             SourceState::Reconnecting => {
                 // Return the remaining backoff as the next-tick hint so
@@ -649,7 +745,9 @@ impl MediaIngress for MediaSource {
                 TickOutcome::reconnecting(remaining)
             }
             SourceState::Stopped => TickOutcome::stopped(),
-        }
+        };
+
+        outcome
     }
 }
 
@@ -665,6 +763,14 @@ impl MediaSource {
 
     pub(crate) fn total_reconnects(&self) -> u32 {
         self.reconnect.total_reconnects()
+    }
+
+    pub(crate) fn liveness_deadline(&self) -> Option<Instant> {
+        self.liveness_deadline
+    }
+
+    pub(crate) fn set_liveness_deadline(&mut self, deadline: Option<Instant>) {
+        self.liveness_deadline = deadline;
     }
 }
 

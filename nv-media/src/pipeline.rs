@@ -87,6 +87,15 @@ pub(crate) struct PipelineBuilder {
 /// Default latency hint for RTSP jitter buffers.
 const DEFAULT_LATENCY_MS: u32 = 200;
 
+/// Default TCP timeout for RTSP sources, in microseconds.
+///
+/// Controls how long the TCP interleaved connection waits before
+/// declaring a timeout on a stalled connection (e.g., network outage).
+/// 10 seconds balances normal jitter tolerance against prompt failure
+/// detection. GStreamer posts a bus Error when this fires, which the
+/// source FSM maps to a reconnection attempt.
+const DEFAULT_RTSP_TCP_TIMEOUT_US: u64 = 10_000_000;
+
 impl PipelineBuilder {
     /// Create a builder for the given source specification.
     pub fn new(spec: SourceSpec) -> Self {
@@ -136,6 +145,7 @@ impl PipelineBuilder {
             SourceSpec::Rtsp { url, transport } => gst::ElementFactory::make("rtspsrc")
                 .property("location", url.as_str())
                 .property("latency", self.latency_ms)
+                .property("tcp-timeout", DEFAULT_RTSP_TCP_TIMEOUT_US)
                 .property_from_str(
                     "protocols",
                     match transport {

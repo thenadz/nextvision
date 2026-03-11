@@ -104,6 +104,7 @@ impl FrameQueue {
     pub fn push(&self, frame: FrameEnvelope) -> PushOutcome {
         let mut inner = self.inner.lock().unwrap();
         if inner.closed {
+            tracing::debug!("FrameQueue::push — rejected: queue is closed");
             return PushOutcome::Rejected;
         }
         inner.total_received += 1;
@@ -215,6 +216,7 @@ impl FrameQueue {
 
     /// Close the queue: reject future pushes and wake all waiters.
     pub fn close(&self) {
+        tracing::debug!("FrameQueue::close — closing queue");
         let mut inner = self.inner.lock().unwrap();
         inner.closed = true;
         self.not_empty.notify_all();
