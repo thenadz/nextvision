@@ -246,7 +246,7 @@ mod tests {
         let (health_tx, _) = tokio::sync::broadcast::channel::<HealthEvent>(4);
         let coord = BatchCoordinator::start(
             Box::new(Noop),
-            BatchConfig { max_batch_size: 1, max_latency: Duration::from_millis(10), queue_capacity: None },
+            BatchConfig { max_batch_size: 1, max_latency: Duration::from_millis(10), queue_capacity: None, response_timeout: None },
             health_tx,
         ).unwrap();
         let handle = coord.handle();

@@ -270,6 +270,9 @@ impl RuntimeInner {
     fn shutdown_all(&self) -> Result<(), NvError> {
         self.shutdown.store(true, Ordering::Relaxed);
 
+        // --- Phase 1: Signal everything to stop. ---
+        //
+        // Signal feeds first so they stop submitting new frames.
         let mut feeds = self
             .feeds
             .lock()
@@ -282,14 +285,31 @@ impl RuntimeInner {
         let entries: Vec<_> = feeds.drain().collect();
         drop(feeds);
 
+        // Signal batch coordinators *before* joining feed threads.
+        // Feed threads blocked in `submit_and_wait` unblock once the
+        // coordinator processes remaining items and exits (disconnecting
+        // response channels). Without this, feeds can hang for up to
+        // `max_latency + RESPONSE_TIMEOUT_SAFETY` waiting for a batch
+        // that the coordinator hasn't been told to stop.
+        if let Ok(coordinators) = self.coordinators.lock() {
+            for coordinator in coordinators.iter() {
+                coordinator.signal_shutdown();
+            }
+        }
+
+        // --- Phase 2: Join feed threads. ---
+        //
+        // Coordinators are shutting down concurrently, so feed threads
+        // blocked on batch responses will unblock promptly.
         for (id, mut entry) in entries {
             if let Some(handle) = entry.thread.take() {
                 bounded_join(handle, id, &self.health_tx);
             }
         }
 
-        // All worker threads have stopped (or detached). Now shut down
-        // batch coordinators — feed threads are no longer submitting.
+        // --- Phase 3: Join batch coordinators. ---
+        //
+        // All feed threads are done (or detached). No new submissions.
         if let Ok(mut coordinators) = self.coordinators.lock() {
             for coordinator in coordinators.drain(..) {
                 coordinator.shutdown();

@@ -51,6 +51,8 @@ pub struct BatchEntry {
     /// Slot for the processor to write its per-item output.
     ///
     /// Must be set to `Some(...)` for each successfully processed item.
+    /// Any [`StageOutput`] variant is valid — detections, scene features,
+    /// signals, or typed artifacts for downstream consumption.
     pub output: Option<StageOutput>,
 }
 
@@ -82,6 +84,21 @@ pub struct BatchEntry {
 /// If `process()` returns `Err(StageError)`, the entire batch fails.
 /// All feed threads waiting on that batch receive the error and drop
 /// their frames (same semantics as a per-feed stage error).
+///
+/// # Output flexibility
+///
+/// [`StageOutput`] is the same type used by per-feed stages. A batch
+/// processor is not limited to detection — it can produce:
+///
+/// - **Detections** via [`StageOutput::with_detections`].
+/// - **Scene features** via [`StageOutput::with_scene_features`]
+///   (e.g., scene classification, embedding extraction).
+/// - **Signals** via [`StageOutput::with_signals`].
+/// - **Arbitrary typed artifacts** via [`StageOutput::with_artifact`]
+///   for downstream per-feed stages to consume.
+///
+/// Post-batch per-feed stages see these outputs through the normal
+/// [`StageContext::artifacts`](crate::StageContext) accumulator.
 ///
 /// # Example
 ///

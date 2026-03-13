@@ -137,10 +137,27 @@ fn broadcast_fanout(c: &mut Criterion) {
     });
 }
 
+fn batch_channel_alloc(c: &mut Criterion) {
+    use nv_core::error::StageError;
+    use nv_perception::StageOutput;
+
+    // Measure the per-submit sync_channel(1) allocation + roundtrip
+    // that the batch hot path pays for each item. This is the minimum
+    // overhead added by the batch coordination layer.
+    c.bench_function("batch_response_channel_alloc", |b| {
+        b.iter(|| {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Result<StageOutput, StageError>>(1);
+            let _ = tx.send(Ok(StageOutput::empty()));
+            let _ = black_box(rx.recv());
+        });
+    });
+}
+
 criterion_group!(
     benches,
     output_envelope_construction,
     output_arc_clone,
-    broadcast_fanout
+    broadcast_fanout,
+    batch_channel_alloc,
 );
 criterion_main!(benches);

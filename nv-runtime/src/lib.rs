@@ -84,8 +84,8 @@
 //! ## Batch inference across feeds
 //!
 //! Multiple feeds can share a single GPU-accelerated batch processor via
-//! [`BatchCoordinator`](batch::BatchCoordinator). Create a batch handle
-//! once, then reference it from each feed's pipeline.
+//! [`BatchHandle`]. Create a batch handle once, then reference it from
+//! each feed's pipeline.
 //!
 //! ```rust,no_run
 //! use nv_runtime::*;
@@ -114,6 +114,7 @@
 //!         max_batch_size: 8,
 //!         max_latency: Duration::from_millis(50),
 //!         queue_capacity: None,
+//!         response_timeout: None,
 //!     },
 //! )?;
 //!

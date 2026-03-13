@@ -57,7 +57,7 @@ use crate::shutdown::{RestartPolicy, RestartTrigger};
 pub(crate) struct FeedSharedState {
     pub id: FeedId,
     pub paused: AtomicBool,
-    pub shutdown: AtomicBool,
+    pub shutdown: Arc<AtomicBool>,
     pub frames_received: AtomicU64,
     pub frames_dropped: AtomicU64,
     pub frames_processed: AtomicU64,
@@ -92,7 +92,7 @@ impl FeedSharedState {
         Self {
             id,
             paused: AtomicBool::new(false),
-            shutdown: AtomicBool::new(false),
+            shutdown: Arc::new(AtomicBool::new(false)),
             frames_received: AtomicU64::new(0),
             frames_dropped: AtomicU64::new(0),
             frames_processed: AtomicU64::new(0),
@@ -524,6 +524,7 @@ pub(crate) fn spawn_feed_worker(
                     config.view_state_provider,
                     config.epoch_policy,
                     config.frame_inclusion,
+                    Arc::clone(&shared_clone.shutdown),
                 ),
                 output_sink: config.output_sink,
                 ptz_provider: config.ptz_provider,

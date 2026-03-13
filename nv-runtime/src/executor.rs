@@ -53,6 +53,8 @@
 //! epoch so they sit in the same clock domain as frame timestamps.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use nv_core::config::CameraMode;
@@ -125,6 +127,13 @@ pub(crate) struct PipelineExecutor {
     batch_rejection_count: u64,
     /// Last time a BatchSubmissionRejected event was emitted.
     last_batch_rejection_event: Option<Instant>,
+    /// Reference to the feed's shutdown flag. Used to distinguish expected
+    /// coordinator shutdown (feed/runtime is shutting down) from unexpected
+    /// coordinator death (coordinator crashed while feed is alive).
+    feed_shutdown: Arc<AtomicBool>,
+    /// Whether we've already emitted a health event for unexpected
+    /// coordinator loss. Prevents per-frame storms.
+    coordinator_loss_emitted: bool,
 }
 
 impl PipelineExecutor {
@@ -141,6 +150,7 @@ impl PipelineExecutor {
         view_state_provider: Option<Box<dyn ViewStateProvider>>,
         epoch_policy: Box<dyn EpochPolicy>,
         frame_inclusion: FrameInclusion,
+        feed_shutdown: Arc<AtomicBool>,
     ) -> Self {
         let view_state = match camera_mode {
             CameraMode::Fixed => ViewState::fixed_initial(),
@@ -176,6 +186,8 @@ impl PipelineExecutor {
             ended_buf: Vec::new(),
             batch_rejection_count: 0,
             last_batch_rejection_event: None,
+            feed_shutdown,
+            coordinator_loss_emitted: false,
         }
     }
 
@@ -566,16 +578,30 @@ impl PipelineExecutor {
                             )
                         }
                         BatchSubmitError::CoordinatorShutdown => {
-                            (
-                                StageResult::Error(StageOutcomeCategory::DependencyUnavailable),
+                            // Distinguish expected feed/runtime shutdown
+                            // from unexpected coordinator death.
+                            let is_expected = self.feed_shutdown.load(Ordering::Relaxed);
+                            let health = if is_expected {
+                                // Expected lifecycle event — no health noise.
+                                None
+                            } else if !self.coordinator_loss_emitted {
+                                // Unexpected coordinator loss — emit once.
+                                self.coordinator_loss_emitted = true;
                                 Some(HealthEvent::StageError {
                                     feed_id: self.feed_id,
                                     stage_id: batch_id,
                                     error: StageError::ProcessingFailed {
                                         stage_id: batch_id,
-                                        detail: "batch coordinator shut down".into(),
+                                        detail: "batch coordinator shut down unexpectedly".into(),
                                     },
-                                }),
+                                })
+                            } else {
+                                // Already emitted — suppress duplicates.
+                                None
+                            };
+                            (
+                                StageResult::Error(StageOutcomeCategory::DependencyUnavailable),
+                                health,
                             )
                         }
                         BatchSubmitError::Timeout => {
@@ -1007,6 +1033,7 @@ impl PipelineExecutor {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use nv_core::config::CameraMode;
     use nv_core::id::{FeedId, StageId};
     use nv_perception::StageOutput;
@@ -1029,6 +1056,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         )
     }
 
@@ -1196,6 +1224,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
         exec.start_stages().unwrap();
 
@@ -1262,6 +1291,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
         exec.start_stages().unwrap();
 
@@ -1461,6 +1491,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
         exec.start_stages().unwrap();
 
@@ -1525,6 +1556,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
         exec.start_stages().unwrap();
 
@@ -1572,6 +1604,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
         exec.start_stages().unwrap();
 
@@ -1641,6 +1674,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
 
         let frame = nv_test_util::synthetic::solid_gray(
@@ -1691,6 +1725,7 @@ mod tests {
             Some(Box::new(StableProvider)),
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
 
         let frame = nv_test_util::synthetic::solid_gray(
@@ -1752,6 +1787,7 @@ mod tests {
             Some(Box::new(SmallPtzProvider)),
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
 
         // First frame initializes PTZ baseline (no previous ptz → Continue on
@@ -1835,6 +1871,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
         exec.start_stages().unwrap();
 
@@ -1871,6 +1908,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
         exec.start_stages().unwrap();
 
@@ -1941,6 +1979,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
         exec.start_stages().unwrap();
 
@@ -2022,6 +2061,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
         exec.start_stages().unwrap();
 
@@ -2063,6 +2103,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
         exec.start_stages().unwrap();
 
@@ -2097,6 +2138,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
         exec.start_stages().unwrap();
 
@@ -2154,6 +2196,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
         exec.start_stages().unwrap();
 
@@ -2196,6 +2239,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
         let mut exec_b = PipelineExecutor::new(
             FeedId::new(2),
@@ -2210,6 +2254,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
         exec_a.start_stages().unwrap();
         exec_b.start_stages().unwrap();
@@ -2275,6 +2320,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
         exec.start_stages().unwrap();
 
@@ -2326,6 +2372,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Always,
+            Arc::new(AtomicBool::new(false)),
         );
         exec.start_stages().unwrap();
 
@@ -2394,6 +2441,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
         let result = exec.start_stages();
         assert!(result.is_err(), "start_stages should return error on panic");
@@ -2417,6 +2465,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
         exec.start_stages().unwrap();
         // Should not panic — catches the panic internally.
@@ -2448,6 +2497,7 @@ mod tests {
                 max_batch_size: 1,
                 max_latency: std::time::Duration::from_millis(10),
                 queue_capacity: None,
+                response_timeout: None,
             },
             health_tx,
         ).unwrap();
@@ -2463,6 +2513,7 @@ mod tests {
             None,
             Box::new(DefaultEpochPolicy::default()),
             FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
         );
 
         // Simulate accumulated rejections.
@@ -2483,5 +2534,186 @@ mod tests {
         assert!(exec.flush_batch_rejections().is_none());
 
         coord.shutdown();
+    }
+
+    /// When the feed shutdown flag is set *before* coordinator dies,
+    /// CoordinatorShutdown should produce zero health events (expected).
+    #[test]
+    fn coordinator_shutdown_expected_emits_no_health() {
+        use crate::batch::{BatchConfig, BatchCoordinator};
+        use nv_core::health::HealthEvent;
+        use nv_perception::batch::{BatchEntry, BatchProcessor};
+
+        struct Noop;
+        impl BatchProcessor for Noop {
+            fn id(&self) -> StageId { StageId("noop_csexp") }
+            fn process(&mut self, _: &mut [BatchEntry]) -> Result<(), nv_core::error::StageError> { Ok(()) }
+        }
+
+        let (health_tx, _) = tokio::sync::broadcast::channel::<HealthEvent>(4);
+        let coord = BatchCoordinator::start(
+            Box::new(Noop),
+            BatchConfig {
+                max_batch_size: 1,
+                max_latency: std::time::Duration::from_millis(10),
+                queue_capacity: None,
+                response_timeout: None,
+            },
+            health_tx,
+        ).unwrap();
+        let handle = coord.handle();
+
+        // Mark feed as shutting down *before* coordinator dies.
+        let feed_shutdown = Arc::new(AtomicBool::new(true));
+
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(99),
+            Vec::new(),
+            Some(handle),
+            Vec::new(),
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
+            Arc::clone(&feed_shutdown),
+        );
+
+        // Shut down the coordinator — the handle's next submit will see CoordinatorShutdown.
+        coord.shutdown();
+        // Give coordinator thread a moment to exit.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let frame = nv_test_util::synthetic::solid_gray(
+            FeedId::new(99), 0, MonotonicTs::from_nanos(0), 2, 2, 128,
+        );
+        let (_output, health_events) = exec.process_frame(&frame);
+
+        let stage_errors: Vec<_> = health_events.iter().filter(|e| matches!(e, HealthEvent::StageError { .. })).collect();
+        assert!(stage_errors.is_empty(), "expected no StageError for expected shutdown, got: {stage_errors:?}");
+    }
+
+    /// When the feed shutdown flag is NOT set and the coordinator dies,
+    /// exactly one StageError health event should be emitted.
+    #[test]
+    fn coordinator_shutdown_unexpected_emits_one_stage_error() {
+        use crate::batch::{BatchConfig, BatchCoordinator};
+        use nv_core::health::HealthEvent;
+        use nv_perception::batch::{BatchEntry, BatchProcessor};
+
+        struct Noop;
+        impl BatchProcessor for Noop {
+            fn id(&self) -> StageId { StageId("noop_csunexp") }
+            fn process(&mut self, _: &mut [BatchEntry]) -> Result<(), nv_core::error::StageError> { Ok(()) }
+        }
+
+        let (health_tx, _) = tokio::sync::broadcast::channel::<HealthEvent>(4);
+        let coord = BatchCoordinator::start(
+            Box::new(Noop),
+            BatchConfig {
+                max_batch_size: 1,
+                max_latency: std::time::Duration::from_millis(10),
+                queue_capacity: None,
+                response_timeout: None,
+            },
+            health_tx,
+        ).unwrap();
+        let handle = coord.handle();
+
+        // feed_shutdown stays false — coordinator death is unexpected.
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(99),
+            Vec::new(),
+            Some(handle),
+            Vec::new(),
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        coord.shutdown();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let frame = nv_test_util::synthetic::solid_gray(
+            FeedId::new(99), 0, MonotonicTs::from_nanos(0), 2, 2, 128,
+        );
+        let (_output, health_events) = exec.process_frame(&frame);
+
+        let stage_errors: Vec<_> = health_events.iter().filter(|e| matches!(e, HealthEvent::StageError { .. })).collect();
+        assert_eq!(stage_errors.len(), 1, "expected exactly one StageError for unexpected shutdown, got: {stage_errors:?}");
+
+        match &stage_errors[0] {
+            HealthEvent::StageError { feed_id, stage_id, error } => {
+                assert_eq!(*feed_id, FeedId::new(99));
+                assert_eq!(*stage_id, StageId("noop_csunexp"));
+                let detail = format!("{error}");
+                assert!(detail.contains("batch coordinator shut down unexpectedly"), "unexpected detail: {detail}");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// After the first unexpected CoordinatorShutdown health event,
+    /// subsequent frames should not emit duplicates.
+    #[test]
+    fn coordinator_shutdown_unexpected_deduplicates() {
+        use crate::batch::{BatchConfig, BatchCoordinator};
+        use nv_core::health::HealthEvent;
+        use nv_perception::batch::{BatchEntry, BatchProcessor};
+
+        struct Noop;
+        impl BatchProcessor for Noop {
+            fn id(&self) -> StageId { StageId("noop_csdedup") }
+            fn process(&mut self, _: &mut [BatchEntry]) -> Result<(), nv_core::error::StageError> { Ok(()) }
+        }
+
+        let (health_tx, _) = tokio::sync::broadcast::channel::<HealthEvent>(4);
+        let coord = BatchCoordinator::start(
+            Box::new(Noop),
+            BatchConfig {
+                max_batch_size: 1,
+                max_latency: std::time::Duration::from_millis(10),
+                queue_capacity: None,
+                response_timeout: None,
+            },
+            health_tx,
+        ).unwrap();
+        let handle = coord.handle();
+
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(99),
+            Vec::new(),
+            Some(handle),
+            Vec::new(),
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        coord.shutdown();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let frame1 = nv_test_util::synthetic::solid_gray(
+            FeedId::new(99), 0, MonotonicTs::from_nanos(0), 2, 2, 128,
+        );
+        let frame2 = nv_test_util::synthetic::solid_gray(
+            FeedId::new(99), 1, MonotonicTs::from_nanos(1_000_000), 2, 2, 128,
+        );
+
+        // First frame: should emit the StageError.
+        let (_, h1) = exec.process_frame(&frame1);
+        let errs1: Vec<_> = h1.iter().filter(|e| matches!(e, HealthEvent::StageError { .. })).collect();
+        assert_eq!(errs1.len(), 1, "first frame should emit one StageError");
+
+        // Second frame: should NOT emit a duplicate.
+        let (_, h2) = exec.process_frame(&frame2);
+        let errs2: Vec<_> = h2.iter().filter(|e| matches!(e, HealthEvent::StageError { .. })).collect();
+        assert!(errs2.is_empty(), "second frame should suppress duplicate StageError, got: {errs2:?}");
     }
 }

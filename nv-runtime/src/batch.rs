@@ -36,6 +36,36 @@
 //! Rejection counts are coalesced per-feed with a 1-second throttle
 //! window, and flushed on recovery or lifecycle boundaries.
 //!
+//! # Shutdown
+//!
+//! The coordinator checks its shutdown flag every 100 ms during both
+//! idle waiting (Phase 1) and batch formation (Phase 2). During
+//! runtime shutdown, coordinators are signaled *before* feed threads
+//! are joined, so feed threads blocked in `submit_and_wait` unblock
+//! promptly when the coordinator exits and the response channel
+//! disconnects.
+//!
+//! ## Startup timeout
+//!
+//! `BatchProcessor::on_start()` is given [`ON_START_TIMEOUT`] (30 s).
+//! If it exceeds that, the coordinator attempts a 2-second bounded join
+//! before returning an error. If the thread is still alive after the
+//! grace period it is detached (inherent safe-Rust limitation).
+//!
+//! ## Response timeout
+//!
+//! `submit_and_wait` blocks for at most `max_latency + response_timeout`
+//! before returning [`BatchSubmitError::Timeout`]. The response timeout
+//! defaults to 5 s ([`DEFAULT_RESPONSE_TIMEOUT`]) and can be configured
+//! via [`BatchConfig::response_timeout`].
+//!
+//! ## Expected vs unexpected coordinator loss
+//!
+//! [`PipelineExecutor`](crate::executor::PipelineExecutor) distinguishes
+//! expected shutdown (feed/runtime is shutting down) from unexpected
+//! coordinator death by checking the feed's shutdown flag. Unexpected
+//! loss emits exactly one `HealthEvent::StageError` per feed.
+//!
 //! # Observability
 //!
 //! [`BatchHandle::metrics()`] returns a [`BatchMetrics`] snapshot with:
@@ -88,6 +118,8 @@ pub struct BatchConfig {
     /// After the first item arrives, the coordinator waits up to this
     /// duration for more items. If the batch is still not full when the
     /// deadline expires, it is dispatched as-is.
+    ///
+    /// Must be > 0.
     pub max_latency: Duration,
     /// Submission queue capacity.
     ///
@@ -98,6 +130,82 @@ pub struct BatchConfig {
     /// Defaults to `max_batch_size * 4` (minimum 4) when `None`.
     /// When specified, must be ≥ `max_batch_size`.
     pub queue_capacity: Option<usize>,
+    /// Safety timeout added beyond `max_latency` when a feed thread waits
+    /// for a batch response.
+    ///
+    /// The total wait is `max_latency + response_timeout`. This bounds
+    /// how long a feed thread can block if the coordinator is wedged or
+    /// processing is severely delayed.
+    ///
+    /// In practice, responses arrive within `max_latency + processing_time`.
+    /// This safety margin exists only to guarantee eventual unblocking.
+    ///
+    /// Defaults to 5 seconds when `None`. Must be > 0 when specified.
+    pub response_timeout: Option<Duration>,
+}
+
+impl BatchConfig {
+    /// Create a validated batch configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidPolicy`](nv_core::error::ConfigError::InvalidPolicy)
+    /// if `max_batch_size` is 0 or `max_latency` is zero.
+    pub fn new(
+        max_batch_size: usize,
+        max_latency: Duration,
+    ) -> Result<Self, nv_core::error::ConfigError> {
+        if max_batch_size == 0 {
+            return Err(nv_core::error::ConfigError::InvalidPolicy {
+                detail: "batch max_batch_size must be >= 1".into(),
+            });
+        }
+        if max_latency.is_zero() {
+            return Err(nv_core::error::ConfigError::InvalidPolicy {
+                detail: "batch max_latency must be > 0".into(),
+            });
+        }
+        Ok(Self {
+            max_batch_size,
+            max_latency,
+            queue_capacity: None,
+            response_timeout: None,
+        })
+    }
+
+    /// Set the submission queue capacity.
+    ///
+    /// When specified, must be ≥ `max_batch_size`. Pass `None` for the
+    /// default (`max_batch_size * 4`, minimum 4).
+    #[must_use]
+    pub fn with_queue_capacity(mut self, capacity: Option<usize>) -> Self {
+        self.queue_capacity = capacity;
+        self
+    }
+
+    /// Set the response safety timeout.
+    ///
+    /// This is the safety margin added beyond `max_latency` when blocking
+    /// for a batch response. Pass `None` for the default (5 seconds).
+    /// Must be > 0 when specified.
+    #[must_use]
+    pub fn with_response_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.response_timeout = timeout;
+        self
+    }
+}
+
+impl Default for BatchConfig {
+    /// Sensible defaults: batch size 4, 50 ms latency, auto queue capacity,
+    /// 5-second response safety timeout.
+    fn default() -> Self {
+        Self {
+            max_batch_size: 4,
+            max_latency: Duration::from_millis(50),
+            queue_capacity: None,
+            response_timeout: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -321,15 +429,32 @@ pub(crate) struct BatchHandleInner {
     capabilities: Option<nv_perception::stage::StageCapabilities>,
 }
 
-/// Maximum time a feed thread waits for a batch response beyond the
-/// formation deadline. Safety bound for coordinator crashes or severe
-/// processing hangs.
-const RESPONSE_TIMEOUT_SAFETY: Duration = Duration::from_secs(60);
+/// Default response safety timeout when [`BatchConfig::response_timeout`]
+/// is `None`. See that field's documentation for semantics.
+const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Maximum time to wait for `on_start()` to complete on the coordinator
+/// thread. If the processor's `on_start` blocks longer than this,
+/// `BatchCoordinator::start()` returns an error and signals shutdown to
+/// the coordinator thread.
+const ON_START_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Maximum time to wait for the coordinator thread to finish during
-/// shutdown. The coordinator checks its shutdown flag every 100 ms, so
-/// this is generous. If exceeded, the thread is detached.
+/// shutdown. The coordinator checks its shutdown flag every
+/// [`SHUTDOWN_POLL_INTERVAL`], so this is generous. If exceeded, the
+/// thread is detached.
 const COORDINATOR_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Interval at which the coordinator thread checks the shutdown flag
+/// during batch formation (Phase 1 and Phase 2). Keeps shutdown
+/// responsive even when `max_latency` is large.
+const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Minimum interval between `BatchError` health events emitted by
+/// the coordinator loop. Under persistent processor failure (every
+/// batch returns `Err` or panics), events are coalesced to avoid
+/// flooding the health channel.
+const BATCH_ERROR_THROTTLE: Duration = Duration::from_secs(1);
 
 impl BatchHandle {
     /// The processor's stage ID.
@@ -363,7 +488,7 @@ impl BatchHandle {
     /// Each call allocates a `sync_channel(1)` for the response. This is
     /// intentional: the allocation is a single small heap pair, occurs at
     /// batch timescale (typically 20–100 ms), and is negligible relative to
-    /// of the total per-frame cost. Alternatives (pre-allocated slot pool,
+    /// the total per-frame cost. Alternatives (pre-allocated slot pool,
     /// shared condvar) would add complexity and contention without
     /// measurable benefit at realistic batch rates.
     pub(crate) fn submit_and_wait(
@@ -390,7 +515,9 @@ impl BatchHandle {
             })?;
 
         // Bounded wait for the response.
-        let timeout = self.inner.config.max_latency + RESPONSE_TIMEOUT_SAFETY;
+        let safety = self.inner.config.response_timeout
+            .unwrap_or(DEFAULT_RESPONSE_TIMEOUT);
+        let timeout = self.inner.config.max_latency + safety;
         match response_rx.recv_timeout(timeout) {
             Ok(Ok(output)) => Ok(output),
             Ok(Err(stage_err)) => Err(BatchSubmitError::ProcessingFailed(stage_err)),
@@ -429,6 +556,12 @@ pub(crate) struct BatchCoordinator {
     handle: BatchHandle,
 }
 
+impl std::fmt::Debug for BatchCoordinator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BatchCoordinator").finish_non_exhaustive()
+    }
+}
+
 impl BatchCoordinator {
     /// Create and start a batch coordinator.
     pub fn start(
@@ -447,6 +580,13 @@ impl BatchCoordinator {
             return Err(NvError::Config(ConfigError::InvalidPolicy {
                 detail: "batch max_latency must be > 0".into(),
             }));
+        }
+        if let Some(rt) = config.response_timeout {
+            if rt.is_zero() {
+                return Err(NvError::Config(ConfigError::InvalidPolicy {
+                    detail: "batch response_timeout must be > 0".into(),
+                }));
+            }
         }
 
         let queue_depth = match config.queue_capacity {
@@ -519,14 +659,65 @@ impl BatchCoordinator {
                 })
             })?;
 
-        // Block until on_start completes on the coordinator thread.
-        match startup_rx.recv() {
+        // Block until on_start completes on the coordinator thread,
+        // bounded by ON_START_TIMEOUT to prevent hanging on a
+        // processor that blocks indefinitely in on_start().
+        match startup_rx.recv_timeout(ON_START_TIMEOUT) {
             Ok(Ok(())) => {}
             Ok(Err(detail)) => {
                 let _ = thread.join();
                 return Err(NvError::Runtime(RuntimeError::ThreadSpawnFailed { detail }));
             }
-            Err(_) => {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                shutdown.store(true, Ordering::Relaxed);
+
+                // Attempt a short bounded join. The coordinator thread may
+                // observe the shutdown flag (e.g. if on_start polls or
+                // finishes shortly after the timeout). If it doesn't finish
+                // promptly, we must detach — safe Rust cannot forcibly
+                // terminate a blocked thread.
+                //
+                // LIMITATION: if on_start truly blocks forever (e.g. a
+                // third-party SDK that never returns), the OS thread is
+                // leaked. This is inherent to safe Rust's thread model.
+                // The error detail explicitly flags this scenario so
+                // operators can investigate the blocked processor.
+                const STARTUP_JOIN_GRACE: Duration = Duration::from_secs(2);
+                let detached = {
+                    let (done_tx, done_rx) = std::sync::mpsc::channel();
+                    let _ = std::thread::Builder::new()
+                        .name(format!("nv-join-startup-{processor_id}"))
+                        .spawn(move || {
+                            let _ = thread.join();
+                            let _ = done_tx.send(());
+                        });
+                    done_rx.recv_timeout(STARTUP_JOIN_GRACE).is_err()
+                };
+
+                let detail = if detached {
+                    tracing::warn!(
+                        processor = %processor_id,
+                        timeout_secs = ON_START_TIMEOUT.as_secs(),
+                        "batch processor on_start timed out — coordinator thread detached \
+                         (safe Rust cannot force-stop a blocked thread)"
+                    );
+                    format!(
+                        "batch processor '{}' on_start did not complete within {}s; \
+                         coordinator thread detached (cannot force-stop blocked on_start)",
+                        processor_id,
+                        ON_START_TIMEOUT.as_secs(),
+                    )
+                } else {
+                    format!(
+                        "batch processor '{}' on_start did not complete within {}s",
+                        processor_id,
+                        ON_START_TIMEOUT.as_secs(),
+                    )
+                };
+
+                return Err(NvError::Runtime(RuntimeError::ThreadSpawnFailed { detail }));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 return Err(NvError::Runtime(RuntimeError::ThreadSpawnFailed {
                     detail: "batch coordinator thread exited during startup".into(),
                 }));
@@ -543,6 +734,17 @@ impl BatchCoordinator {
     /// Get a clonable handle for use in `FeedConfig`.
     pub fn handle(&self) -> BatchHandle {
         self.handle.clone()
+    }
+
+    /// Signal the coordinator to shut down without joining the thread.
+    ///
+    /// Unblocks feed threads waiting on batch responses: once the
+    /// coordinator exits, their response channels disconnect and
+    /// return `CoordinatorShutdown`.
+    ///
+    /// Call [`shutdown()`](Self::shutdown) for a full signal-then-join.
+    pub fn signal_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
     }
 
     /// Shut down the coordinator: signal, bounded join, cleanup.
@@ -590,6 +792,9 @@ fn coordinator_loop(
     let mut responses: Vec<std::sync::mpsc::SyncSender<Result<StageOutput, StageError>>> =
         Vec::with_capacity(config.max_batch_size);
 
+    // Throttle state for BatchError health events.
+    let mut last_batch_error_event: Option<Instant> = None;
+
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
@@ -603,7 +808,7 @@ fn coordinator_loop(
                 call_on_stop(&mut *processor);
                 return;
             }
-            match rx.recv_timeout(Duration::from_millis(100)) {
+            match rx.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
                 Ok(item) => break item,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -616,16 +821,24 @@ fn coordinator_loop(
         let formation_start = Instant::now();
         batch.push(first);
 
-        // Phase 2: Collect more items until full or deadline.
+        // Phase 2: Collect more items until full, deadline, or shutdown.
+        //
+        // recv_timeout is capped at SHUTDOWN_POLL_INTERVAL so the
+        // coordinator remains responsive to shutdown during long
+        // max_latency windows.
         let deadline = Instant::now() + config.max_latency;
         while batch.len() < config.max_batch_size {
+            if shutdown.load(Ordering::Relaxed) {
+                break;
+            }
             let now = Instant::now();
             if now >= deadline {
                 break;
             }
-            match rx.recv_timeout(deadline - now) {
+            let wait = (deadline - now).min(SHUTDOWN_POLL_INTERVAL);
+            match rx.recv_timeout(wait) {
                 Ok(item) => batch.push(item),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
@@ -672,11 +885,17 @@ fn coordinator_loop(
                     batch_size,
                     "batch processor error"
                 );
-                let _ = health_tx.send(HealthEvent::BatchError {
-                    processor_id: processor.id(),
-                    batch_size: batch_size as u32,
-                    error: stage_err.clone(),
-                });
+                let now = Instant::now();
+                let should_emit = last_batch_error_event
+                    .is_none_or(|t| now.duration_since(t) >= BATCH_ERROR_THROTTLE);
+                if should_emit {
+                    last_batch_error_event = Some(now);
+                    let _ = health_tx.send(HealthEvent::BatchError {
+                        processor_id: processor.id(),
+                        batch_size: batch_size as u32,
+                        error: stage_err.clone(),
+                    });
+                }
                 for tx in responses.drain(..) {
                     let _ = tx.send(Err(stage_err.clone()));
                 }
@@ -691,11 +910,17 @@ fn coordinator_loop(
                     stage_id: processor.id(),
                     detail: "batch processor panicked".into(),
                 };
-                let _ = health_tx.send(HealthEvent::BatchError {
-                    processor_id: processor.id(),
-                    batch_size: batch_size as u32,
-                    error: err.clone(),
-                });
+                let now = Instant::now();
+                let should_emit = last_batch_error_event
+                    .is_none_or(|t| now.duration_since(t) >= BATCH_ERROR_THROTTLE);
+                if should_emit {
+                    last_batch_error_event = Some(now);
+                    let _ = health_tx.send(HealthEvent::BatchError {
+                        processor_id: processor.id(),
+                        batch_size: batch_size as u32,
+                        error: err.clone(),
+                    });
+                }
                 for tx in responses.drain(..) {
                     let _ = tx.send(Err(err.clone()));
                 }
@@ -838,6 +1063,7 @@ mod tests {
                 max_batch_size: 8,
                 max_latency: Duration::from_millis(20),
                 queue_capacity: None,
+                response_timeout: None,
             },
         );
 
@@ -859,6 +1085,7 @@ mod tests {
                 max_batch_size: 4,
                 max_latency: Duration::from_secs(10), // long timeout — should fire on size
                 queue_capacity: None,
+                response_timeout: None,
             },
         );
 
@@ -894,6 +1121,7 @@ mod tests {
                 max_batch_size: 8,
                 max_latency: Duration::from_millis(30),
                 queue_capacity: None,
+                response_timeout: None,
             },
         );
 
@@ -942,6 +1170,7 @@ mod tests {
                 max_batch_size: 4,
                 max_latency: Duration::from_millis(20),
                 queue_capacity: None,
+                response_timeout: None,
             },
         );
 
@@ -988,6 +1217,7 @@ mod tests {
                 max_batch_size: 2,
                 max_latency: Duration::from_millis(20),
                 queue_capacity: None,
+                response_timeout: None,
             },
         );
 
@@ -1010,6 +1240,7 @@ mod tests {
                 max_batch_size: 2,
                 max_latency: Duration::from_millis(10),
                 queue_capacity: None,
+                response_timeout: None,
             },
         );
 
@@ -1031,25 +1262,37 @@ mod tests {
             Box::new(proc),
             BatchConfig {
                 max_batch_size: 100,
+                // Long max_latency — the coordinator checks shutdown every
+                // SHUTDOWN_POLL_INTERVAL (100 ms), so it should respond
+                // well before this deadline.
                 max_latency: Duration::from_secs(10),
                 queue_capacity: None,
+                response_timeout: None,
             },
         );
 
         let handle = coord.handle();
-        // Submit one item, then shut down — the item should still complete
-        // (timeout-based dispatch) or the coordinator shutdown should
-        // unblock it. Either way, the test must not hang.
+        // Submit one item, then shut down — the coordinator's Phase 2
+        // shutdown check should dispatch the partial batch promptly.
         let h = handle.clone();
         let jh = std::thread::spawn(move || h.submit_and_wait(make_entry(1)));
 
         // Give the coordinator time to receive the item.
         std::thread::sleep(Duration::from_millis(50));
 
+        let start = Instant::now();
         coord.shutdown();
         // The response should arrive (either success from a partial batch
         // or CoordinatorShutdown). Both are acceptable.
         let _ = jh.join().unwrap();
+
+        // Must complete promptly (within ~1s), not wait for the full
+        // 10-second max_latency.
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "shutdown should complete promptly, took {:?}",
+            start.elapsed(),
+        );
     }
 
     #[test]
@@ -1062,6 +1305,7 @@ mod tests {
                 max_batch_size: 0,
                 max_latency: Duration::from_millis(10),
                 queue_capacity: None,
+                response_timeout: None,
             },
             health_tx,
         );
@@ -1078,6 +1322,7 @@ mod tests {
                 max_batch_size: 4,
                 max_latency: Duration::ZERO,
                 queue_capacity: None,
+                response_timeout: None,
             },
             health_tx,
         );
@@ -1111,6 +1356,7 @@ mod tests {
                 max_batch_size: 4,
                 max_latency: Duration::from_millis(50),
                 queue_capacity: None,
+                response_timeout: None,
             },
         );
 
@@ -1148,6 +1394,7 @@ mod tests {
                 max_batch_size: 8,
                 max_latency: Duration::from_millis(10),
                 queue_capacity: Some(4), // less than max_batch_size=8
+                response_timeout: None,
             },
             health_tx,
         );
@@ -1163,6 +1410,7 @@ mod tests {
                 max_batch_size: 2,
                 max_latency: Duration::from_millis(20),
                 queue_capacity: Some(32),
+                response_timeout: None,
             },
         );
         let handle = coord.handle();
@@ -1179,6 +1427,7 @@ mod tests {
                 max_batch_size: 4,
                 max_latency: Duration::from_millis(20),
                 queue_capacity: None,
+                response_timeout: None,
             },
         );
 
@@ -1298,10 +1547,355 @@ mod tests {
                 max_batch_size: 16,
                 max_latency: Duration::from_millis(20),
                 queue_capacity: None,
+                response_timeout: None,
             },
         );
         let m = coord.handle().metrics();
         assert_eq!(m.configured_max_batch_size, 16);
+        coord.shutdown();
+    }
+
+    #[test]
+    fn batch_config_new_validates() {
+        // Valid config.
+        let cfg = BatchConfig::new(4, Duration::from_millis(50));
+        assert!(cfg.is_ok());
+        let cfg = cfg.unwrap();
+        assert_eq!(cfg.max_batch_size, 4);
+        assert_eq!(cfg.max_latency, Duration::from_millis(50));
+        assert!(cfg.queue_capacity.is_none());
+
+        // Zero batch size.
+        assert!(BatchConfig::new(0, Duration::from_millis(50)).is_err());
+
+        // Zero latency.
+        assert!(BatchConfig::new(4, Duration::ZERO).is_err());
+    }
+
+    #[test]
+    fn batch_config_default_is_valid() {
+        let cfg = BatchConfig::default();
+        assert!(cfg.max_batch_size >= 1);
+        assert!(!cfg.max_latency.is_zero());
+    }
+
+    #[test]
+    fn batch_config_with_queue_capacity() {
+        let cfg = BatchConfig::new(4, Duration::from_millis(50))
+            .unwrap()
+            .with_queue_capacity(Some(32));
+        assert_eq!(cfg.queue_capacity, Some(32));
+    }
+
+    #[test]
+    fn signal_shutdown_unblocks_coordinator() {
+        let (proc, _calls) = CountingProcessor::new();
+        let (coord, _rx) = start_coordinator(
+            Box::new(proc),
+            BatchConfig {
+                max_batch_size: 100,
+                max_latency: Duration::from_secs(10),
+                queue_capacity: None,
+                response_timeout: None,
+            },
+        );
+
+        let handle = coord.handle();
+        let h = handle.clone();
+        let jh = std::thread::spawn(move || h.submit_and_wait(make_entry(1)));
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Signal shutdown without joining — the coordinator should still
+        // process the pending item and exit.
+        let start = Instant::now();
+        coord.signal_shutdown();
+
+        let result = jh.join().unwrap();
+        // Either processed successfully or got CoordinatorShutdown.
+        assert!(result.is_ok() || matches!(result, Err(BatchSubmitError::CoordinatorShutdown)));
+
+        // Must not wait for the full 10s max_latency.
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "signal_shutdown should unblock promptly, took {:?}",
+            start.elapsed(),
+        );
+    }
+
+    #[test]
+    fn on_start_failure_returns_error() {
+        struct FailStart;
+        impl BatchProcessor for FailStart {
+            fn id(&self) -> StageId {
+                StageId("fail_start")
+            }
+            fn on_start(&mut self) -> Result<(), StageError> {
+                Err(StageError::ModelLoadFailed {
+                    stage_id: StageId("fail_start"),
+                    detail: "test".into(),
+                })
+            }
+            fn process(&mut self, _: &mut [BatchEntry]) -> Result<(), StageError> {
+                unreachable!()
+            }
+        }
+
+        let (health_tx, _) = broadcast::channel(16);
+        let result = BatchCoordinator::start(
+            Box::new(FailStart),
+            BatchConfig::default(),
+            health_tx,
+        );
+        assert!(result.is_err(), "on_start failure should propagate");
+    }
+
+    #[test]
+    fn non_detector_output_routed_correctly() {
+        use nv_core::timestamp::MonotonicTs;
+        use nv_perception::scene::{SceneFeature, SceneFeatureValue};
+
+        /// Batch processor that produces scene features instead of
+        /// detections — validates output model flexibility.
+        struct SceneClassifier;
+        impl BatchProcessor for SceneClassifier {
+            fn id(&self) -> StageId {
+                StageId("scene_clf")
+            }
+            fn process(&mut self, items: &mut [BatchEntry]) -> Result<(), StageError> {
+                for item in items.iter_mut() {
+                    item.output = Some(StageOutput::with_scene_features(vec![
+                        SceneFeature {
+                            name: "weather",
+                            value: SceneFeatureValue::Scalar(0.9),
+                            confidence: Some(0.95),
+                            ts: MonotonicTs::from_nanos(0),
+                        },
+                    ]));
+                }
+                Ok(())
+            }
+        }
+
+        let (coord, _rx) = start_coordinator(
+            Box::new(SceneClassifier),
+            BatchConfig {
+                max_batch_size: 2,
+                max_latency: Duration::from_millis(20),
+                queue_capacity: None,
+                response_timeout: None,
+            },
+        );
+
+        let handle = coord.handle();
+        let result = handle.submit_and_wait(make_entry(1));
+        let output = result.expect("scene classifier should succeed");
+        assert_eq!(output.scene_features.len(), 1);
+        assert_eq!(output.scene_features[0].name, "weather");
+
+        coord.shutdown();
+    }
+
+    #[test]
+    fn slow_on_start_completes_successfully() {
+        use std::sync::Barrier;
+
+        /// Processor whose on_start blocks until signaled, simulating a
+        /// slow-but-completing startup (e.g. loading a model from disk).
+        struct SlowStart {
+            barrier: Arc<Barrier>,
+        }
+        impl BatchProcessor for SlowStart {
+            fn id(&self) -> StageId {
+                StageId("slow_start")
+            }
+            fn on_start(&mut self) -> Result<(), StageError> {
+                self.barrier.wait();
+                Ok(())
+            }
+            fn process(&mut self, _: &mut [BatchEntry]) -> Result<(), StageError> {
+                unreachable!()
+            }
+        }
+
+        let barrier = Arc::new(Barrier::new(2));
+        let (health_tx, _) = broadcast::channel(16);
+
+        // Release the barrier from a helper thread after 100 ms so
+        // on_start completes well within ON_START_TIMEOUT (30 s).
+        // This validates that a blocking-but-eventually-completing
+        // on_start succeeds and the coordinator cleans up normally.
+        //
+        // NOTE: the actual 30 s timeout path cannot be tested in a
+        // fast unit test since ON_START_TIMEOUT is a module constant.
+        let b = Arc::clone(&barrier);
+        let _helper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            b.wait();
+        });
+
+        let result = BatchCoordinator::start(
+            Box::new(SlowStart { barrier }),
+            BatchConfig::default(),
+            health_tx,
+        );
+        assert!(result.is_ok(), "slow-but-completing on_start should succeed");
+        result.unwrap().shutdown();
+    }
+
+    #[test]
+    fn on_start_failure_propagates_error_with_processor_id() {
+        struct FailStart;
+        impl BatchProcessor for FailStart {
+            fn id(&self) -> StageId {
+                StageId("gpu_init")
+            }
+            fn on_start(&mut self) -> Result<(), StageError> {
+                Err(StageError::ModelLoadFailed {
+                    stage_id: StageId("gpu_init"),
+                    detail: "CUDA OOM".into(),
+                })
+            }
+            fn process(&mut self, _: &mut [BatchEntry]) -> Result<(), StageError> {
+                unreachable!()
+            }
+        }
+
+        let (health_tx, _) = broadcast::channel(16);
+        let result = BatchCoordinator::start(
+            Box::new(FailStart),
+            BatchConfig::default(),
+            health_tx,
+        );
+        let err = result.unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("gpu_init"),
+            "error should surface the processor id, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn response_timeout_config_defaults_to_5s() {
+        let cfg = BatchConfig::default();
+        assert!(cfg.response_timeout.is_none());
+        // Effective timeout = max_latency + 5s (DEFAULT_RESPONSE_TIMEOUT)
+    }
+
+    #[test]
+    fn response_timeout_config_custom_value() {
+        let cfg = BatchConfig::new(4, Duration::from_millis(50))
+            .unwrap()
+            .with_response_timeout(Some(Duration::from_secs(2)));
+        assert_eq!(cfg.response_timeout, Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn response_timeout_zero_rejected() {
+        let (proc, _) = CountingProcessor::new();
+        let (health_tx, _) = broadcast::channel(16);
+        let result = BatchCoordinator::start(
+            Box::new(proc),
+            BatchConfig {
+                max_batch_size: 4,
+                max_latency: Duration::from_millis(10),
+                queue_capacity: None,
+                response_timeout: Some(Duration::ZERO),
+            },
+            health_tx,
+        );
+        assert!(result.is_err(), "zero response_timeout should be rejected");
+    }
+
+    #[test]
+    fn custom_response_timeout_applied() {
+        // With a very short custom response timeout + a slow processor,
+        // submissions should time out quickly.
+        struct SlowProcessor;
+        impl BatchProcessor for SlowProcessor {
+            fn id(&self) -> StageId {
+                StageId("slow")
+            }
+            fn process(&mut self, items: &mut [BatchEntry]) -> Result<(), StageError> {
+                // Sleep longer than the configured response_timeout.
+                std::thread::sleep(Duration::from_secs(3));
+                for item in items.iter_mut() {
+                    item.output = Some(StageOutput::empty());
+                }
+                Ok(())
+            }
+        }
+
+        let (health_tx, _) = broadcast::channel(16);
+        let coord = BatchCoordinator::start(
+            Box::new(SlowProcessor),
+            BatchConfig {
+                max_batch_size: 1,
+                max_latency: Duration::from_millis(10),
+                queue_capacity: None,
+                // Very short response timeout — should trigger before
+                // the 3s processing completes.
+                response_timeout: Some(Duration::from_millis(200)),
+            },
+            health_tx,
+        ).unwrap();
+
+        let handle = coord.handle();
+        let result = handle.submit_and_wait(make_entry(1));
+        assert!(
+            matches!(result, Err(BatchSubmitError::Timeout)),
+            "expected Timeout with short response_timeout, got: {result:?}"
+        );
+
+        coord.shutdown();
+    }
+
+    #[test]
+    fn batch_error_throttle_coalesces_events() {
+        struct AlwaysFails;
+        impl BatchProcessor for AlwaysFails {
+            fn id(&self) -> StageId {
+                StageId("always_fails")
+            }
+            fn process(&mut self, _: &mut [BatchEntry]) -> Result<(), StageError> {
+                Err(StageError::ProcessingFailed {
+                    stage_id: StageId("always_fails"),
+                    detail: "persistent failure".into(),
+                })
+            }
+        }
+
+        let (coord, mut health_rx) = start_coordinator(
+            Box::new(AlwaysFails),
+            BatchConfig {
+                max_batch_size: 1,
+                max_latency: Duration::from_millis(10),
+                queue_capacity: None,
+                response_timeout: None,
+            },
+        );
+
+        let handle = coord.handle();
+
+        // Submit rapidly many times. Due to BATCH_ERROR_THROTTLE (1s),
+        // only the first should produce a BatchError health event.
+        for i in 0..5 {
+            let _ = handle.submit_and_wait(make_entry(i));
+        }
+
+        // Count how many BatchError events were emitted.
+        let mut event_count = 0;
+        while let Ok(HealthEvent::BatchError { .. }) = health_rx.try_recv() {
+            event_count += 1;
+        }
+
+        // Should be exactly 1 due to 1-second throttle (all submissions
+        // happen in < 1s).
+        assert_eq!(
+            event_count, 1,
+            "BatchError should be throttled to 1 per second, got {event_count}"
+        );
+
         coord.shutdown();
     }
 }

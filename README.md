@@ -92,6 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_batch_size: 8,
             max_latency: Duration::from_millis(50),
             queue_capacity: None, // defaults to max_batch_size * 4
+            response_timeout: None, // defaults to 5s safety margin
         },
     )?;
 
