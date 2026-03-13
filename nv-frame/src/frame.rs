@@ -101,6 +101,7 @@ impl FrameEnvelope {
     /// This copies the data into the frame. Use the zero-copy bridge
     /// in `nv-media` for production paths.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new_owned(
         feed_id: FeedId,
         seq: u64,
@@ -138,6 +139,7 @@ impl FrameEnvelope {
     ///   of this frame (and all its clones).
     /// - The data at `ptr` must not be mutated while any clone of this frame exists.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn new_mapped(
         feed_id: FeedId,
         seq: u64,

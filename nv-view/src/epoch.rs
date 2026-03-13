@@ -141,24 +141,22 @@ impl EpochPolicy for DefaultEpochPolicy {
         }
 
         // Check inferred displacement.
-        if let CameraMotionState::Moving { displacement, .. } = &ctx.motion_state {
-            if let Some(disp) = displacement {
-                if *disp > self.segment_displacement_threshold {
-                    if let Some(ref transform) = ctx.current_report.frame_transform {
-                        if transform.confidence >= self.compensate_min_confidence {
-                            return EpochDecision::Compensate {
-                                reason: DegradationReason::LargeJump,
-                                transform: transform.transform,
-                            };
-                        }
+        if let CameraMotionState::Moving { displacement: Some(disp), .. } = &ctx.motion_state {
+            if *disp > self.segment_displacement_threshold {
+                if let Some(ref transform) = ctx.current_report.frame_transform {
+                    if transform.confidence >= self.compensate_min_confidence {
+                        return EpochDecision::Compensate {
+                            reason: DegradationReason::LargeJump,
+                            transform: transform.transform,
+                        };
                     }
-                    return EpochDecision::Segment;
                 }
-                if self.degrade_on_small_motion && *disp > 0.0 {
-                    return EpochDecision::Degrade {
-                        reason: DegradationReason::InferredMotionLowConfidence,
-                    };
-                }
+                return EpochDecision::Segment;
+            }
+            if self.degrade_on_small_motion && *disp > 0.0 {
+                return EpochDecision::Degrade {
+                    reason: DegradationReason::InferredMotionLowConfidence,
+                };
             }
         }
 

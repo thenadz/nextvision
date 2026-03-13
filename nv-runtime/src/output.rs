@@ -32,6 +32,20 @@ pub enum FrameInclusion {
     Always,
 }
 
+/// Summary of temporal-store admission for this frame.
+///
+/// Populated during the temporal commit phase. Tells downstream consumers
+/// how many tracks were admitted vs. rejected due to the concurrent-track
+/// cap, without requiring them to subscribe to health events.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AdmissionSummary {
+    /// Number of tracks successfully committed to the temporal store.
+    pub admitted: u32,
+    /// Number of new tracks rejected because the store was at capacity
+    /// and no eviction victim was available.
+    pub rejected: u32,
+}
+
 /// Structured output for one processed frame.
 ///
 /// Contains the complete perception result, view state, and full provenance.
@@ -69,6 +83,8 @@ pub struct OutputEnvelope {
     ///
     /// This is a zero-copy `Arc` clone of the frame the pipeline processed.
     pub frame: Option<FrameEnvelope>,
+    /// Temporal-store admission outcome for this frame's tracks.
+    pub admission: AdmissionSummary,
 }
 
 /// User-implementable trait: receives structured outputs from the pipeline.
@@ -401,6 +417,7 @@ mod tests {
             },
             metadata: TypedMetadata::new(),
             frame: None,
+            admission: AdmissionSummary::default(),
         })
     }
 

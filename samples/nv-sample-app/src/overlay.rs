@@ -1,9 +1,34 @@
-/// Overlay drawing: bounding boxes, track IDs, and FPS counter
-/// rendered directly onto an RGB pixel buffer.
-///
-/// Uses a built-in 5×7 bitmap font — no external font dependencies.
+//! Overlay drawing: bounding boxes, track IDs, and FPS counter
+//! rendered directly onto an RGB pixel buffer.
+//!
+//! Uses a built-in 5×7 bitmap font — no external font dependencies.
+
+#![allow(dead_code)]
 
 use nv_perception::Track;
+
+/// COCO class names (80 classes) indexed by `class_id`.
+const COCO_NAMES: [&str; 80] = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
+    "truck", "boat", "traffic light", "fire hydrant", "stop sign",
+    "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep",
+    "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
+    "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard",
+    "sports ball", "kite", "baseball bat", "baseball glove", "skateboard",
+    "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork",
+    "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+    "couch", "potted plant", "bed", "dining table", "toilet", "tv",
+    "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave",
+    "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
+    "scissors", "teddy bear", "hair drier", "toothbrush",
+];
+
+/// Look up the COCO class name for the given `class_id`.
+/// Returns `"?"` for unknown IDs.
+pub fn coco_class_name(class_id: u32) -> &'static str {
+    COCO_NAMES.get(class_id as usize).copied().unwrap_or("?")
+}
 
 /// Track-ID → colour mapping. Cycles through distinct colours.
 const TRACK_COLOURS: &[[u8; 3]] = &[
@@ -23,8 +48,60 @@ fn colour_for_track(track_id: u64) -> [u8; 3] {
     TRACK_COLOURS[track_id as usize % TRACK_COLOURS.len()]
 }
 
+/// Mutable reference to an RGB8 pixel buffer with its dimensions.
+struct Canvas<'a> {
+    buf: &'a mut [u8],
+    w: u32,
+    h: u32,
+    stride: u32,
+}
+
+impl Canvas<'_> {
+    #[inline]
+    fn put_pixel(&mut self, x: i32, y: i32, c: [u8; 3]) {
+        if x < 0 || y < 0 || x >= self.w as i32 || y >= self.h as i32 {
+            return;
+        }
+        let idx = (y as u32 * self.stride + x as u32 * 3) as usize;
+        if idx + 2 < self.buf.len() {
+            self.buf[idx] = c[0];
+            self.buf[idx + 1] = c[1];
+            self.buf[idx + 2] = c[2];
+        }
+    }
+
+    fn draw_rect(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, colour: [u8; 3], thickness: i32) {
+        for t in 0..thickness {
+            for x in x0..=x1 {
+                self.put_pixel(x, y0 + t, colour);
+                self.put_pixel(x, y1 - t, colour);
+            }
+            for y in y0..=y1 {
+                self.put_pixel(x0 + t, y, colour);
+                self.put_pixel(x1 - t, y, colour);
+            }
+        }
+    }
+
+    fn draw_text(&mut self, mut x: i32, y: i32, text: &str, colour: [u8; 3]) {
+        for ch in text.chars() {
+            let glyph = glyph_for(ch);
+            for row in 0..7_i32 {
+                let bits = glyph[row as usize];
+                for col in 0..5_i32 {
+                    if bits & (1 << (4 - col)) != 0 {
+                        self.put_pixel(x + col, y + row, colour);
+                    }
+                }
+            }
+            x += 6;
+        }
+    }
+}
+
 /// Draw all track bounding boxes and IDs onto an RGB8 buffer.
 pub fn draw_tracks(buf: &mut [u8], w: u32, h: u32, stride: u32, tracks: &[Track]) {
+    let mut canvas = Canvas { buf, w, h, stride };
     for t in tracks {
         let c = colour_for_track(t.id.as_u64());
         let bb = &t.current.bbox;
@@ -33,97 +110,24 @@ pub fn draw_tracks(buf: &mut [u8], w: u32, h: u32, stride: u32, tracks: &[Track]
         let x1 = (bb.x_max * w as f32).round() as i32;
         let y1 = (bb.y_max * h as f32).round() as i32;
 
-        draw_rect(buf, w, h, stride, x0, y0, x1, y1, c, 2);
+        canvas.draw_rect(x0, y0, x1, y1, c, 2);
 
-        // Label: "T<id>"
-        let label = format!("T{}", t.id.as_u64());
+        let label = format!("{} (T{})", coco_class_name(t.class_id), t.id.as_u64());
         let text_y = (y0 - 9).max(0);
-        draw_text(buf, w, h, stride, x0, text_y, &label, c);
+        canvas.draw_text(x0, text_y, &label, c);
     }
 }
 
 /// Draw an FPS counter in the top-left corner.
 pub fn draw_fps(buf: &mut [u8], w: u32, h: u32, stride: u32, fps: f64) {
     let label = format!("{fps:.1} FPS");
-    draw_text(buf, w, h, stride, 4, 4, &label, [255, 255, 255]);
-}
-
-/// Draw an axis-aligned rectangle outline.
-fn draw_rect(
-    buf: &mut [u8],
-    w: u32,
-    h: u32,
-    stride: u32,
-    x0: i32,
-    y0: i32,
-    x1: i32,
-    y1: i32,
-    colour: [u8; 3],
-    thickness: i32,
-) {
-    let w_i = w as i32;
-    let h_i = h as i32;
-    for t in 0..thickness {
-        // Horizontal lines.
-        for x in x0..=x1 {
-            put_pixel(buf, w_i, h_i, stride, x, y0 + t, colour);
-            put_pixel(buf, w_i, h_i, stride, x, y1 - t, colour);
-        }
-        // Vertical lines.
-        for y in y0..=y1 {
-            put_pixel(buf, w_i, h_i, stride, x0 + t, y, colour);
-            put_pixel(buf, w_i, h_i, stride, x1 - t, y, colour);
-        }
-    }
-}
-
-#[inline]
-fn put_pixel(buf: &mut [u8], w: i32, h: i32, stride: u32, x: i32, y: i32, c: [u8; 3]) {
-    if x < 0 || y < 0 || x >= w || y >= h {
-        return;
-    }
-    let idx = (y as u32 * stride + x as u32 * 3) as usize;
-    if idx + 2 < buf.len() {
-        buf[idx] = c[0];
-        buf[idx + 1] = c[1];
-        buf[idx + 2] = c[2];
-    }
-}
-
-// -----------------------------------------------------------------------
-// Minimal 5×7 bitmap font (ASCII 32..127).
-// Each glyph is 5 columns wide, 7 rows tall, stored as 7 × u8 row bitmaps
-// where bits 4..0 represent columns left-to-right.
-// -----------------------------------------------------------------------
-
-/// Draw a string left-to-right. Each character is 6px wide (5 glyph + 1 gap).
-fn draw_text(
-    buf: &mut [u8],
-    w: u32,
-    h: u32,
-    stride: u32,
-    mut x: i32,
-    y: i32,
-    text: &str,
-    colour: [u8; 3],
-) {
-    for ch in text.chars() {
-        let glyph = glyph_for(ch);
-        for row in 0..7_i32 {
-            let bits = glyph[row as usize];
-            for col in 0..5_i32 {
-                if bits & (1 << (4 - col)) != 0 {
-                    put_pixel(buf, w as i32, h as i32, stride, x + col, y + row, colour);
-                }
-            }
-        }
-        x += 6;
-    }
+    let mut canvas = Canvas { buf, w, h, stride };
+    canvas.draw_text(4, 4, &label, [255, 255, 255]);
 }
 
 fn glyph_for(ch: char) -> [u8; 7] {
     let idx = ch as usize;
-    if idx >= 32 && idx < 128 {
+    if (32..128).contains(&idx) {
         FONT[idx - 32]
     } else {
         FONT[0] // space

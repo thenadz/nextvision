@@ -139,16 +139,50 @@ pub enum HealthEvent {
         outputs_dropped: u64,
     },
 
-    /// A new track was rejected by the temporal store's admission
+    /// Tracks were rejected by the temporal store's admission
     /// control because the hard cap was reached and no evictable
     /// candidates (Lost/Coasted/Tentative) were available.
     ///
     /// The feed continues processing. This event indicates tracker
     /// saturation — the scene has more confirmed objects than
     /// `max_concurrent_tracks` allows.
+    ///
+    /// Events are coalesced per frame: a single event is emitted
+    /// with the total number of tracks rejected in that frame.
     TrackAdmissionRejected {
         feed_id: FeedId,
-        track_id: crate::TrackId,
+        /// Number of tracks rejected in this frame.
+        rejected_count: u32,
+    },
+
+    /// The batch processor returned an error or panicked.
+    ///
+    /// All frames in the affected batch are dropped. Each feed thread
+    /// waiting on that batch receives the error and skips the frame.
+    BatchError {
+        processor_id: StageId,
+        batch_size: u32,
+        error: StageError,
+    },
+
+    /// A feed's batch submission was rejected because the coordinator's
+    /// queue is full or the coordinator has shut down. The frame is
+    /// dropped for this feed.
+    ///
+    /// Events are coalesced: under sustained overload, the executor
+    /// emits one event per throttle window (1 second) with
+    /// `dropped_count` reflecting the number of frames rejected in
+    /// that window. On recovery (a subsequent successful submission),
+    /// any remaining accumulated count is flushed immediately.
+    ///
+    /// Indicates the batch coordinator is overloaded — either the
+    /// processor is too slow for the combined frame rate, or
+    /// `max_batch_size` is too small.
+    BatchSubmissionRejected {
+        feed_id: FeedId,
+        processor_id: StageId,
+        /// Number of frames rejected in this throttle window.
+        dropped_count: u64,
     },
 }
 

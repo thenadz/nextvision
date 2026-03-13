@@ -1,7 +1,7 @@
-/// Non-maximum suppression.
-///
-/// Given a set of candidate detections (each with a bounding box, confidence,
-/// and class ID), this performs per-class greedy NMS using IoU overlap.
+//! Non-maximum suppression.
+//!
+//! Given a set of candidate detections (each with a bounding box, confidence,
+//! and class ID), this performs per-class greedy NMS using IoU overlap.
 
 /// A raw detection candidate before NMS.
 #[derive(Debug, Clone)]

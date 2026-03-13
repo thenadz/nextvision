@@ -11,5 +11,9 @@
 	},
 
 	// Install GStreamer development libraries and X11 runtime deps.
-	"postCreateCommand": "sudo apt-get update && sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly gstreamer1.0-libav libxkbcommon-dev x11-apps"
+	"postCreateCommand": "sudo apt-get update && sudo apt-get install -y git-lfs libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly gstreamer1.0-libav libxkbcommon-dev x11-apps libxkbcommon-x11-0 libxkbcommon-x11-dev python3-onnx",
+
+	"mounts": [
+    "source=${localWorkspaceFolderBasename}-target,target=${containerWorkspaceFolder}/target,type=volume"
+	]
 }

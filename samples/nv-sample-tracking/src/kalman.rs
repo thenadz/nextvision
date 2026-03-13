@@ -1,10 +1,14 @@
-/// Constant-velocity Kalman filter for bounding-box tracking.
-///
-/// State vector: `[cx, cy, s, r, vx, vy, vs]`
-/// where `(cx, cy)` is the bounding box centre, `s` is the area, `r` is the
-/// aspect ratio (width/height), and `(vx, vy, vs)` are velocities.
-///
-/// Measurement vector: `[cx, cy, s, r]`
+//! Constant-velocity Kalman filter for bounding-box tracking.
+//!
+//! State vector: `[cx, cy, s, r, vx, vy, vs]`
+//! where `(cx, cy)` is the bounding box centre, `s` is the area, `r` is the
+//! aspect ratio (width/height), and `(vx, vy, vs)` are velocities.
+//!
+//! Measurement vector: `[cx, cy, s, r]`
+
+// Matrix arithmetic uses direct index loops — clearer than enumerate for
+// small fixed-size linear-algebra kernels.
+#![allow(clippy::needless_range_loop)]
 
 /// Kalman state dimension.
 const DIM_X: usize = 7;

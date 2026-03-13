@@ -4,15 +4,15 @@
 //! on user-configured subscribers for export. This module provides helpers
 //! for per-feed metric recording and snapshot types.
 //!
-//! The actual metrics recording will be implemented when the runtime is built.
-//! This module defines the metric snapshot types used in the public API.
+//! The runtime records and exposes per-feed metrics through
+//! [`FeedMetrics`] snapshots available via `FeedHandle::metrics()`.
 
 use crate::id::FeedId;
 
 /// A snapshot of per-feed metrics at a point in time.
 ///
 /// Returned by `FeedHandle::metrics()`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct FeedMetrics {
     /// Which feed these metrics belong to.
     pub feed_id: FeedId,
@@ -32,7 +32,7 @@ pub struct FeedMetrics {
 
 /// Per-stage metrics snapshot, included in [`StageContext`](crate) for
 /// stages that want to adapt behavior based on their own performance.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct StageMetrics {
     /// Cumulative frame count processed by this stage.
     pub frames_processed: u64,

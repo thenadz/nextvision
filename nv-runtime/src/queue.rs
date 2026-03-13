@@ -223,6 +223,20 @@ impl FrameQueue {
         self.not_full.notify_all();
     }
 
+    /// Current number of frames in the queue.
+    ///
+    /// Acquires the internal lock briefly. The result is immediately
+    /// stale under concurrent push/pop, but is suitable for monitoring
+    /// and dashboards.
+    pub(crate) fn depth(&self) -> usize {
+        self.inner.lock().unwrap().buf.len()
+    }
+
+    /// Maximum capacity of the queue.
+    #[must_use]
+    pub(crate) fn capacity(&self) -> usize {
+        self.depth
+    }
 }
 
 #[cfg(test)]
@@ -385,5 +399,53 @@ mod tests {
         let q = FrameQueue::new(BackpressurePolicy::default());
         q.close();
         assert_eq!(q.push(test_frame(0)), PushOutcome::Rejected);
+    }
+
+    #[test]
+    fn depth_and_capacity() {
+        let q = FrameQueue::new(BackpressurePolicy::DropOldest { queue_depth: 4 });
+        assert_eq!(q.capacity(), 4);
+        assert_eq!(q.depth(), 0);
+
+        q.push(test_frame(0));
+        q.push(test_frame(1));
+        assert_eq!(q.depth(), 2);
+
+        let shutdown = AtomicBool::new(false);
+        let _ = q.pop(&shutdown, None);
+        assert_eq!(q.depth(), 1);
+
+        let _ = q.pop(&shutdown, None);
+        assert_eq!(q.depth(), 0);
+    }
+
+    #[test]
+    fn depth_under_backpressure() {
+        let q = FrameQueue::new(BackpressurePolicy::DropOldest { queue_depth: 2 });
+        q.push(test_frame(0));
+        q.push(test_frame(1));
+        assert_eq!(q.depth(), 2);
+
+        // Push a third frame — oldest evicted, depth stays at capacity.
+        q.push(test_frame(2));
+        assert_eq!(q.depth(), 2);
+        assert_eq!(q.capacity(), 2);
+    }
+
+    #[test]
+    fn depth_returns_zero_after_close() {
+        let q = FrameQueue::new(BackpressurePolicy::DropOldest { queue_depth: 4 });
+        q.push(test_frame(0));
+        q.push(test_frame(1));
+        q.close();
+        // Items are still in the buffer after close (close just prevents
+        // new pushes and wakes waiters).
+        assert_eq!(q.depth(), 2);
+
+        // Drain the queue.
+        let shutdown = AtomicBool::new(false);
+        let _ = q.pop(&shutdown, None);
+        let _ = q.pop(&shutdown, None);
+        assert_eq!(q.depth(), 0);
     }
 }

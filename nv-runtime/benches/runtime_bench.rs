@@ -40,6 +40,7 @@ fn output_envelope_construction(c: &mut Criterion) {
                 },
                 metadata: TypedMetadata::new(),
             frame: None,
+            admission: nv_runtime::AdmissionSummary::default(),
             });
         });
     });
@@ -78,6 +79,7 @@ fn output_arc_clone(c: &mut Criterion) {
         },
         metadata: TypedMetadata::new(),
             frame: None,
+            admission: nv_runtime::AdmissionSummary::default(),
     });
 
     c.bench_function("shared_output_arc_clone", |b| {
@@ -125,6 +127,7 @@ fn broadcast_fanout(c: &mut Criterion) {
         },
         metadata: TypedMetadata::new(),
             frame: None,
+            admission: nv_runtime::AdmissionSummary::default(),
     });
 
     c.bench_function("broadcast_send_3_subscribers", |b| {

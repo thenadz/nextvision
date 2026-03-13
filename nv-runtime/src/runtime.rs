@@ -13,15 +13,17 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nv_core::error::{NvError, RuntimeError};
 use nv_core::health::HealthEvent;
 use nv_core::id::FeedId;
 use nv_media::DefaultMediaFactory;
 use nv_media::ingress::MediaIngressFactory;
+use nv_perception::BatchProcessor;
 use tokio::sync::broadcast;
 
+use crate::batch::{BatchConfig, BatchCoordinator, BatchHandle};
 use crate::feed::{FeedConfig, FeedHandle};
 use crate::output::{LagDetector, SharedOutput};
 use crate::worker::{self, BroadcastHealthSink, FeedSharedState};
@@ -137,11 +139,13 @@ impl RuntimeBuilder {
             max_feeds: self.max_feeds,
             next_feed_id: AtomicU64::new(1),
             feeds: Mutex::new(HashMap::new()),
+            coordinators: Mutex::new(Vec::new()),
             health_tx,
             output_tx,
             lag_detector,
             shutdown: AtomicBool::new(false),
             factory,
+            started_at: Instant::now(),
         });
 
         Ok(Runtime { inner })
@@ -156,11 +160,15 @@ struct RuntimeInner {
     max_feeds: usize,
     next_feed_id: AtomicU64,
     feeds: Mutex<HashMap<FeedId, RunningFeed>>,
+    /// Batch coordinators owned by the runtime for lifecycle management.
+    coordinators: Mutex<Vec<BatchCoordinator>>,
     health_tx: broadcast::Sender<HealthEvent>,
     output_tx: broadcast::Sender<SharedOutput>,
     lag_detector: Arc<LagDetector>,
     shutdown: AtomicBool,
     factory: Arc<dyn MediaIngressFactory>,
+    /// Instant when the runtime was created. Used by `uptime()`.
+    started_at: Instant,
 }
 
 /// Internal state tracked per running feed.
@@ -176,6 +184,28 @@ impl RuntimeInner {
             .lock()
             .map_err(|_| NvError::Runtime(RuntimeError::RegistryPoisoned))?;
         Ok(feeds.len())
+    }
+
+    fn create_batch(
+        &self,
+        processor: Box<dyn BatchProcessor>,
+        config: BatchConfig,
+    ) -> Result<BatchHandle, NvError> {
+        if self.shutdown.load(Ordering::Relaxed) {
+            return Err(NvError::Runtime(RuntimeError::ShutdownInProgress));
+        }
+
+        let coordinator =
+            BatchCoordinator::start(processor, config, self.health_tx.clone())?;
+        let handle = coordinator.handle();
+
+        let mut coordinators = self
+            .coordinators
+            .lock()
+            .map_err(|_| NvError::Runtime(RuntimeError::RegistryPoisoned))?;
+        coordinators.push(coordinator);
+
+        Ok(handle)
     }
 
     fn add_feed(&self, config: FeedConfig) -> Result<FeedHandle, NvError> {
@@ -258,8 +288,16 @@ impl RuntimeInner {
             }
         }
 
-        // All worker threads have stopped (or detached). Flush any pending
-        // sentinel-observed delta that was throttled but never emitted.
+        // All worker threads have stopped (or detached). Now shut down
+        // batch coordinators — feed threads are no longer submitting.
+        if let Ok(mut coordinators) = self.coordinators.lock() {
+            for coordinator in coordinators.drain(..) {
+                coordinator.shutdown();
+            }
+        }
+
+        // Flush any pending sentinel-observed delta that was throttled
+        // but never emitted.
         self.lag_detector.flush(&self.health_tx);
 
         Ok(())
@@ -365,6 +403,15 @@ impl Runtime {
         self.inner.max_feeds
     }
 
+    /// Elapsed time since the runtime was created.
+    ///
+    /// Monotonically increasing. Useful for uptime dashboards and
+    /// health checks.
+    #[must_use]
+    pub fn uptime(&self) -> Duration {
+        self.inner.started_at.elapsed()
+    }
+
     /// Subscribe to aggregate health events from all feeds.
     pub fn health_subscribe(&self) -> broadcast::Receiver<HealthEvent> {
         self.inner.health_tx.subscribe()
@@ -395,6 +442,29 @@ impl Runtime {
     /// - `RuntimeError::ThreadSpawnFailed` if the OS thread cannot be created.
     pub fn add_feed(&self, config: FeedConfig) -> Result<FeedHandle, NvError> {
         self.inner.add_feed(config)
+    }
+
+    /// Create a shared batch coordinator for cross-feed inference.
+    ///
+    /// Returns a clonable [`BatchHandle`] that can be shared across
+    /// multiple feeds via [`FeedPipeline::builder().batch(handle)`].
+    ///
+    /// The coordinator takes **ownership** of the processor (via `Box`).
+    /// A single coordinator thread is the sole caller of all processor
+    /// methods — no `Sync` bound is required. The coordinator is shut
+    /// down automatically when the runtime shuts down.
+    ///
+    /// # Errors
+    ///
+    /// - `RuntimeError::ShutdownInProgress` if shutdown has been initiated.
+    /// - `ConfigError::InvalidPolicy` if `config` has invalid values.
+    /// - `RuntimeError::ThreadSpawnFailed` if the coordinator thread fails.
+    pub fn create_batch(
+        &self,
+        processor: Box<dyn BatchProcessor>,
+        config: BatchConfig,
+    ) -> Result<BatchHandle, NvError> {
+        self.inner.create_batch(processor, config)
     }
 
     /// Remove a feed by ID, stopping it gracefully.
@@ -442,6 +512,15 @@ impl RuntimeHandle {
         self.inner.max_feeds
     }
 
+    /// Elapsed time since the runtime was created.
+    ///
+    /// Monotonically increasing. Useful for uptime dashboards and
+    /// health checks.
+    #[must_use]
+    pub fn uptime(&self) -> Duration {
+        self.inner.started_at.elapsed()
+    }
+
     /// Subscribe to aggregate health events from all feeds.
     pub fn health_subscribe(&self) -> broadcast::Receiver<HealthEvent> {
         self.inner.health_tx.subscribe()
@@ -464,6 +543,17 @@ impl RuntimeHandle {
     /// See [`Runtime::add_feed()`].
     pub fn add_feed(&self, config: FeedConfig) -> Result<FeedHandle, NvError> {
         self.inner.add_feed(config)
+    }
+
+    /// Create a shared batch coordinator.
+    ///
+    /// See [`Runtime::create_batch()`] for details.
+    pub fn create_batch(
+        &self,
+        processor: Box<dyn BatchProcessor>,
+        config: BatchConfig,
+    ) -> Result<BatchHandle, NvError> {
+        self.inner.create_batch(processor, config)
     }
 
     /// Remove a feed by ID, stopping it gracefully.

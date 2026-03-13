@@ -27,8 +27,15 @@ struct UiFrame {
 pub struct OverlaySink {
     tx: SyncSender<UiFrame>,
     frame_count: AtomicU64,
+    /// EMA of FPS, stored as `f64` bits via `to_bits()`/`from_bits()`.
+    fps_ema_bits: AtomicU64,
+    /// Last emit timestamp in nanoseconds from `start`.
+    last_ns: AtomicU64,
     start: Instant,
 }
+
+/// EMA smoothing factor (α). α = 0.05 gives a ~20-frame half-life.
+const FPS_ALPHA: f64 = 0.05;
 
 impl OverlaySink {
     /// Spawn the UI thread and return a sink that feeds it.
@@ -46,7 +53,40 @@ impl OverlaySink {
         Self {
             tx,
             frame_count: AtomicU64::new(0),
+            fps_ema_bits: AtomicU64::new(0_f64.to_bits()),
+            last_ns: AtomicU64::new(0),
             start: Instant::now(),
+        }
+    }
+
+    /// Compute a smoothed FPS using exponential moving average.
+    fn update_fps(&self) -> f64 {
+        let now_ns = self.start.elapsed().as_nanos() as u64;
+        let prev_ns = self.last_ns.swap(now_ns, Ordering::Relaxed);
+
+        if prev_ns == 0 {
+            // First frame — no delta to compute yet.
+            return 0.0;
+        }
+
+        let delta_s = (now_ns.saturating_sub(prev_ns)) as f64 / 1_000_000_000.0;
+        let instant_fps = if delta_s > 0.0 { 1.0 / delta_s } else { 0.0 };
+
+        loop {
+            let old_bits = self.fps_ema_bits.load(Ordering::Relaxed);
+            let old_ema = f64::from_bits(old_bits);
+            let new_ema = if old_ema == 0.0 {
+                instant_fps
+            } else {
+                FPS_ALPHA * instant_fps + (1.0 - FPS_ALPHA) * old_ema
+            };
+            if self
+                .fps_ema_bits
+                .compare_exchange_weak(old_bits, new_ema.to_bits(), Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return new_ema;
+            }
         }
     }
 }
@@ -54,12 +94,7 @@ impl OverlaySink {
 impl OutputSink for OverlaySink {
     fn emit(&self, output: Arc<OutputEnvelope>) {
         let count = self.frame_count.fetch_add(1, Ordering::Relaxed) + 1;
-        let elapsed = self.start.elapsed().as_secs_f64();
-        let fps = if elapsed > 0.0 {
-            count as f64 / elapsed
-        } else {
-            0.0
-        };
+        let fps = self.update_fps();
 
         // Extract the frame from FrameInclusion::Always output.
         let Some(frame) = output.frame.as_ref() else {
@@ -89,6 +124,7 @@ impl OutputSink for OverlaySink {
         // Log a summary periodically.
         if count % 60 == 0 {
             info!(
+                feed = %output.feed_id,
                 seq = output.frame_seq,
                 detections = output.detections.len(),
                 tracks = output.tracks.len(),
@@ -121,7 +157,7 @@ fn rgb_to_packed(rgb: &[u8], w: u32, h: u32, stride: u32) -> Vec<u32> {
 
 fn ui_thread(rx: Receiver<UiFrame>, init_w: usize, init_h: usize) {
     let mut window = match Window::new(
-        "YOLOX + OC-SORT — NextVision",
+        "Detection + Tracking — NextVision",
         init_w,
         init_h,
         WindowOptions {

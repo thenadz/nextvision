@@ -28,7 +28,7 @@
 //! Shutdown is coordinated via `FeedSharedState.shutdown` (`AtomicBool`)
 //! and the queue's `close()` / `wake_consumer()` methods.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -74,6 +74,17 @@ pub(crate) struct FeedSharedState {
     /// is created, cleared when the session ends. Used by `request_shutdown`
     /// to wake the consumer without waiting for a poll interval.
     queue: Mutex<Option<Arc<FrameQueue>>>,
+    /// Atomic occupancy counter for the per-feed output sink queue.
+    /// Incremented on successful send, decremented on recv by the sink thread.
+    /// Shared (via `Arc` clone) with the [`SinkWorker`] thread.
+    pub sink_occupancy: Arc<AtomicUsize>,
+    /// Configured capacity of the output sink queue. Written once when the
+    /// feed starts, read by `FeedHandle::queue_telemetry()`.
+    pub sink_capacity: AtomicUsize,
+    /// Instant when the current processing session started (set on each
+    /// start or restart). Used by `FeedHandle::uptime()` to report
+    /// session-scoped uptime.
+    pub session_started_at: Mutex<Instant>,
 }
 
 impl FeedSharedState {
@@ -91,6 +102,9 @@ impl FeedSharedState {
             alive: AtomicBool::new(true),
             pause_condvar: (Mutex::new(false), Condvar::new()),
             queue: Mutex::new(None),
+            sink_occupancy: Arc::new(AtomicUsize::new(0)),
+            sink_capacity: AtomicUsize::new(0),
+            session_started_at: Mutex::new(Instant::now()),
         }
     }
 
@@ -105,6 +119,29 @@ impl FeedSharedState {
             view_epoch: self.view_epoch.load(Ordering::Relaxed),
             restarts: self.restarts.load(Ordering::Relaxed),
         }
+    }
+
+    /// Read the current source queue depth and capacity.
+    ///
+    /// Returns `(depth, capacity)`. If no session is active (between
+    /// restarts or after shutdown), returns `(0, 0)`.
+    pub fn source_queue_telemetry(&self) -> (usize, usize) {
+        if let Ok(guard) = self.queue.lock() {
+            if let Some(ref q) = *guard {
+                return (q.depth(), q.capacity());
+            }
+        }
+        (0, 0)
+    }
+
+    /// Current session uptime (time since last successful start/restart).
+    ///
+    /// Returns `Duration::ZERO` if the lock is poisoned.
+    pub fn session_uptime(&self) -> Duration {
+        self.session_started_at
+            .lock()
+            .map(|t| t.elapsed())
+            .unwrap_or(Duration::ZERO)
     }
 
     /// Request shutdown and wake the worker if it is paused or waiting on
@@ -290,6 +327,7 @@ const SINK_BP_THROTTLE_INTERVAL: Duration = Duration::from_secs(1);
 struct SinkWorker {
     tx: std::sync::mpsc::SyncSender<SharedOutput>,
     thread: Option<std::thread::JoinHandle<Box<dyn OutputSink>>>,
+    occupancy: Arc<AtomicUsize>,
 }
 
 impl SinkWorker {
@@ -299,17 +337,20 @@ impl SinkWorker {
         sink: Box<dyn OutputSink>,
         health_tx: broadcast::Sender<HealthEvent>,
         capacity: usize,
+        occupancy: Arc<AtomicUsize>,
     ) -> Result<Self, RuntimeError> {
         let (tx, rx) = std::sync::mpsc::sync_channel::<SharedOutput>(capacity);
+        let occ = Arc::clone(&occupancy);
         let thread = std::thread::Builder::new()
             .name(format!("nv-sink-{}", feed_id))
-            .spawn(move || Self::run(feed_id, sink, rx, health_tx))
+            .spawn(move || Self::run(feed_id, sink, rx, health_tx, occ))
             .map_err(|e| RuntimeError::ThreadSpawnFailed {
                 detail: format!("sink worker for {feed_id}: {e}"),
             })?;
         Ok(Self {
             tx,
             thread: Some(thread),
+            occupancy,
         })
     }
 
@@ -322,13 +363,23 @@ impl SinkWorker {
         health_tx: &broadcast::Sender<HealthEvent>,
         feed_id: FeedId,
     ) -> bool {
+        // Increment *before* try_send so the sink thread's
+        // fetch_sub on recv cannot race ahead of the add and
+        // transiently underflow, which would produce bogus
+        // telemetry depth values.
+        self.occupancy.fetch_add(1, Ordering::Relaxed);
         match self.tx.try_send(output) {
             Ok(()) => true,
-            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+            Err(std::sync::mpsc::TrySendError::Full(rejected)) => {
+                self.occupancy.fetch_sub(1, Ordering::Relaxed);
                 sink_bp.record_drop(health_tx, feed_id);
+                let _ = rejected; // drop explicitly
                 false
             }
-            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => false,
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                self.occupancy.fetch_sub(1, Ordering::Relaxed);
+                false
+            }
         }
     }
 
@@ -340,8 +391,10 @@ impl SinkWorker {
         sink: Box<dyn OutputSink>,
         rx: std::sync::mpsc::Receiver<SharedOutput>,
         health_tx: broadcast::Sender<HealthEvent>,
+        occupancy: Arc<AtomicUsize>,
     ) -> Box<dyn OutputSink> {
         while let Ok(output) = rx.recv() {
+            occupancy.fetch_sub(1, Ordering::Relaxed);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 sink.emit(output);
             }));
@@ -464,6 +517,8 @@ pub(crate) fn spawn_feed_worker(
                 executor: PipelineExecutor::new(
                     feed_id,
                     config.stages,
+                    config.batch,
+                    config.post_batch_stages,
                     config.temporal,
                     config.camera_mode,
                     config.view_state_provider,
@@ -594,12 +649,9 @@ impl FeedWorker {
                         error = %e,
                         "failed to create media source"
                     );
-                    self.shared.set_queue(None);
-                    self.executor.stop_stages();
-                    if !self.try_restart(
+                    if !self.cleanup_and_try_restart(
                         &mut restart_count,
                         &mut session_start,
-                        &ExitReason::SourceEnded,
                         format!("source creation failed: {e}"),
                     ) {
                         break;
@@ -619,12 +671,9 @@ impl FeedWorker {
                         error = %e,
                         "source start failed"
                     );
-                    self.shared.set_queue(None);
-                    self.executor.stop_stages();
-                    if !self.try_restart(
+                    if !self.cleanup_and_try_restart(
                         &mut restart_count,
                         &mut session_start,
-                        &ExitReason::SourceEnded,
                         format!("source start failed: {e}"),
                     ) {
                         break;
@@ -641,6 +690,9 @@ impl FeedWorker {
             self.shared.set_queue(None);
             let _ = source.stop();
             self.executor.stop_stages();
+            if let Some(evt) = self.executor.flush_batch_rejections() {
+                let _ = self.health_tx.send(evt);
+            }
 
             match exit_reason {
                 ExitReason::Shutdown => {
@@ -717,6 +769,13 @@ impl FeedWorker {
         queue: &Arc<FrameQueue>,
         source: &mut dyn MediaIngress,
     ) -> ExitReason {
+        // Record session start time and sink capacity for telemetry.
+        if let Ok(mut t) = self.shared.session_started_at.lock() {
+            *t = Instant::now();
+        }
+        self.shared.sink_capacity.store(self.sink_queue_capacity, Ordering::Relaxed);
+        self.shared.sink_occupancy.store(0, Ordering::Relaxed);
+
         // Spawn sink worker — output is decoupled from this thread.
         let sink = std::mem::replace(
             &mut self.output_sink,
@@ -727,6 +786,7 @@ impl FeedWorker {
             sink,
             self.health_tx.clone(),
             self.sink_queue_capacity,
+            Arc::clone(&self.shared.sink_occupancy),
         ) {
             Ok(w) => w,
             Err(e) => {
@@ -760,13 +820,39 @@ impl FeedWorker {
         source: &mut dyn MediaIngress,
         sink_worker: &SinkWorker,
     ) -> ExitReason {
-        // The source's tick hint drives the queue pop deadline.
-        // When the source has no specific deadline (next_tick: None),
-        // the pop waits indefinitely — woken by frames, on_error's
-        // wake_consumer(), shutdown, or EOS.
-        let mut next_tick_hint: Option<Duration> = None;
+        // Seed the initial tick so that any deadline armed during source
+        // start (e.g., liveness timeout, reconnect backoff) is honoured
+        // from the very first queue pop. Without this, a source that
+        // arms a deadline but emits no frames would cause the worker to
+        // wait indefinitely.
+        //
+        // We intentionally do NOT short-circuit on SourceStatus::Stopped
+        // here: the producer thread may have raced ahead and signalled
+        // EOS before we enter the loop. The correct exit for that case
+        // is through queue.pop() → Closed → SourceEnded (restartable),
+        // not SourceStopped (terminal).
+        let initial = source.tick();
+        let mut next_tick_hint: Option<Duration> = initial.next_tick;
+
         let mut sink_bp = SinkBpThrottle::new();
 
+        let reason = self.run_loop_inner(queue, source, sink_worker, &mut sink_bp, &mut next_tick_hint);
+
+        // Flush any accumulated tail from the sink backpressure
+        // coalescer so the final delta is not silently lost.
+        sink_bp.flush(&self.health_tx, self.feed_id);
+
+        reason
+    }
+
+    fn run_loop_inner(
+        &mut self,
+        queue: &Arc<FrameQueue>,
+        source: &mut dyn MediaIngress,
+        sink_worker: &SinkWorker,
+        sink_bp: &mut SinkBpThrottle,
+        next_tick_hint: &mut Option<Duration>,
+    ) -> ExitReason {
         loop {
             // Check shutdown first.
             if self.shared.shutdown.load(Ordering::Relaxed) {
@@ -804,7 +890,8 @@ impl FeedWorker {
             // Pop the next frame. The deadline is driven entirely by
             // the source's tick hint. None → wait indefinitely.
             let deadline = next_tick_hint.map(|d| Instant::now() + d);
-            let frame = match queue.pop(&self.shared.shutdown, deadline) {
+            let pop_result = queue.pop(&self.shared.shutdown, deadline);
+            let frame = match pop_result {
                 PopResult::Frame(f) => f,
                 PopResult::Closed => {
                     // Queue closed (EOS) or shutdown.
@@ -821,7 +908,7 @@ impl FeedWorker {
                     // No frame available — tick the source to drive
                     // bus polling and reconnection.
                     let outcome = source.tick();
-                    next_tick_hint = outcome.next_tick;
+                    *next_tick_hint = outcome.next_tick;
                     if outcome.status == SourceStatus::Stopped {
                         return ExitReason::SourceStopped;
                     }
@@ -871,7 +958,7 @@ impl FeedWorker {
                 }
 
                 // Enqueue for the sink worker (non-blocking).
-                sink_worker.send(shared_out, &mut sink_bp, &self.health_tx, self.feed_id);
+                sink_worker.send(shared_out, sink_bp, &self.health_tx, self.feed_id);
             }
 
             // Tick the source after processing to drain any pending bus
@@ -883,7 +970,7 @@ impl FeedWorker {
             // point the stopped status is picked up and the loop exits
             // cleanly.
             let outcome = source.tick();
-            next_tick_hint = outcome.next_tick;
+            *next_tick_hint = outcome.next_tick;
 
             // Subscriber transition: external subscribers were present on
             // a prior frame but are gone now. Realign the lag detector to
@@ -900,6 +987,25 @@ impl FeedWorker {
                 return ExitReason::StagePanic;
             }
         }
+    }
+
+    /// Common cleanup for source-create or source-start failures:
+    /// clear queue, stop stages, flush batch rejections, then try restart.
+    ///
+    /// Returns `true` if restart was accepted (caller should `continue`),
+    /// `false` if denied (caller should `break`).
+    fn cleanup_and_try_restart(
+        &mut self,
+        restart_count: &mut u32,
+        session_start: &mut Instant,
+        detail: String,
+    ) -> bool {
+        self.shared.set_queue(None);
+        self.executor.stop_stages();
+        if let Some(evt) = self.executor.flush_batch_rejections() {
+            let _ = self.health_tx.send(evt);
+        }
+        self.try_restart(restart_count, session_start, &ExitReason::SourceEnded, detail)
     }
 
     /// Attempt a restart. Returns `true` if the restart was accepted
@@ -1053,6 +1159,19 @@ impl SinkBpThrottle {
             let delta = self.accumulated;
             self.accumulated = 0;
             self.last_event = Instant::now();
+            let _ = health_tx.send(HealthEvent::SinkBackpressure {
+                feed_id,
+                outputs_dropped: delta,
+            });
+        }
+    }
+
+    /// Flush any accumulated but un-emitted drop count.
+    fn flush(&mut self, health_tx: &broadcast::Sender<HealthEvent>, feed_id: FeedId) {
+        if self.accumulated > 0 {
+            let delta = self.accumulated;
+            self.accumulated = 0;
+            self.in_backpressure = false;
             let _ = health_tx.send(HealthEvent::SinkBackpressure {
                 feed_id,
                 outputs_dropped: delta,

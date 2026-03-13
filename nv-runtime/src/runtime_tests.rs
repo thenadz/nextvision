@@ -202,6 +202,14 @@ fn wait_for_stop(handle: &FeedHandle, timeout: std::time::Duration) {
     }
 }
 
+/// Build a runtime with `MockFactory::new(frame_count)` and defaults.
+fn build_runtime(frame_count: u64) -> Runtime {
+    Runtime::builder()
+        .ingress_factory(Box::new(MockFactory::new(frame_count)))
+        .build()
+        .unwrap()
+}
+
 // ---------------------------------------------------------------------------
 // 1. Multi-feed registration
 // ---------------------------------------------------------------------------
@@ -278,10 +286,7 @@ fn feed_limit_exceeded() {
 
 #[test]
 fn start_stop_lifecycle() {
-    let runtime = Runtime::builder()
-        .ingress_factory(Box::new(MockFactory::new(10)))
-        .build()
-        .unwrap();
+    let runtime = build_runtime(10);
 
     let (sink, count) = CountingSink::new();
     let handle = runtime
@@ -302,10 +307,7 @@ fn start_stop_lifecycle() {
 
 #[test]
 fn remove_feed_stops_worker() {
-    let runtime = Runtime::builder()
-        .ingress_factory(Box::new(MockFactory::new(10_000)))
-        .build()
-        .unwrap();
+    let runtime = build_runtime(10_000);
 
     let (sink, _) = CountingSink::new();
     let handle = runtime
@@ -383,10 +385,7 @@ fn backpressure_drops_are_reported() {
 
 #[test]
 fn feed_failure_isolation() {
-    let runtime = Runtime::builder()
-        .ingress_factory(Box::new(MockFactory::new(10)))
-        .build()
-        .unwrap();
+    let runtime = build_runtime(10);
 
     // Feed with a failing stage.
     let (sink_fail, count_fail) = CountingSink::new();
@@ -495,10 +494,7 @@ fn restart_on_source_failure_honors_max() {
 
 #[test]
 fn stage_panic_no_restart_with_source_failure_trigger() {
-    let runtime = Runtime::builder()
-        .ingress_factory(Box::new(MockFactory::new(5)))
-        .build()
-        .unwrap();
+    let runtime = build_runtime(5);
 
     let (sink, _) = CountingSink::new();
     let handle = runtime
@@ -524,10 +520,7 @@ fn stage_panic_no_restart_with_source_failure_trigger() {
 
 #[test]
 fn stage_panic_restarts_with_source_or_panic_trigger() {
-    let runtime = Runtime::builder()
-        .ingress_factory(Box::new(MockFactory::new(5)))
-        .build()
-        .unwrap();
+    let runtime = build_runtime(5);
 
     let (sink, _) = CountingSink::new();
     let handle = runtime
@@ -593,10 +586,7 @@ fn restart_window_resets_counter() {
 
 #[test]
 fn immediate_shutdown_after_add() {
-    let runtime = Runtime::builder()
-        .ingress_factory(Box::new(MockFactory::new(10_000)))
-        .build()
-        .unwrap();
+    let runtime = build_runtime(10_000);
 
     let (sink, _) = CountingSink::new();
     let _handle = runtime
@@ -612,10 +602,7 @@ fn immediate_shutdown_after_add() {
 
 #[test]
 fn shutdown_rejects_new_feeds() {
-    let runtime = Runtime::builder()
-        .ingress_factory(Box::new(MockFactory::new(5)))
-        .build()
-        .unwrap();
+    let runtime = build_runtime(5);
 
     let handle = runtime.handle();
     runtime.shutdown().unwrap();
@@ -740,10 +727,7 @@ fn output_subscription_bounded_capacity() {
 
 #[test]
 fn runtime_handle_is_cloneable_and_functional() {
-    let runtime = Runtime::builder()
-        .ingress_factory(Box::new(MockFactory::new(3)))
-        .build()
-        .unwrap();
+    let runtime = build_runtime(3);
 
     let h1 = runtime.handle();
     let h2 = h1.clone();
@@ -768,10 +752,7 @@ fn runtime_handle_is_cloneable_and_functional() {
 
 #[test]
 fn pause_resume_controls_processing() {
-    let runtime = Runtime::builder()
-        .ingress_factory(Box::new(MockFactory::new(10_000)))
-        .build()
-        .unwrap();
+    let runtime = build_runtime(10_000);
 
     let (sink, count) = CountingSink::new();
     let handle = runtime
@@ -845,10 +826,7 @@ fn max_restarts_zero_with_source_failure_trigger_never_restarts() {
 #[test]
 fn max_restarts_zero_with_source_or_panic_trigger_never_restarts() {
     // max_restarts=0 must prevent restart even with SourceOrStagePanic trigger.
-    let runtime = Runtime::builder()
-        .ingress_factory(Box::new(MockFactory::new(5)))
-        .build()
-        .unwrap();
+    let runtime = build_runtime(5);
 
     let (sink, _) = CountingSink::new();
     let handle = runtime
@@ -1095,10 +1073,7 @@ fn zero_queue_depth_rejected() {
 
 #[test]
 fn file_eos_stops_cleanly() {
-    let runtime = Runtime::builder()
-        .ingress_factory(Box::new(MockFactory::new(3)))
-        .build()
-        .unwrap();
+    let runtime = build_runtime(3);
 
     let mut health_rx = runtime.health_subscribe();
     let (sink, count) = CountingSink::new();
@@ -1150,10 +1125,7 @@ fn file_eos_stops_cleanly() {
 
 #[test]
 fn looping_file_restarts_on_eos() {
-    let runtime = Runtime::builder()
-        .ingress_factory(Box::new(MockFactory::new(0)))
-        .build()
-        .unwrap();
+    let runtime = build_runtime(0);
 
     let (sink, _) = CountingSink::new();
     let handle = runtime
@@ -1193,10 +1165,7 @@ fn looping_file_restarts_on_eos() {
 
 #[test]
 fn stage_error_drops_frame_no_output() {
-    let runtime = Runtime::builder()
-        .ingress_factory(Box::new(MockFactory::new(5)))
-        .build()
-        .unwrap();
+    let runtime = build_runtime(5);
 
     let (sink, count) = CountingSink::new();
     let handle = runtime
@@ -1220,10 +1189,7 @@ fn stage_error_drops_frame_no_output() {
 
 #[test]
 fn stage_error_emits_health_event() {
-    let runtime = Runtime::builder()
-        .ingress_factory(Box::new(MockFactory::new(2)))
-        .build()
-        .unwrap();
+    let runtime = build_runtime(2);
 
     let mut health_rx = runtime.health_subscribe();
     let (sink, _) = CountingSink::new();
@@ -1375,10 +1341,7 @@ fn shutdown_wakes_paused_feed() {
 
 #[test]
 fn restarts_metric_is_cumulative() {
-    let runtime = Runtime::builder()
-        .ingress_factory(Box::new(MockFactory::new(0)))
-        .build()
-        .unwrap();
+    let runtime = build_runtime(0);
 
     let (sink, _) = CountingSink::new();
     let handle = runtime
@@ -1912,10 +1875,7 @@ fn slow_sink_does_not_block_processing() {
         delay: std::time::Duration::from_millis(100),
     };
 
-    let runtime = Runtime::builder()
-        .ingress_factory(Box::new(MockFactory::new(50)))
-        .build()
-        .unwrap();
+    let runtime = build_runtime(50);
 
     let handle = runtime
         .add_feed(build_config(
@@ -2107,10 +2067,7 @@ fn bounded_shutdown_when_sink_blocks() {
         count: Arc::clone(&count),
     };
 
-    let runtime = Runtime::builder()
-        .ingress_factory(Box::new(MockFactory::new(20)))
-        .build()
-        .unwrap();
+    let runtime = build_runtime(20);
 
     let _handle = runtime
         .add_feed(build_config(
@@ -2335,4 +2292,190 @@ fn sink_queue_capacity_clamped_to_min_1() {
         .build()
         .expect("valid config");
     assert_eq!(config.sink_queue_capacity, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Runtime uptime
+// ---------------------------------------------------------------------------
+
+#[test]
+fn runtime_uptime_monotonic() {
+    let runtime = build_runtime(0);
+
+    let t1 = runtime.uptime();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let t2 = runtime.uptime();
+    assert!(t2 > t1, "uptime should be monotonically increasing");
+
+    let handle = runtime.handle();
+    let t3 = handle.uptime();
+    assert!(t3 >= t2, "handle uptime should be >= previous runtime uptime");
+
+    runtime.shutdown().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Feed uptime (session-scoped)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn feed_uptime_advances_while_running() {
+    let runtime = build_runtime(100);
+
+    let (sink, _count) = CountingSink::new();
+    let feed = runtime
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
+        .unwrap();
+
+    // Let the feed process a few frames.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let u1 = feed.uptime();
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let u2 = feed.uptime();
+    assert!(u2 > u1, "feed uptime should advance: u1={u1:?} u2={u2:?}");
+
+    runtime.shutdown().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Queue telemetry
+// ---------------------------------------------------------------------------
+
+#[test]
+fn queue_telemetry_reports_capacity() {
+    let runtime = build_runtime(50);
+
+    let (sink, _count) = CountingSink::new();
+    let feed = runtime
+        .add_feed(
+            FeedConfig::builder()
+                .source(SourceSpec::rtsp("rtsp://mock/stream"))
+                .camera_mode(CameraMode::Fixed)
+                .stages(vec![Box::new(NoOpStage::new("noop")) as Box<dyn Stage>])
+                .output_sink(Box::new(sink))
+                .backpressure(crate::BackpressurePolicy::DropOldest { queue_depth: 8 })
+                .sink_queue_capacity(12)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+
+    // Give the feed time to start.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let qt = feed.queue_telemetry();
+    assert_eq!(qt.source_capacity, 8, "source capacity should match configured backpressure");
+    assert_eq!(qt.sink_capacity, 12, "sink capacity should match configured value");
+    // Depth should be within [0, capacity].
+    assert!(qt.source_depth <= qt.source_capacity);
+    assert!(qt.sink_depth <= qt.sink_capacity);
+
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn queue_telemetry_after_shutdown_is_zero() {
+    let runtime = build_runtime(3);
+
+    let (sink, _count) = CountingSink::new();
+    let feed = runtime
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
+        .unwrap();
+
+    // Wait for the feed to finish processing all frames.
+    wait_for_stop(&feed, std::time::Duration::from_secs(5));
+
+    let qt = feed.queue_telemetry();
+    assert_eq!(qt.source_depth, 0, "source depth should be 0 after feed stopped");
+    // Sink queue should drain as well.
+    // (capacity may still report the configured value — that's fine for monitoring)
+
+    runtime.shutdown().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Startup liveness: source with tick hint but no frames must not hang
+// ---------------------------------------------------------------------------
+
+/// Mock source that emits zero frames but provides a tick hint.
+/// After a few ticks it transitions to Stopped, validating that the
+/// worker honours the initial tick seed and does not wait indefinitely.
+struct TickHintNoFrameIngress {
+    feed_id: FeedId,
+    spec: SourceSpec,
+    ticks: std::sync::atomic::AtomicU32,
+}
+
+impl MediaIngress for TickHintNoFrameIngress {
+    fn start(&mut self, _sink: Box<dyn FrameSink>) -> Result<(), nv_core::error::MediaError> {
+        // Source starts successfully but never sends any frames or EOS.
+        Ok(())
+    }
+    fn stop(&mut self) -> Result<(), nv_core::error::MediaError> { Ok(()) }
+    fn pause(&mut self) -> Result<(), nv_core::error::MediaError> { Ok(()) }
+    fn resume(&mut self) -> Result<(), nv_core::error::MediaError> { Ok(()) }
+
+    fn tick(&mut self) -> nv_media::ingress::TickOutcome {
+        let n = self.ticks.fetch_add(1, Ordering::Relaxed);
+        if n >= 3 {
+            nv_media::ingress::TickOutcome::stopped()
+        } else {
+            // Arms a short deadline so the worker must honour it.
+            nv_media::ingress::TickOutcome::reconnecting(
+                std::time::Duration::from_millis(10),
+            )
+        }
+    }
+
+    fn source_spec(&self) -> &SourceSpec { &self.spec }
+    fn feed_id(&self) -> FeedId { self.feed_id }
+}
+
+struct TickHintNoFrameFactory;
+impl MediaIngressFactory for TickHintNoFrameFactory {
+    fn create(
+        &self,
+        feed_id: FeedId,
+        spec: SourceSpec,
+        _reconnect: ReconnectPolicy,
+        _ptz: Option<Arc<dyn PtzProvider>>,
+    ) -> Result<Box<dyn MediaIngress>, nv_core::error::MediaError> {
+        Ok(Box::new(TickHintNoFrameIngress {
+            feed_id,
+            spec,
+            ticks: std::sync::atomic::AtomicU32::new(0),
+        }))
+    }
+}
+
+#[test]
+fn startup_liveness_tick_hint_no_frames() {
+    // A source that emits no frames but provides tick hints must not
+    // cause the worker to hang. The initial tick seed ensures the first
+    // queue pop uses the hint as a deadline.
+    let runtime = Runtime::builder()
+        .ingress_factory(Box::new(TickHintNoFrameFactory))
+        .build()
+        .unwrap();
+
+    let (sink, _count) = CountingSink::new();
+    let feed = runtime
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
+        .unwrap();
+
+    // The feed should stop within a reasonable time (the 3 ticks at
+    // 10ms each = ~30ms, plus overhead). If the initial tick seed is
+    // missing, this would hang forever.
+    wait_for_stop(&feed, std::time::Duration::from_secs(5));
+    assert!(!feed.is_alive(), "feed should have stopped");
+
+    runtime.shutdown().unwrap();
 }

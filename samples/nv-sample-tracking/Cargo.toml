@@ -1,6 +1,6 @@
 [package]
-name = "nv-byo-yolox"
-description = "YOLOX-s ONNX detector adapter implementing the nv-perception Stage trait."
+name = "nv-sample-tracking"
+description = "Sample multi-object tracker adapter implementing the nv-perception Stage trait."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,7 +12,6 @@ nv-frame.workspace = true
 nv-perception.workspace = true
 nv-view.workspace = true
 
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-native"] }
 tracing.workspace = true
 
 [dev-dependencies]

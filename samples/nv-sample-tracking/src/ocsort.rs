@@ -1,11 +1,11 @@
-/// OC-SORT tracker core — manages track state, lifecycle, and frame-by-frame update.
+//! OC-SORT tracker core — manages track state, lifecycle, and frame-by-frame update.
 
 use nv_core::id::TrackId;
 use nv_core::MonotonicTs;
 use nv_perception::{Detection, Track, TrackObservation, TrackState};
 use nv_core::TypedMetadata;
 
-use crate::config::OcSortConfig;
+use crate::config::TrackerConfig;
 use crate::kalman::KalmanBoxTracker;
 use crate::matching;
 
@@ -24,13 +24,13 @@ pub(crate) struct TrackedObject {
 
 /// The core OC-SORT tracker.
 pub(crate) struct OcSortTracker {
-    config: OcSortConfig,
+    config: TrackerConfig,
     tracks: Vec<TrackedObject>,
     next_id: u64,
 }
 
 impl OcSortTracker {
-    pub fn new(config: OcSortConfig) -> Self {
+    pub fn new(config: TrackerConfig) -> Self {
         Self {
             config,
             tracks: Vec::new(),
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn new_detections_create_tracks() {
-        let config = OcSortConfig {
+        let config = TrackerConfig {
             min_hits: 1,
             output_tentative: true,
             ..Default::default()
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn track_id_stability_across_frames() {
-        let config = OcSortConfig {
+        let config = TrackerConfig {
             min_hits: 1,
             output_tentative: true,
             ..Default::default()
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn track_expires_after_max_age() {
-        let config = OcSortConfig {
+        let config = TrackerConfig {
             max_age: 2,
             min_hits: 1,
             output_tentative: true,
@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn reset_clears_all_tracks() {
-        let config = OcSortConfig {
+        let config = TrackerConfig {
             min_hits: 1,
             output_tentative: true,
             ..Default::default()
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn confirmed_after_min_hits() {
-        let config = OcSortConfig {
+        let config = TrackerConfig {
             min_hits: 3,
             output_tentative: true,
             ..Default::default()

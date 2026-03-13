@@ -9,9 +9,9 @@ members = [
     "nv-view",
     "nv-runtime",
     "nv-test-util",
-    "samples/nv-byo-yolox",
-    "samples/nv-byo-ocsort",
-    "samples/nv-sample-yolox-ocsort",
+    "samples/nv-sample-detection",
+    "samples/nv-sample-tracking",
+    "samples/nv-sample-app",
 ]
 default-members = [
     "nv-core",
@@ -40,8 +40,8 @@ nv-temporal = { path = "nv-temporal" }
 nv-view = { path = "nv-view" }
 nv-runtime = { path = "nv-runtime" }
 nv-test-util = { path = "nv-test-util" }
-nv-byo-yolox = { path = "samples/nv-byo-yolox" }
-nv-byo-ocsort = { path = "samples/nv-byo-ocsort" }
+nv-sample-detection = { path = "samples/nv-sample-detection" }
+nv-sample-tracking = { path = "samples/nv-sample-tracking" }
 
 # External
 criterion = { version = "0.5", features = ["html_reports"] }

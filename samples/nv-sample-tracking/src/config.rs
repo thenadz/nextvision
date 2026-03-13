@@ -1,6 +1,6 @@
-/// Configuration for the OC-SORT tracker stage.
+/// Configuration for the sample tracker stage.
 #[derive(Debug, Clone)]
-pub struct OcSortConfig {
+pub struct TrackerConfig {
     /// Maximum frames a track can coast (no association) before being removed.
     /// Default: 30.
     pub max_age: u32,
@@ -19,7 +19,7 @@ pub struct OcSortConfig {
     pub output_tentative: bool,
 }
 
-impl Default for OcSortConfig {
+impl Default for TrackerConfig {
     fn default() -> Self {
         Self {
             max_age: 30,

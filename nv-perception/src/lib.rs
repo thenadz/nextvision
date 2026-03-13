@@ -54,6 +54,7 @@
 //! and produce domain-agnostic artifacts.
 
 pub mod artifact;
+pub mod batch;
 pub mod detection;
 pub mod pipeline;
 pub mod scene;
@@ -63,8 +64,9 @@ pub mod temporal_access;
 pub mod track;
 
 pub use artifact::PerceptionArtifacts;
+pub use batch::{BatchEntry, BatchProcessor};
 pub use detection::{Detection, DetectionBuilder, DetectionSet};
-pub use pipeline::{StagePipeline, StagePipelineBuilder, ValidationMode, ValidationWarning, validate_stages};
+pub use pipeline::{StagePipeline, StagePipelineBuilder, ValidationMode, ValidationWarning, validate_pipeline_phased, validate_stages};
 pub use scene::{SceneFeature, SceneFeatureValue};
 pub use signal::{DerivedSignal, SignalValue};
 pub use stage::{

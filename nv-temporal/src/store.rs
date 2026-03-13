@@ -88,7 +88,14 @@ impl TemporalStore {
         self.tracks.get_mut(id)
     }
 
-    /// Insert or replace a track history.
+    /// Low-level insert or replace of a track history.
+    ///
+    /// **Does not enforce [`RetentionPolicy::max_concurrent_tracks`].**
+    /// Prefer [`commit_track`](Self::commit_track) for normal pipeline
+    /// usage — it handles pre-eviction and cap enforcement.
+    ///
+    /// This is intentionally public for test harnesses and advanced
+    /// integrations that manage track lifecycle externally.
     pub fn insert_track(&mut self, id: TrackId, history: TrackHistory) {
         self.tracks.insert(id, history);
     }
@@ -1018,6 +1025,53 @@ mod tests {
             3,
             "observations should be capped at max_observations_per_track"
         );
+    }
+
+    #[test]
+    fn commit_track_respects_concurrent_cap_with_eviction() {
+        let retention = RetentionPolicy {
+            max_concurrent_tracks: 3,
+            ..RetentionPolicy::default()
+        };
+        let mut store = TemporalStore::new(retention);
+        let epoch = ViewEpoch::INITIAL;
+
+        // Fill to cap with Lost tracks.
+        for i in 1..=3u64 {
+            let track = make_track_with_state(i, TrackState::Lost);
+            assert!(store.commit_track(&track, MonotonicTs::from_nanos(i * 1_000_000), epoch));
+        }
+        assert_eq!(store.track_count(), 3);
+
+        // A 4th track should evict the oldest Lost track (id=1).
+        let new_track = make_track(4);
+        assert!(store.commit_track(&new_track, MonotonicTs::from_nanos(4_000_000), epoch));
+        assert_eq!(store.track_count(), 3, "cap must hold after commit");
+        assert!(store.get_track(&TrackId::new(1)).is_none(), "oldest Lost evicted");
+        assert!(store.get_track(&TrackId::new(4)).is_some(), "new track admitted");
+    }
+
+    #[test]
+    fn commit_track_rejects_when_only_confirmed_at_cap() {
+        let retention = RetentionPolicy {
+            max_concurrent_tracks: 2,
+            ..RetentionPolicy::default()
+        };
+        let mut store = TemporalStore::new(retention);
+        let epoch = ViewEpoch::INITIAL;
+
+        // Fill to cap with Confirmed tracks (non-evictable).
+        for i in 1..=2u64 {
+            let track = make_track_with_state(i, TrackState::Confirmed);
+            assert!(store.commit_track(&track, MonotonicTs::from_nanos(i * 1_000_000), epoch));
+        }
+        assert_eq!(store.track_count(), 2);
+
+        // A 3rd track should be rejected — no eviction victim.
+        let new_track = make_track(3);
+        assert!(!store.commit_track(&new_track, MonotonicTs::from_nanos(3_000_000), epoch));
+        assert_eq!(store.track_count(), 2, "cap must hold");
+        assert!(store.get_track(&TrackId::new(3)).is_none());
     }
 
     #[test]

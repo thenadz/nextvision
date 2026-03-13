@@ -31,7 +31,7 @@ impl GlobalTransformEstimate {
     pub fn displacement_magnitude(&self) -> f32 {
         let tx = self.transform.m[2];
         let ty = self.transform.m[5];
-        ((tx * tx + ty * ty) as f64).sqrt() as f32
+        (tx * tx + ty * ty).sqrt() as f32
     }
 }
 

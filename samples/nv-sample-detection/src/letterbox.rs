@@ -1,8 +1,8 @@
-/// Pre-processing: letterbox resize with aspect-ratio preservation.
-///
-/// The input RGB8 pixel buffer is resized to `target_size × target_size`,
-/// centered with gray (114, 114, 114) padding, and converted to a
-/// float32 NCHW tensor normalised to `[0, 1]`.
+//! Pre-processing: letterbox resize with aspect-ratio preservation.
+//!
+//! The input RGB8 pixel buffer is resized to `target_size × target_size`,
+//! centered with gray (114/255) padding, and converted to a float32
+//! NCHW tensor with values normalised to the 0–1 range.
 
 /// Metadata about the letterbox transform so that bounding boxes can be
 /// mapped back to the original frame's normalised `[0, 1]` space.
@@ -39,11 +39,15 @@ impl LetterboxInfo {
     }
 }
 
-/// Perform letterbox pre-processing: resize + pad + normalise.
+/// Perform letterbox pre-processing: resize + pad + convert to NCHW float32.
 ///
 /// Returns `(tensor_data, info)` where `tensor_data` is a flat `Vec<f32>`
-/// in NCHW layout `[1, 3, H, W]` with values in `[0, 1]`, and `info`
+/// in NCHW layout `[1, 3, H, W]` with values in 0–255 range, and `info`
 /// carries the transform metadata for coordinate remapping.
+///
+/// For batch processing where multiple frames are concatenated into one
+/// tensor, prefer [`letterbox_preprocess_into`] to avoid per-frame
+/// allocations.
 ///
 /// # Arguments
 /// - `rgb_data` — pixel buffer in row-major RGB8 order.
@@ -57,6 +61,46 @@ pub fn letterbox_preprocess(
     src_stride: u32,
     target: u32,
 ) -> (Vec<f32>, LetterboxInfo) {
+    let t = target as usize;
+    let pixels = t * t;
+    let mut tensor = vec![114.0_f32 / 255.0; pixels * 3];
+    let info = letterbox_preprocess_into(rgb_data, src_w, src_h, src_stride, target, &mut tensor);
+    (tensor, info)
+}
+
+/// Letterbox pre-processing into a caller-provided buffer.
+///
+/// Writes NCHW float32 data (0–255 range) into `output`, which must be
+/// at least `3 * target * target` elements. Padding pixels are set to
+/// 114.0. Returns the [`LetterboxInfo`] for coordinate remapping.
+///
+/// This variant avoids per-frame allocation when building a batched
+/// tensor: the caller pre-allocates the full `[N, 3, H, W]` buffer
+/// and passes successive slices.
+///
+/// # Panics
+///
+/// Panics if `output.len() < 3 * target * target`.
+pub fn letterbox_preprocess_into(
+    rgb_data: &[u8],
+    src_w: u32,
+    src_h: u32,
+    src_stride: u32,
+    target: u32,
+    output: &mut [f32],
+) -> LetterboxInfo {
+    let t = target as usize;
+    let pixels = t * t;
+    assert!(
+        output.len() >= pixels * 3,
+        "output buffer too small: need {}, got {}",
+        pixels * 3,
+        output.len()
+    );
+
+    // Fill with gray padding value (114/255 ≈ 0.447).
+    output[..pixels * 3].fill(114.0 / 255.0);
+
     let scale = (target as f32 / src_w as f32).min(target as f32 / src_h as f32);
     let new_w = (src_w as f32 * scale).round() as u32;
     let new_h = (src_h as f32 * scale).round() as u32;
@@ -64,10 +108,6 @@ pub fn letterbox_preprocess(
     let pad_y = (target - new_h) as f32 / 2.0;
     let pad_x_int = pad_x as u32;
     let pad_y_int = pad_y as u32;
-
-    let t = target as usize;
-    let pixels = t * t;
-    let mut tensor = vec![114.0_f32; pixels * 3];
 
     // Nearest-neighbour resize + place into padded canvas.
     for dst_y in 0..new_h {
@@ -78,26 +118,25 @@ pub fn letterbox_preprocess(
             let src_idx = (src_y * src_stride + src_x * 3) as usize;
             let out_x = (dst_x + pad_x_int) as usize;
             if src_idx + 2 < rgb_data.len() {
-                let r = rgb_data[src_idx] as f32;
-                let g = rgb_data[src_idx + 1] as f32;
-                let b = rgb_data[src_idx + 2] as f32;
-                // NCHW layout: channel planes are contiguous.
-                tensor[out_y * t + out_x] = r;
-                tensor[pixels + out_y * t + out_x] = g;
-                tensor[2 * pixels + out_y * t + out_x] = b;
+                let r = rgb_data[src_idx] as f32 / 255.0;
+                let g = rgb_data[src_idx + 1] as f32 / 255.0;
+                let b = rgb_data[src_idx + 2] as f32 / 255.0;
+                // NCHW layout, RGB order (Ultralytics convention).
+                output[out_y * t + out_x] = r;
+                output[pixels + out_y * t + out_x] = g;
+                output[2 * pixels + out_y * t + out_x] = b;
             }
         }
     }
 
-    let info = LetterboxInfo {
+    LetterboxInfo {
         scale,
         pad_x,
         pad_y,
         target,
         orig_w: src_w,
         orig_h: src_h,
-    };
-    (tensor, info)
+    }
 }
 
 #[cfg(test)]

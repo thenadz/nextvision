@@ -7,9 +7,10 @@
 ///
 /// The pipeline builder uses this to determine which GStreamer decode element
 /// to instantiate.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) enum DecoderSelection {
     /// Automatically select the best decoder: prefer hardware, fall back to software.
+    #[default]
     Auto,
     /// Force software decoding (useful for environments without GPU access).
     #[allow(dead_code)] // constructed in tests and gst-backend pipeline build
@@ -20,11 +21,3 @@ pub(crate) enum DecoderSelection {
     #[allow(dead_code)] // constructed in tests and gst-backend pipeline build
     Named(String),
 }
-
-impl Default for DecoderSelection {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
-
-

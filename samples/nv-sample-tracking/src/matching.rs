@@ -1,5 +1,5 @@
-/// Detection–track association via IoU cost matrix + OCM penalty
-/// solved with a greedy assignment.
+//! Detection–track association via IoU cost matrix + OCM penalty
+//! solved with a greedy assignment.
 
 use crate::kalman::KalmanBoxTracker;
 

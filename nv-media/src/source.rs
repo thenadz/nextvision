@@ -347,17 +347,8 @@ impl MediaSource {
                     debug_detail = ?debug_detail,
                     "pipeline error"
                 );
-                // Clone the classified error so both health and sink receive
-                // the original typed variant (not a lossy display string).
                 let enriched = self.enrich_error(error);
-                self.emit_health(HealthEvent::SourceDisconnected {
-                    feed_id: self.feed_id,
-                    reason: enriched.clone(),
-                });
-                if let Some(ref sink) = self.sink {
-                    sink.on_error(enriched);
-                }
-                self.try_reconnect_or_stop()
+                self.disconnect_and_reconnect(enriched)
             }
             MediaEvent::Warning { message, debug: debug_detail } => {
                 tracing::warn!(
@@ -383,6 +374,20 @@ impl MediaSource {
                 None
             }
         }
+    }
+
+    /// Emit `SourceDisconnected`, notify the sink, and attempt reconnection.
+    ///
+    /// Shared path for pipeline errors and liveness watchdog expiry.
+    fn disconnect_and_reconnect(&mut self, error: MediaError) -> Option<Duration> {
+        self.emit_health(HealthEvent::SourceDisconnected {
+            feed_id: self.feed_id,
+            reason: error.clone(),
+        });
+        if let Some(ref sink) = self.sink {
+            sink.on_error(error);
+        }
+        self.try_reconnect_or_stop()
     }
 
     /// Attempt reconnection or stop permanently if budget is exhausted.
@@ -531,7 +536,7 @@ impl MediaSource {
 
         let deadline_elapsed = self
             .reconnect_deadline
-            .map_or(true, |d| Instant::now() >= d);
+            .is_none_or(|d| Instant::now() >= d);
         tracing::debug!(
             feed_id = %self.feed_id,
             deadline_elapsed,
@@ -753,14 +758,7 @@ impl MediaIngress for MediaSource {
                         "liveness watchdog expired — no stream started, forcing reconnect"
                     );
                     self.liveness_deadline = None;
-                    self.emit_health(HealthEvent::SourceDisconnected {
-                        feed_id: self.feed_id,
-                        reason: MediaError::Timeout,
-                    });
-                    if let Some(ref sink) = self.sink {
-                        sink.on_error(MediaError::Timeout);
-                    }
-                    self.try_reconnect_or_stop();
+                    self.disconnect_and_reconnect(MediaError::Timeout);
                     // Re-poll to pick up the reconnection state.
                     let _delay = self.poll_bus();
                 }
@@ -768,7 +766,7 @@ impl MediaIngress for MediaSource {
         }
 
         // Map the resulting state and compute the next-tick hint.
-        let outcome = match self.state {
+        match self.state {
             SourceState::Running | SourceState::Paused | SourceState::Idle => {
                 // If liveness watchdog is armed, schedule a tick so the
                 // worker keeps polling instead of waiting indefinitely.
@@ -787,9 +785,7 @@ impl MediaIngress for MediaSource {
                 TickOutcome::reconnecting(remaining)
             }
             SourceState::Stopped => TickOutcome::stopped(),
-        };
-
-        outcome
+        }
     }
 }
 

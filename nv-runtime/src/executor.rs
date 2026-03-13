@@ -63,14 +63,21 @@ use nv_core::metrics::StageMetrics;
 use nv_core::timestamp::{Duration, MonotonicTs};
 use nv_core::TrackId;
 use nv_frame::FrameEnvelope;
+use nv_perception::batch::BatchEntry;
 use nv_perception::{PerceptionArtifacts, Stage, StageContext};
-use nv_temporal::{RetentionPolicy, TemporalStore};
+use nv_temporal::{RetentionPolicy, TemporalStore, TemporalStoreSnapshot};
 use nv_view::{
     CameraMotionState, EpochDecision, EpochPolicy, EpochPolicyContext, MotionPollContext,
     MotionReport, MotionSource, TransitionPhase, ViewSnapshot, ViewState, ViewStateProvider,
 };
 
+use crate::batch::{BatchHandle, BatchSubmitError};
 use crate::output::OutputEnvelope;
+
+/// Minimum interval between `BatchSubmissionRejected` health events
+/// per feed. During sustained overload, rejections are accumulated
+/// and reported in a single coalesced event per window.
+const BATCH_REJECTION_THROTTLE: std::time::Duration = std::time::Duration::from_secs(1);
 use crate::output::FrameInclusion;
 use crate::provenance::{
     Provenance, StageOutcomeCategory, StageProvenance, StageResult, ViewProvenance,
@@ -84,12 +91,20 @@ use crate::provenance::{
 pub(crate) struct PipelineExecutor {
     feed_id: FeedId,
     camera_mode: CameraMode,
+    /// Pre-batch stages (or all stages if no batch point).
     stages: Vec<Box<dyn Stage>>,
+    /// Optional shared batch handle. When present, after pre-batch stages
+    /// the executor submits the frame to the batch coordinator and merges
+    /// the result before running post-batch stages.
+    batch: Option<BatchHandle>,
+    /// Post-batch stages (empty when no batch point).
+    post_batch_stages: Vec<Box<dyn Stage>>,
     temporal: TemporalStore,
     view_state: ViewState,
     view_snapshot: ViewSnapshot,
     view_state_provider: Option<Box<dyn ViewStateProvider>>,
     epoch_policy: Box<dyn EpochPolicy>,
+    /// Metrics for pre-batch stages followed by post-batch stages.
     stage_metrics: Vec<StageMetrics>,
     frames_processed: u64,
     /// Monotonic clock anchor — set at executor creation. Provenance
@@ -105,14 +120,22 @@ pub(crate) struct PipelineExecutor {
     track_id_buf: HashSet<TrackId>,
     /// Reusable buffer for track-ending: IDs of tracks to end.
     ended_buf: Vec<TrackId>,
+    /// Throttle state for BatchSubmissionRejected health events:
+    /// accumulated rejection count since last emission.
+    batch_rejection_count: u64,
+    /// Last time a BatchSubmissionRejected event was emitted.
+    last_batch_rejection_event: Option<Instant>,
 }
 
 impl PipelineExecutor {
     /// Create a new executor with the given stages, policies, and optional
     /// view-state provider.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         feed_id: FeedId,
         stages: Vec<Box<dyn Stage>>,
+        batch: Option<BatchHandle>,
+        post_batch_stages: Vec<Box<dyn Stage>>,
         retention: RetentionPolicy,
         camera_mode: CameraMode,
         view_state_provider: Option<Box<dyn ViewStateProvider>>,
@@ -124,12 +147,14 @@ impl PipelineExecutor {
             CameraMode::Observed => ViewState::observed_initial(),
         };
         let view_snapshot = ViewSnapshot::new(view_state.clone());
-        let stage_count = stages.len();
+        let total_stage_count = stages.len() + post_batch_stages.len();
         let now = Instant::now();
         Self {
             feed_id,
             camera_mode,
             stages,
+            batch,
+            post_batch_stages,
             temporal: TemporalStore::new(retention),
             view_state,
             view_snapshot,
@@ -140,7 +165,7 @@ impl PipelineExecutor {
                     frames_processed: 0,
                     errors: 0,
                 };
-                stage_count
+                total_stage_count
             ],
             frames_processed: 0,
             clock_anchor: now,
@@ -149,55 +174,50 @@ impl PipelineExecutor {
             frame_inclusion,
             track_id_buf: HashSet::new(),
             ended_buf: Vec::new(),
+            batch_rejection_count: 0,
+            last_batch_rejection_event: None,
         }
     }
 
-    /// Call `on_start()` on each stage in order.
+    /// Call `on_start()` on each stage in order (pre-batch then post-batch).
     ///
     /// If any stage fails or panics, previously-started stages are stopped
     /// (best-effort) and the error is returned.
     pub fn start_stages(&mut self) -> Result<(), StageError> {
-        for i in 0..self.stages.len() {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.stages[i].on_start()
-            }));
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    self.rollback_started_stages(i);
-                    return Err(e);
-                }
-                Err(_) => {
-                    let stage_id = self.stages[i].id();
-                    tracing::error!(
-                        feed_id = %self.feed_id,
-                        stage_id = %stage_id,
-                        "stage on_start() panicked"
-                    );
-                    self.rollback_started_stages(i);
-                    return Err(StageError::ProcessingFailed {
-                        stage_id,
-                        detail: "on_start() panicked".into(),
-                    });
-                }
-            }
+        // Start pre-batch stages.
+        if let Err((started, e)) = start_stage_slice(&self.feed_id, &mut self.stages) {
+            self.rollback_started_stages(started, 0);
+            return Err(e);
         }
+
+        // Start post-batch stages.
+        if let Err((started, e)) = start_stage_slice(&self.feed_id, &mut self.post_batch_stages) {
+            self.rollback_started_stages(self.stages.len(), started);
+            return Err(e);
+        }
+
         Ok(())
     }
 
-    /// Best-effort stop of stages `[0..count)`. Used on startup failure.
-    fn rollback_started_stages(&mut self, count: usize) {
-        for s in &mut self.stages[..count] {
+    /// Best-effort stop of pre-batch stages `[0..pre_count)` and
+    /// post-batch stages `[0..post_count)`. Used on startup failure.
+    fn rollback_started_stages(&mut self, pre_count: usize, post_count: usize) {
+        for s in &mut self.stages[..pre_count] {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = s.on_stop();
+            }));
+        }
+        for s in &mut self.post_batch_stages[..post_count] {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _ = s.on_stop();
             }));
         }
     }
 
-    /// Call `on_stop()` on each stage — best-effort, errors and panics
-    /// are logged.
+    /// Call `on_stop()` on each stage (pre-batch then post-batch) — best-effort,
+    /// errors and panics are logged.
     pub fn stop_stages(&mut self) {
-        for stage in &mut self.stages {
+        for stage in self.stages.iter_mut().chain(self.post_batch_stages.iter_mut()) {
             let stage_id = stage.id();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 stage.on_stop()
@@ -223,10 +243,46 @@ impl PipelineExecutor {
         }
     }
 
+    /// Flush any accumulated batch rejection count as a final
+    /// [`HealthEvent::BatchSubmissionRejected`].
+    ///
+    /// Called at lifecycle boundaries (stop/restart) so that short
+    /// rejection bursts that didn't reach the throttle window are
+    /// still surfaced.
+    pub fn flush_batch_rejections(&mut self) -> Option<HealthEvent> {
+        if self.batch_rejection_count == 0 {
+            return None;
+        }
+        let processor_id = self.batch.as_ref()?.processor_id();
+        let count = self.batch_rejection_count;
+        self.batch_rejection_count = 0;
+        self.last_batch_rejection_event = None;
+        Some(HealthEvent::BatchSubmissionRejected {
+            feed_id: self.feed_id,
+            processor_id,
+            dropped_count: count,
+        })
+    }
+
     /// Convert a wall-clock [`Instant`] to a [`MonotonicTs`] anchored to
     /// the executor's creation time.
     fn instant_to_ts(&self, t: Instant) -> MonotonicTs {
         instant_to_ts_impl(self.clock_anchor, self.clock_anchor_ts, t)
+    }
+
+    /// Apply the four motion-related fields that every [`EpochDecision`]
+    /// branch writes, plus bump the version counter.
+    fn apply_motion_fields(
+        &mut self,
+        motion_state: CameraMotionState,
+        motion_source: MotionSource,
+        report: &MotionReport,
+    ) {
+        self.view_state.motion = motion_state;
+        self.view_state.motion_source = motion_source;
+        self.view_state.ptz = report.ptz.clone();
+        self.view_state.global_transform = report.frame_transform.clone();
+        self.view_state.version = self.view_state.version.next();
     }
 
     // ------------------------------------------------------------------
@@ -279,15 +335,14 @@ impl PipelineExecutor {
         let decision = self.epoch_policy.decide(&epoch_ctx);
 
         // Apply the decision to the view state.
+        //
+        // All branches update the same four motion fields + version;
+        // `apply_motion_fields` extracts that common prefix.
+        self.apply_motion_fields(motion_state, motion_source.clone(), &report);
+
         match &decision {
             EpochDecision::Continue => {
-                // Update motion fields, keep epoch.
-                let is_stable = matches!(motion_state, CameraMotionState::Stable);
-                self.view_state.motion = motion_state;
-                self.view_state.motion_source = motion_source.clone();
-                self.view_state.ptz = report.ptz;
-                self.view_state.global_transform = report.frame_transform;
-                self.view_state.version = self.view_state.version.next();
+                let is_stable = matches!(self.view_state.motion, CameraMotionState::Stable);
                 if is_stable {
                     self.view_state.stability_score =
                         (self.view_state.stability_score + 0.1).min(1.0);
@@ -295,15 +350,10 @@ impl PipelineExecutor {
                 }
             }
             EpochDecision::Degrade { reason } => {
-                self.view_state.motion = motion_state;
-                self.view_state.motion_source = motion_source.clone();
-                self.view_state.ptz = report.ptz;
-                self.view_state.global_transform = report.frame_transform;
                 self.view_state.validity = nv_view::ContextValidity::Degraded {
-                    reason: reason.clone(),
+                    reason: *reason,
                 };
                 self.view_state.stability_score = (self.view_state.stability_score - 0.2).max(0.0);
-                self.view_state.version = self.view_state.version.next();
 
                 health_events.push(HealthEvent::ViewDegraded {
                     feed_id: self.feed_id,
@@ -311,20 +361,15 @@ impl PipelineExecutor {
                 });
             }
             EpochDecision::Compensate { reason, transform } => {
-                self.view_state.motion = motion_state;
-                self.view_state.motion_source = motion_source.clone();
-                self.view_state.ptz = report.ptz;
-                self.view_state.global_transform = report.frame_transform;
                 self.view_state.validity = nv_view::ContextValidity::Degraded {
-                    reason: reason.clone(),
+                    reason: *reason,
                 };
                 self.view_state.stability_score = (self.view_state.stability_score - 0.1).max(0.0);
                 let current_epoch = self.view_state.epoch;
-                self.view_state.version = self.view_state.version.next();
 
                 // Apply the compensation transform to existing trajectory data
                 // so previously-recorded positions align with the new view.
-                self.temporal.apply_compensation(&transform, current_epoch);
+                self.temporal.apply_compensation(transform, current_epoch);
 
                 health_events.push(HealthEvent::ViewCompensationApplied {
                     feed_id: self.feed_id,
@@ -334,42 +379,20 @@ impl PipelineExecutor {
             EpochDecision::Segment => {
                 let new_epoch = self.view_state.epoch.next();
                 self.view_state.epoch = new_epoch;
-                self.view_state.motion = motion_state;
-                self.view_state.motion_source = motion_source.clone();
-                self.view_state.ptz = report.ptz;
-                self.view_state.global_transform = report.frame_transform;
                 self.view_state.validity = nv_view::ContextValidity::Valid;
                 self.view_state.stability_score = 0.0;
                 self.view_state.transition = nv_view::TransitionPhase::MoveStart;
-                self.view_state.version = self.view_state.version.next();
 
                 // Update temporal store epoch.
                 self.temporal.set_view_epoch(new_epoch);
 
-                // Notify stages.
-                for stage in &mut self.stages {
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        stage.on_view_epoch_change(new_epoch)
-                    }));
-                    match result {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => {
-                            tracing::warn!(
-                                feed_id = %self.feed_id,
-                                stage_id = %stage.id(),
-                                error = %e,
-                                "stage on_view_epoch_change error (ignored)"
-                            );
-                        }
-                        Err(_) => {
-                            tracing::error!(
-                                feed_id = %self.feed_id,
-                                stage_id = %stage.id(),
-                                "stage on_view_epoch_change panicked (ignored)"
-                            );
-                        }
-                    }
-                }
+                // Notify stages (pre-batch and post-batch).
+                notify_epoch_change(
+                    self.feed_id,
+                    &mut self.stages,
+                    &mut self.post_batch_stages,
+                    new_epoch,
+                );
 
                 health_events.push(HealthEvent::ViewEpochChanged {
                     feed_id: self.feed_id,
@@ -396,7 +419,15 @@ impl PipelineExecutor {
     // Frame processing
     // ------------------------------------------------------------------
 
-    /// Process a single frame through all stages.
+    /// Process a single frame through the pipeline.
+    ///
+    /// Execution order:
+    /// 1. View orchestration (for observed cameras).
+    /// 2. Pre-batch stages (sequential, on feed thread).
+    /// 3. Batch point (if present) — submit to shared coordinator, block
+    ///    until result, merge into artifacts.
+    /// 4. Post-batch stages (sequential, on feed thread).
+    /// 5. Temporal commit + retention.
     ///
     /// Returns `Some((output, health_events))` on success (even if individual
     /// stages produced errors that were recorded).
@@ -419,123 +450,208 @@ impl PipelineExecutor {
         // Snapshot temporal store once for the whole frame.
         let temporal_snapshot = self.temporal.snapshot();
         let mut artifacts = PerceptionArtifacts::empty();
-        let mut stage_provs = Vec::with_capacity(self.stages.len());
-        let mut frame_dropped = false;
-        let mut had_panic = false;
+        let pre_batch_count = self.stages.len();
+        let post_batch_count = self.post_batch_stages.len();
+        let total_prov_capacity = pre_batch_count + post_batch_count + usize::from(self.batch.is_some());
+        let mut stage_provs = Vec::with_capacity(total_prov_capacity);
 
         // Capture clock anchors so we can call the free function inside
         // the mutable-borrow loop over self.stages.
         let anchor = self.clock_anchor;
         let anchor_ts = self.clock_anchor_ts;
 
-        for (i, stage) in self.stages.iter_mut().enumerate() {
-            let stage_id = stage.id();
-            let t_stage_start = Instant::now();
+        // --- Pre-batch stages ---
+        let pre_outcome = run_stage_sequence(
+            &mut self.stages,
+            &mut self.stage_metrics,
+            0,
+            self.feed_id,
+            frame,
+            &mut artifacts,
+            &self.view_snapshot,
+            &temporal_snapshot,
+            &mut stage_provs,
+            &mut health_events,
+            anchor,
+            anchor_ts,
+        );
 
-            let ctx = StageContext {
-                feed_id: self.feed_id,
-                frame,
-                artifacts: &artifacts,
-                view: &self.view_snapshot,
-                temporal: &temporal_snapshot,
-                metrics: &self.stage_metrics[i],
-            };
-
-            let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stage.process(&ctx)));
-
-            let t_stage_end = Instant::now();
-            let stage_latency = Duration::from_nanos(t_stage_start.elapsed().as_nanos() as u64);
-
-            let stage_result = match result {
-                Ok(Ok(output)) => {
-                    artifacts.merge(output);
-                    self.stage_metrics[i].frames_processed += 1;
-                    StageResult::Ok
-                }
-                Ok(Err(e)) => {
-                    self.stage_metrics[i].errors += 1;
-                    health_events.push(HealthEvent::StageError {
-                        feed_id: self.feed_id,
-                        stage_id,
-                        error: e.clone(),
-                    });
-                    let cat = categorize_stage_error(&e);
-                    // Issue 9: drop frame on stage error — skip remaining stages.
-                    frame_dropped = true;
-                    stage_provs.push(StageProvenance {
-                        stage_id,
-                        start_ts: instant_to_ts_impl(anchor, anchor_ts, t_stage_start),
-                        end_ts: instant_to_ts_impl(anchor, anchor_ts, t_stage_end),
-                        latency: stage_latency,
-                        result: cat,
-                    });
-                    break;
-                }
-                Err(_panic) => {
-                    self.stage_metrics[i].errors += 1;
-                    health_events.push(HealthEvent::StagePanic {
-                        feed_id: self.feed_id,
-                        stage_id,
-                    });
-                    had_panic = true;
-                    stage_provs.push(StageProvenance {
-                        stage_id,
-                        start_ts: instant_to_ts_impl(anchor, anchor_ts, t_stage_start),
-                        end_ts: instant_to_ts_impl(anchor, anchor_ts, t_stage_end),
-                        latency: stage_latency,
-                        result: StageResult::Error(StageOutcomeCategory::Panic),
-                    });
-                    break;
-                }
-            };
-
-            stage_provs.push(StageProvenance {
-                stage_id,
-                start_ts: instant_to_ts_impl(anchor, anchor_ts, t_stage_start),
-                end_ts: instant_to_ts_impl(anchor, anchor_ts, t_stage_end),
-                latency: stage_latency,
-                result: stage_result,
-            });
+        // Early exit on pre-batch failure.
+        match pre_outcome {
+            StageSeqOutcome::Panic => {
+                self.frames_processed += 1;
+                return (None, health_events);
+            }
+            StageSeqOutcome::FrameDropped => {
+                self.frames_processed += 1;
+                return (None, health_events);
+            }
+            StageSeqOutcome::Ok => {}
         }
+
+        // --- Batch point ---
+        if let Some(ref batch_handle) = self.batch {
+            let batch_id = batch_handle.processor_id();
+            let t_batch_start = Instant::now();
+
+            let entry = BatchEntry {
+                feed_id: self.feed_id,
+                frame: frame.clone(),
+                view: self.view_snapshot.clone(),
+                output: None,
+            };
+
+            let batch_result = batch_handle.submit_and_wait(entry);
+            let t_batch_end = Instant::now();
+            let batch_latency = Duration::from_nanos(t_batch_start.elapsed().as_nanos() as u64);
+
+            match batch_result {
+                Ok(output) => {
+                    // Flush any accumulated rejection count from a prior
+                    // overload period now that submissions are succeeding
+                    // again (recovery boundary).
+                    if self.batch_rejection_count > 0 {
+                        health_events.push(HealthEvent::BatchSubmissionRejected {
+                            feed_id: self.feed_id,
+                            processor_id: batch_id,
+                            dropped_count: self.batch_rejection_count,
+                        });
+                        self.batch_rejection_count = 0;
+                        self.last_batch_rejection_event = None;
+                    }
+
+                    artifacts.merge(output);
+                    stage_provs.push(StageProvenance {
+                        stage_id: batch_id,
+                        start_ts: instant_to_ts_impl(anchor, anchor_ts, t_batch_start),
+                        end_ts: instant_to_ts_impl(anchor, anchor_ts, t_batch_end),
+                        latency: batch_latency,
+                        result: StageResult::Ok,
+                    });
+                }
+                Err(submit_err) => {
+                    let (result, health) = match submit_err {
+                        BatchSubmitError::QueueFull => {
+                            // Throttle: accumulate rejections, emit at
+                            // most once per second.
+                            self.batch_rejection_count += 1;
+                            let now = Instant::now();
+                            let should_emit = self
+                                .last_batch_rejection_event
+                                .is_none_or(|t| now.duration_since(t) >= BATCH_REJECTION_THROTTLE);
+                            let health = if should_emit {
+                                let count = self.batch_rejection_count;
+                                self.batch_rejection_count = 0;
+                                self.last_batch_rejection_event = Some(now);
+                                Some(HealthEvent::BatchSubmissionRejected {
+                                    feed_id: self.feed_id,
+                                    processor_id: batch_id,
+                                    dropped_count: count,
+                                })
+                            } else {
+                                None
+                            };
+                            (
+                                StageResult::Error(StageOutcomeCategory::ResourceExhausted),
+                                health,
+                            )
+                        }
+                        BatchSubmitError::ProcessingFailed(ref e) => {
+                            // The coordinator already emitted the
+                            // authoritative BatchError with the real
+                            // batch_size — do NOT emit a duplicate here.
+                            (
+                                categorize_stage_error(e),
+                                None,
+                            )
+                        }
+                        BatchSubmitError::CoordinatorShutdown => {
+                            (
+                                StageResult::Error(StageOutcomeCategory::DependencyUnavailable),
+                                Some(HealthEvent::StageError {
+                                    feed_id: self.feed_id,
+                                    stage_id: batch_id,
+                                    error: StageError::ProcessingFailed {
+                                        stage_id: batch_id,
+                                        detail: "batch coordinator shut down".into(),
+                                    },
+                                }),
+                            )
+                        }
+                        BatchSubmitError::Timeout => {
+                            (
+                                StageResult::Error(StageOutcomeCategory::ProcessingFailed),
+                                Some(HealthEvent::StageError {
+                                    feed_id: self.feed_id,
+                                    stage_id: batch_id,
+                                    error: StageError::ProcessingFailed {
+                                        stage_id: batch_id,
+                                        detail: "batch response timeout".into(),
+                                    },
+                                }),
+                            )
+                        }
+                    };
+
+                    if let Some(evt) = health {
+                        health_events.push(evt);
+                    }
+                    stage_provs.push(StageProvenance {
+                        stage_id: batch_id,
+                        start_ts: instant_to_ts_impl(anchor, anchor_ts, t_batch_start),
+                        end_ts: instant_to_ts_impl(anchor, anchor_ts, t_batch_end),
+                        latency: batch_latency,
+                        result,
+                    });
+
+                    // Batch failure drops the frame — skip post-batch stages.
+                    self.frames_processed += 1;
+                    return (None, health_events);
+                }
+            }
+        }
+
+        // --- Post-batch stages ---
+        let post_outcome = run_stage_sequence(
+            &mut self.post_batch_stages,
+            &mut self.stage_metrics,
+            pre_batch_count,
+            self.feed_id,
+            frame,
+            &mut artifacts,
+            &self.view_snapshot,
+            &temporal_snapshot,
+            &mut stage_provs,
+            &mut health_events,
+            anchor,
+            anchor_ts,
+        );
 
         self.frames_processed += 1;
 
         // If a stage panicked, return health events but no output.
         // The caller (worker) will decide whether to restart.
-        if had_panic {
-            return (None, health_events);
-        }
-
-        // Issue 9: frame was dropped due to stage error — emit no output.
-        if frame_dropped {
-            return (None, health_events);
-        }
-
-        // --- Temporal commit (Issue 6) ---
-        //
-        // Tracks in the output envelope are **stage-authoritative**: they
-        // reflect exactly what the perception stages produced, regardless
-        // of temporal-store admission. If the store rejects a track
-        // (e.g., capacity limit), a health event is emitted but the track
-        // still appears in the output. Consumers who need to know which
-        // tracks have temporal history should consult the store snapshot.
-        let now_ts = frame.ts();
-        let current_epoch = self.view_state.epoch;
-
-        for track in &artifacts.tracks {
-            if !self.temporal.commit_track(track, now_ts, current_epoch) {
-                health_events.push(HealthEvent::TrackAdmissionRejected {
-                    feed_id: self.feed_id,
-                    track_id: track.id,
-                });
+        match post_outcome {
+            StageSeqOutcome::Panic => {
+                return (None, health_events);
             }
+            StageSeqOutcome::FrameDropped => {
+                // Issue 9: frame was dropped due to stage error — emit no output.
+                return (None, health_events);
+            }
+            StageSeqOutcome::Ok => {}
         }
 
         // --- Track ending (authoritative set semantics) ---
-        // When at least one stage produced authoritative track output,
-        // any track previously in the temporal store but absent from
-        // this frame's track set is considered normally ended.
+        //
+        // End absent tracks *before* committing incoming tracks so that
+        // cap space freed by ended tracks is available for admission.
+        // Without this ordering, ID churn can cause spurious
+        // TrackAdmissionRejected health events when the store is near
+        // capacity.
+        let now_ts = frame.ts();
+        let current_epoch = self.view_state.epoch;
+
         if artifacts.tracks_authoritative {
             self.track_id_buf.clear();
             self.track_id_buf.extend(artifacts.tracks.iter().map(|t| t.id));
@@ -549,6 +665,32 @@ impl PipelineExecutor {
             for id in &self.ended_buf {
                 self.temporal.end_track(id);
             }
+        }
+
+        // --- Temporal commit ---
+        //
+        // Tracks in the output envelope are **stage-authoritative**: they
+        // reflect exactly what the perception stages produced, regardless
+        // of temporal-store admission. If the store rejects a track
+        // (e.g., capacity limit), a health event is emitted but the track
+        // still appears in the output. Consumers who need to know which
+        // tracks have temporal history should consult the store snapshot.
+        let mut track_rejections = 0u32;
+        let track_total = artifacts.tracks.len() as u32;
+        for track in &artifacts.tracks {
+            if !self.temporal.commit_track(track, now_ts, current_epoch) {
+                track_rejections += 1;
+            }
+        }
+        let admission = crate::output::AdmissionSummary {
+            admitted: track_total - track_rejections,
+            rejected: track_rejections,
+        };
+        if track_rejections > 0 {
+            health_events.push(HealthEvent::TrackAdmissionRejected {
+                feed_id: self.feed_id,
+                rejected_count: track_rejections,
+            });
         }
 
         // --- Retention enforcement ---
@@ -587,6 +729,7 @@ impl PipelineExecutor {
                 FrameInclusion::Always => Some(frame.clone()),
                 FrameInclusion::Never => None,
             },
+            admission,
         };
 
         (Some(output), health_events)
@@ -637,6 +780,169 @@ impl PipelineExecutor {
 fn instant_to_ts_impl(anchor: Instant, anchor_ts: MonotonicTs, t: Instant) -> MonotonicTs {
     let elapsed = t.duration_since(anchor);
     MonotonicTs::from_nanos(anchor_ts.as_nanos() + elapsed.as_nanos() as u64)
+}
+
+/// Start each stage in `stages` in order, with panic safety.
+///
+/// Returns `Ok(())` if all stages started. On error, returns
+/// `(started_count, error)` — the caller rolls back `[0..started_count)`.
+fn start_stage_slice(
+    feed_id: &FeedId,
+    stages: &mut [Box<dyn Stage>],
+) -> Result<(), (usize, StageError)> {
+    for i in 0..stages.len() {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stages[i].on_start()
+        }));
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err((i, e)),
+            Err(_) => {
+                let stage_id = stages[i].id();
+                tracing::error!(
+                    feed_id = %feed_id,
+                    stage_id = %stage_id,
+                    "stage on_start() panicked"
+                );
+                return Err((i, StageError::ProcessingFailed {
+                    stage_id,
+                    detail: "on_start() panicked".into(),
+                }));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Notify all stages (pre-batch + post-batch) of a view epoch change,
+/// with panic safety. Errors and panics are logged but do not propagate.
+fn notify_epoch_change(
+    feed_id: FeedId,
+    pre: &mut [Box<dyn Stage>],
+    post: &mut [Box<dyn Stage>],
+    epoch: nv_view::ViewEpoch,
+) {
+    for stage in pre.iter_mut().chain(post.iter_mut()) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stage.on_view_epoch_change(epoch)
+        }));
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    feed_id = %feed_id,
+                    stage_id = %stage.id(),
+                    error = %e,
+                    "stage on_view_epoch_change error (ignored)"
+                );
+            }
+            Err(_) => {
+                tracing::error!(
+                    feed_id = %feed_id,
+                    stage_id = %stage.id(),
+                    "stage on_view_epoch_change panicked (ignored)"
+                );
+            }
+        }
+    }
+}
+
+/// Outcome of [`run_stage_sequence`]: indicates whether execution
+/// should continue to the next pipeline phase.
+enum StageSeqOutcome {
+    /// All stages ran successfully.
+    Ok,
+    /// A stage error caused the frame to be dropped.
+    FrameDropped,
+    /// A stage panicked.
+    Panic,
+}
+
+/// Run a sequence of stages, collecting artifacts, provenance, and
+/// health events. Shared between pre-batch and post-batch execution.
+fn run_stage_sequence(
+    stages: &mut [Box<dyn Stage>],
+    metrics: &mut [StageMetrics],
+    metrics_offset: usize,
+    feed_id: FeedId,
+    frame: &FrameEnvelope,
+    artifacts: &mut PerceptionArtifacts,
+    view_snapshot: &ViewSnapshot,
+    temporal_snapshot: &TemporalStoreSnapshot,
+    stage_provs: &mut Vec<StageProvenance>,
+    health_events: &mut Vec<HealthEvent>,
+    anchor: Instant,
+    anchor_ts: MonotonicTs,
+) -> StageSeqOutcome {
+    for (i, stage) in stages.iter_mut().enumerate() {
+        let stage_id = stage.id();
+        let midx = metrics_offset + i;
+        let t_stage_start = Instant::now();
+
+        let ctx = StageContext {
+            feed_id,
+            frame,
+            artifacts,
+            view: view_snapshot,
+            temporal: temporal_snapshot,
+            metrics: &metrics[midx],
+        };
+
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stage.process(&ctx)));
+
+        let t_stage_end = Instant::now();
+        let stage_latency = Duration::from_nanos(t_stage_start.elapsed().as_nanos() as u64);
+
+        let stage_result = match result {
+            Ok(Ok(output)) => {
+                artifacts.merge(output);
+                metrics[midx].frames_processed += 1;
+                StageResult::Ok
+            }
+            Ok(Err(e)) => {
+                metrics[midx].errors += 1;
+                health_events.push(HealthEvent::StageError {
+                    feed_id,
+                    stage_id,
+                    error: e.clone(),
+                });
+                stage_provs.push(StageProvenance {
+                    stage_id,
+                    start_ts: instant_to_ts_impl(anchor, anchor_ts, t_stage_start),
+                    end_ts: instant_to_ts_impl(anchor, anchor_ts, t_stage_end),
+                    latency: stage_latency,
+                    result: categorize_stage_error(&e),
+                });
+                return StageSeqOutcome::FrameDropped;
+            }
+            Err(_panic) => {
+                metrics[midx].errors += 1;
+                health_events.push(HealthEvent::StagePanic {
+                    feed_id,
+                    stage_id,
+                });
+                stage_provs.push(StageProvenance {
+                    stage_id,
+                    start_ts: instant_to_ts_impl(anchor, anchor_ts, t_stage_start),
+                    end_ts: instant_to_ts_impl(anchor, anchor_ts, t_stage_end),
+                    latency: stage_latency,
+                    result: StageResult::Error(StageOutcomeCategory::Panic),
+                });
+                return StageSeqOutcome::Panic;
+            }
+        };
+
+        stage_provs.push(StageProvenance {
+            stage_id,
+            start_ts: instant_to_ts_impl(anchor, anchor_ts, t_stage_start),
+            end_ts: instant_to_ts_impl(anchor, anchor_ts, t_stage_end),
+            latency: stage_latency,
+            result: stage_result,
+        });
+    }
+
+    StageSeqOutcome::Ok
 }
 
 /// Map a [`StageError`] variant to the provenance category.
@@ -710,6 +1016,8 @@ mod tests {
     fn make_executor() -> PipelineExecutor {
         PipelineExecutor::new(
             FeedId::new(1),
+            Vec::new(),
+            None,
             Vec::new(),
             RetentionPolicy {
                 max_track_age: Duration::from_secs(5),
@@ -876,6 +1184,8 @@ mod tests {
         let mut exec = PipelineExecutor::new(
             FeedId::new(1),
             vec![Box::new(ManyTracksStage)],
+            None,
+            Vec::new(),
             RetentionPolicy {
                 max_track_age: Duration::from_secs(5),
                 max_observations_per_track: 10,
@@ -899,16 +1209,22 @@ mod tests {
         );
         let (_output, health_events) = exec.process_frame(&frame);
 
-        // 5 tracks, cap 3: first 3 admitted, last 2 rejected.
+        // 5 tracks, cap 3: first 3 admitted, last 2 rejected (coalesced into one event).
         let rejection_events: Vec<_> = health_events
             .iter()
             .filter(|e| matches!(e, HealthEvent::TrackAdmissionRejected { .. }))
             .collect();
         assert_eq!(
             rejection_events.len(),
-            2,
-            "should emit TrackAdmissionRejected for each rejected track, got {rejection_events:?}",
+            1,
+            "should emit one coalesced TrackAdmissionRejected event, got {rejection_events:?}",
         );
+        match &rejection_events[0] {
+            HealthEvent::TrackAdmissionRejected { rejected_count, .. } => {
+                assert_eq!(*rejected_count, 2, "expected 2 rejected tracks");
+            }
+            _ => unreachable!(),
+        }
 
         // The temporal store should be at exactly the cap.
         assert_eq!(exec.track_count(), 3);
@@ -939,6 +1255,8 @@ mod tests {
         let mut exec = PipelineExecutor::new(
             FeedId::new(1),
             vec![Box::new(MetadataStage)],
+            None,
+            Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Fixed,
             None,
@@ -1136,6 +1454,8 @@ mod tests {
                 track_a.clone(),
                 track_b.clone(),
             ]))],
+            None,
+            Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Fixed,
             None,
@@ -1198,6 +1518,8 @@ mod tests {
             FeedId::new(1),
             // NoOpStage returns StageOutput::empty() — tracks: None.
             vec![Box::new(nv_test_util::mock_stage::NoOpStage::new("noop"))],
+            None,
+            Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Fixed,
             None,
@@ -1243,6 +1565,8 @@ mod tests {
             vec![Box::new(AuthoritativeTrackStage::new(vec![
                 track_a.clone(),
             ]))],
+            None,
+            Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Fixed,
             None,
@@ -1310,6 +1634,8 @@ mod tests {
         let mut exec = PipelineExecutor::new(
             FeedId::new(1),
             Vec::new(),
+            None,
+            Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Fixed,
             None,
@@ -1357,6 +1683,8 @@ mod tests {
 
         let mut exec = PipelineExecutor::new(
             FeedId::new(1),
+            Vec::new(),
+            None,
             Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Observed,
@@ -1416,6 +1744,8 @@ mod tests {
 
         let mut exec = PipelineExecutor::new(
             FeedId::new(1),
+            Vec::new(),
+            None,
             Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Observed,
@@ -1498,6 +1828,8 @@ mod tests {
                 Box::new(OrderStage { name: "second" }),
                 Box::new(OrderStage { name: "third" }),
             ],
+            None,
+            Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Fixed,
             None,
@@ -1532,6 +1864,8 @@ mod tests {
                 Box::new(MockDetectorStage::new("det", 3)),
                 Box::new(MockTrackerStage::new("trk")),
             ],
+            None,
+            Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Fixed,
             None,
@@ -1600,6 +1934,8 @@ mod tests {
                 Box::new(MockTemporalStage::new("temporal")),
                 Box::new(RecordingSink),
             ],
+            None,
+            Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Fixed,
             None,
@@ -1679,6 +2015,8 @@ mod tests {
                 Box::new(FailingStage::new("bad_stage")),
                 Box::new(NeverReached),
             ],
+            None,
+            Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Fixed,
             None,
@@ -1718,6 +2056,8 @@ mod tests {
                 Box::new(nv_test_util::mock_stage::NoOpStage::new("ok")),
                 Box::new(FailingStage::new("fail")),
             ],
+            None,
+            Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Fixed,
             None,
@@ -1750,6 +2090,8 @@ mod tests {
                 Box::new(MockDetectorStage::new("det", 2)),
                 Box::new(MockTrackerStage::new("trk")),
             ],
+            None,
+            Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Fixed,
             None,
@@ -1805,6 +2147,8 @@ mod tests {
         let mut exec = PipelineExecutor::new(
             FeedId::new(1),
             vec![Box::new(CounterStage { call_count: 0 })],
+            None,
+            Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Fixed,
             None,
@@ -1845,6 +2189,8 @@ mod tests {
                 Box::new(MockDetectorStage::new("det", 2)),
                 Box::new(MockTrackerStage::new("trk")),
             ],
+            None,
+            Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Fixed,
             None,
@@ -1857,6 +2203,8 @@ mod tests {
                 Box::new(MockDetectorStage::new("det", 5)),
                 Box::new(MockTrackerStage::new("trk")),
             ],
+            None,
+            Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Fixed,
             None,
@@ -1920,6 +2268,8 @@ mod tests {
         let mut exec = PipelineExecutor::new(
             FeedId::new(1),
             pipeline.into_stages(),
+            None,
+            Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Fixed,
             None,
@@ -1968,6 +2318,8 @@ mod tests {
     fn frame_inclusion_always_includes_frame() {
         let mut exec = PipelineExecutor::new(
             FeedId::new(1),
+            Vec::new(),
+            None,
             Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Fixed,
@@ -2035,6 +2387,8 @@ mod tests {
         let mut exec = PipelineExecutor::new(
             FeedId::new(1),
             stages,
+            None,
+            Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Fixed,
             None,
@@ -2056,6 +2410,8 @@ mod tests {
         let mut exec = PipelineExecutor::new(
             FeedId::new(1),
             stages,
+            None,
+            Vec::new(),
             RetentionPolicy::default(),
             CameraMode::Fixed,
             None,
@@ -2065,5 +2421,67 @@ mod tests {
         exec.start_stages().unwrap();
         // Should not panic — catches the panic internally.
         exec.stop_stages();
+    }
+
+    #[test]
+    fn flush_batch_rejections_returns_none_when_empty() {
+        let mut exec = make_executor();
+        assert!(exec.flush_batch_rejections().is_none());
+    }
+
+    #[test]
+    fn flush_batch_rejections_emits_accumulated_count() {
+        use crate::batch::{BatchConfig, BatchCoordinator};
+        use nv_core::health::HealthEvent;
+        use nv_perception::batch::{BatchEntry, BatchProcessor};
+
+        struct Noop;
+        impl BatchProcessor for Noop {
+            fn id(&self) -> StageId { StageId("noop_flush") }
+            fn process(&mut self, _: &mut [BatchEntry]) -> Result<(), nv_core::error::StageError> { Ok(()) }
+        }
+
+        let (health_tx, _) = tokio::sync::broadcast::channel::<HealthEvent>(4);
+        let coord = BatchCoordinator::start(
+            Box::new(Noop),
+            BatchConfig {
+                max_batch_size: 1,
+                max_latency: std::time::Duration::from_millis(10),
+                queue_capacity: None,
+            },
+            health_tx,
+        ).unwrap();
+        let handle = coord.handle();
+
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(42),
+            Vec::new(),
+            Some(handle),
+            Vec::new(),
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
+        );
+
+        // Simulate accumulated rejections.
+        exec.batch_rejection_count = 5;
+
+        let evt = exec.flush_batch_rejections();
+        assert!(evt.is_some(), "should have flushed accumulated rejections");
+        match evt.unwrap() {
+            HealthEvent::BatchSubmissionRejected { feed_id, processor_id, dropped_count } => {
+                assert_eq!(feed_id, FeedId::new(42));
+                assert_eq!(processor_id, StageId("noop_flush"));
+                assert_eq!(dropped_count, 5);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        // After flush, count should be zero.
+        assert!(exec.flush_batch_rejections().is_none());
+
+        coord.shutdown();
     }
 }

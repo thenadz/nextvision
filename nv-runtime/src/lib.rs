@@ -27,6 +27,7 @@
 //! - **[`RuntimeHandle`]** — cloneable control handle (add/remove feeds, subscribe, shutdown).
 //! - **[`FeedConfig`]** / **[`FeedConfigBuilder`]** — per-feed configuration.
 //! - **[`FeedHandle`]** — handle to a running feed (health, metrics, pause/resume).
+//! - **[`QueueTelemetry`]** — source/sink queue depth and capacity snapshot.
 //! - **[`OutputEnvelope`]** — structured, provenanced output for each processed frame.
 //! - **[`OutputSink`]** — user-implementable trait for receiving outputs.
 //! - **[`Provenance`]** — full audit trail of stage and view-system decisions.
@@ -79,11 +80,66 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! ## Batch inference across feeds
+//!
+//! Multiple feeds can share a single GPU-accelerated batch processor via
+//! [`BatchCoordinator`](batch::BatchCoordinator). Create a batch handle
+//! once, then reference it from each feed's pipeline.
+//!
+//! ```rust,no_run
+//! use nv_runtime::*;
+//! use nv_core::*;
+//! use nv_perception::batch::{BatchProcessor, BatchEntry};
+//! use std::time::Duration;
+//!
+//! # struct MyDetector;
+//! # impl BatchProcessor for MyDetector {
+//! #     fn id(&self) -> StageId { StageId("detector") }
+//! #     fn process(&mut self, items: &mut [BatchEntry]) -> Result<(), StageError> {
+//! #         for item in items.iter_mut() { item.output = Some(nv_perception::StageOutput::empty()); }
+//! #         Ok(())
+//! #     }
+//! # }
+//! # struct MySink;
+//! # impl OutputSink for MySink { fn emit(&self, _: SharedOutput) {} }
+//!
+//! # fn example() -> Result<(), NvError> {
+//! let runtime = Runtime::builder().build()?;
+//!
+//! // Create a shared batch coordinator.
+//! let batch = runtime.create_batch(
+//!     Box::new(MyDetector),
+//!     BatchConfig {
+//!         max_batch_size: 8,
+//!         max_latency: Duration::from_millis(50),
+//!         queue_capacity: None,
+//!     },
+//! )?;
+//!
+//! // Build per-feed pipelines referencing the shared batch.
+//! let pipeline = FeedPipeline::builder()
+//!     .batch(batch.clone()).expect("single batch point")
+//!     .build();
+//!
+//! let _feed = runtime.add_feed(
+//!     FeedConfig::builder()
+//!         .source(SourceSpec::rtsp("rtsp://cam/stream"))
+//!         .camera_mode(CameraMode::Fixed)
+//!         .feed_pipeline(pipeline)
+//!         .output_sink(Box::new(MySink))
+//!         .build()?
+//! )?;
+//! # Ok(())
+//! # }
+//! ```
 
 pub mod backpressure;
+pub mod batch;
 pub(crate) mod executor;
 pub mod feed;
 pub mod output;
+pub mod pipeline;
 pub mod provenance;
 pub(crate) mod queue;
 pub mod runtime;
@@ -92,8 +148,10 @@ pub(crate) mod worker;
 
 // Re-export key types at crate root.
 pub use backpressure::BackpressurePolicy;
-pub use feed::{FeedConfig, FeedConfigBuilder, FeedHandle};
-pub use output::{FrameInclusion, OutputEnvelope, OutputSink, SharedOutput};
+pub use batch::{BatchConfig, BatchHandle, BatchMetrics};
+pub use feed::{FeedConfig, FeedConfigBuilder, FeedHandle, QueueTelemetry};
+pub use output::{AdmissionSummary, FrameInclusion, OutputEnvelope, OutputSink, SharedOutput};
+pub use pipeline::{FeedPipeline, FeedPipelineBuilder, PipelineError};
 pub use provenance::{
     Provenance, StageOutcomeCategory, StageProvenance, StageResult, ViewProvenance,
 };

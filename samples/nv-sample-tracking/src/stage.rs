@@ -1,47 +1,57 @@
 use nv_core::error::StageError;
 use nv_core::id::StageId;
-use nv_perception::stage::{Stage, StageCategory, StageContext, StageOutput};
+use nv_perception::stage::{Stage, StageCapabilities, StageCategory, StageContext, StageOutput};
 use nv_view::ViewEpoch;
 
-use crate::config::OcSortConfig;
+use crate::config::TrackerConfig;
 use crate::ocsort::OcSortTracker;
 
-/// OC-SORT multi-object tracker stage.
+/// Sample multi-object tracker stage.
 ///
 /// Consumes [`DetectionSet`](nv_perception::DetectionSet) from upstream
-/// detector stages and produces [`Track`](nv_perception::Track) outputs
-/// using the OC-SORT algorithm.
+/// detector stages and produces [`Track`](nv_perception::Track) outputs.
+///
+/// This is a reference implementation using an observation-centric SORT
+/// variant. Library users will typically substitute their own tracker.
 ///
 /// # Usage
 ///
 /// ```no_run
-/// use nv_byo_ocsort::{OcSortConfig, OcSortStage};
+/// use nv_sample_tracking::{TrackerConfig, TrackerStage};
 ///
-/// let stage = OcSortStage::new(OcSortConfig::default());
+/// let stage = TrackerStage::new(TrackerConfig::default());
 /// // Add to a StagePipeline after a detector stage.
 /// ```
-pub struct OcSortStage {
+pub struct TrackerStage {
     tracker: OcSortTracker,
 }
 
-impl OcSortStage {
-    const STAGE_ID: StageId = StageId("byo-ocsort");
+impl TrackerStage {
+    const STAGE_ID: StageId = StageId("sample-tracker");
 
-    /// Create a new OC-SORT tracker stage with the given configuration.
-    pub fn new(config: OcSortConfig) -> Self {
+    /// Create a new tracker stage with the given configuration.
+    pub fn new(config: TrackerConfig) -> Self {
         Self {
             tracker: OcSortTracker::new(config),
         }
     }
 }
 
-impl Stage for OcSortStage {
+impl Stage for TrackerStage {
     fn id(&self) -> StageId {
         Self::STAGE_ID
     }
 
     fn category(&self) -> StageCategory {
         StageCategory::Association
+    }
+
+    fn capabilities(&self) -> Option<StageCapabilities> {
+        Some(
+            StageCapabilities::new()
+                .consumes_detections()
+                .produces_tracks(),
+        )
     }
 
     fn on_view_epoch_change(&mut self, _new_epoch: ViewEpoch) -> Result<(), StageError> {

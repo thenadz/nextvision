@@ -13,6 +13,7 @@ use nv_frame::{FrameEnvelope, PixelFormat};
 /// - `width`, `height` — frame dimensions.
 /// - `r`, `g`, `b` — fill color.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn solid_rgb(
     feed_id: FeedId,
     seq: u64,

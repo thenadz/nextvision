@@ -35,9 +35,10 @@ use crate::decode::DecoderSelection;
 /// This controls the `video/x-raw,format=...` caps set on the appsink.
 /// The `videoconvert` element handles the conversion from whatever the
 /// decoder outputs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum OutputFormat {
     /// 8-bit RGB (3 bytes per pixel).
+    #[default]
     Rgb,
     /// 8-bit BGR (3 bytes per pixel, OpenCV-native ordering).
     #[allow(dead_code)] // used in gst-backend format negotiation
@@ -45,12 +46,6 @@ pub(crate) enum OutputFormat {
     /// 8-bit RGBA (4 bytes per pixel).
     #[allow(dead_code)] // used in gst-backend format negotiation
     Rgba,
-}
-
-impl Default for OutputFormat {
-    fn default() -> Self {
-        Self::Rgb
-    }
 }
 
 impl OutputFormat {
