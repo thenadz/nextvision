@@ -318,6 +318,11 @@ impl eframe::App for NvApp {
             .iter()
             .map(|h| (h.id(), h.uptime()))
             .collect();
+        let decode_statuses: Vec<(FeedId, Option<nv_runtime::DecodeStatus>)> = self
+            .feed_handles
+            .iter()
+            .map(|h| (h.id(), h.decode_status()))
+            .collect();
         let batch_metrics: Option<BatchMetrics> =
             self.batch_handle.as_ref().map(|b| b.metrics());
         let runtime_uptime = self.runtime_handle.uptime();
@@ -335,7 +340,7 @@ impl eframe::App for NvApp {
                 ui.separator();
 
                 // Per-feed telemetry compact display.
-                for (_idx, fid) in feed_order.iter().enumerate() {
+                for fid in feed_order.iter() {
                     if let Some(t) = state.telemetry.get(fid) {
                         let qt = queue_snapshots
                             .iter()
@@ -397,6 +402,29 @@ impl eframe::App for NvApp {
                                                 .size(9.0)
                                                 .color(egui::Color32::GRAY),
                                         ).on_hover_text("Feed uptime since start");
+                                    }
+                                    // Decode method.
+                                    let ds = decode_statuses
+                                        .iter()
+                                        .find(|(id, _)| id == fid)
+                                        .and_then(|(_, s)| s.as_ref());
+                                    if let Some(status) = ds {
+                                        let (label, colour) = match status.outcome {
+                                            nv_runtime::DecodeOutcome::Hardware => {
+                                                (format!("HW:{}", status.detail), egui::Color32::from_rgb(100, 220, 100))
+                                            }
+                                            nv_runtime::DecodeOutcome::Software => {
+                                                (format!("SW:{}", status.detail), egui::Color32::from_rgb(220, 200, 80))
+                                            }
+                                            nv_runtime::DecodeOutcome::Unknown => {
+                                                ("decode:?".to_string(), egui::Color32::GRAY)
+                                            }
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(label)
+                                                .size(9.0)
+                                                .color(colour),
+                                        ).on_hover_text("Decode method selected by the media backend");
                                     }
                                 });
                                 // Stage breakdown.
@@ -506,7 +534,7 @@ impl eframe::App for NvApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let available = ui.available_size();
-            let rows = (feed_count + cols - 1) / cols;
+            let rows = feed_count.div_ceil(cols);
             let panel_w = available.x / cols as f32;
             let panel_h = available.y / rows.max(1) as f32;
 

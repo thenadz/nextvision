@@ -38,7 +38,7 @@ use nv_core::health::{HealthEvent, StopReason};
 use nv_core::id::FeedId;
 use nv_core::metrics::FeedMetrics;
 use nv_frame::FrameEnvelope;
-use nv_media::ingress::{FrameSink, HealthSink, MediaIngress, MediaIngressFactory, SourceStatus};
+use nv_media::ingress::{FrameSink, HealthSink, MediaIngress, MediaIngressFactory, IngressOptions, SourceStatus};
 use tokio::sync::broadcast;
 
 use crate::backpressure::BackpressurePolicy;
@@ -85,6 +85,10 @@ pub(crate) struct FeedSharedState {
     /// start or restart). Used by `FeedHandle::uptime()` to report
     /// session-scoped uptime.
     pub session_started_at: Mutex<Instant>,
+    /// Last confirmed decode status from the media backend.
+    /// Written once per session when the stream starts; read by
+    /// `FeedHandle::decode_status()`.
+    pub decode_status: Mutex<Option<(nv_core::health::DecodeOutcome, String)>>,
 }
 
 impl FeedSharedState {
@@ -105,6 +109,7 @@ impl FeedSharedState {
             sink_occupancy: Arc::new(AtomicUsize::new(0)),
             sink_capacity: AtomicUsize::new(0),
             session_started_at: Mutex::new(Instant::now()),
+            decode_status: Mutex::new(None),
         }
     }
 
@@ -142,6 +147,14 @@ impl FeedSharedState {
             .lock()
             .map(|t| t.elapsed())
             .unwrap_or(Duration::ZERO)
+    }
+
+    /// The last confirmed decode status, if known.
+    pub fn decode_status(&self) -> Option<(nv_core::health::DecodeOutcome, String)> {
+        self.decode_status
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
     }
 
     /// Request shutdown and wake the worker if it is paused or waiting on
@@ -535,6 +548,7 @@ pub(crate) fn spawn_feed_worker(
                 lag_detector,
                 had_external_subscribers: false,
                 sink_queue_capacity: config.sink_queue_capacity,
+                decode_preference: config.decode_preference,
             };
             worker.run();
         })
@@ -571,6 +585,8 @@ struct FeedWorker {
     had_external_subscribers: bool,
     /// Per-feed output sink queue capacity (bounded channel to sink thread).
     sink_queue_capacity: usize,
+    /// Decode preference — plumbed through to the media ingress factory.
+    decode_preference: nv_media::DecodePreference,
 }
 
 /// Drop guard that ensures `FeedSharedState::alive` is set to `false`
@@ -635,12 +651,15 @@ impl FeedWorker {
                 bp_throttle,
             };
 
-            let source = self.factory.create(
+            let mut options = IngressOptions::new(
                 self.feed_id,
                 self.source_spec.clone(),
                 self.reconnect_policy.clone(),
-                self.ptz_provider.clone(),
-            );
+            ).with_decode_preference(self.decode_preference);
+            if let Some(ref ptz) = self.ptz_provider {
+                options = options.with_ptz_provider(Arc::clone(ptz));
+            }
+            let source = self.factory.create(options);
 
             let mut source = match source {
                 Ok(s) => s,
@@ -835,6 +854,9 @@ impl FeedWorker {
         let initial = source.tick();
         let mut next_tick_hint: Option<Duration> = initial.next_tick;
 
+        // Sync initial decode status.
+        Self::sync_decode_status(source, &self.shared);
+
         let mut sink_bp = SinkBpThrottle::new();
 
         let reason = self.run_loop_inner(queue, source, sink_worker, &mut sink_bp, &mut next_tick_hint);
@@ -910,6 +932,7 @@ impl FeedWorker {
                     // bus polling and reconnection.
                     let outcome = source.tick();
                     *next_tick_hint = outcome.next_tick;
+                    Self::sync_decode_status(source, &self.shared);
                     if outcome.status == SourceStatus::Stopped {
                         return ExitReason::SourceStopped;
                     }
@@ -972,6 +995,7 @@ impl FeedWorker {
             // cleanly.
             let outcome = source.tick();
             *next_tick_hint = outcome.next_tick;
+            Self::sync_decode_status(source, &self.shared);
 
             // Subscriber transition: external subscribers were present on
             // a prior frame but are gone now. Realign the lag detector to
@@ -986,6 +1010,18 @@ impl FeedWorker {
             // decide whether to restart based on the restart policy.
             if had_panic {
                 return ExitReason::StagePanic;
+            }
+        }
+    }
+
+    /// Copy the latest decode status from the media source into shared state.
+    ///
+    /// This is a cheap check: the source returns a cached `Option` and
+    /// the write only happens when the value actually changes.
+    fn sync_decode_status(source: &dyn MediaIngress, shared: &FeedSharedState) {
+        if let Some(status) = source.decode_status() {
+            if let Ok(mut guard) = shared.decode_status.lock() {
+                *guard = Some(status);
             }
         }
     }

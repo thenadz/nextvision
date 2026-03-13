@@ -28,7 +28,7 @@ use nv_core::config::{RtspTransport, SourceSpec};
 use nv_core::error::MediaError;
 use nv_frame::PixelFormat;
 
-use crate::decode::DecoderSelection;
+use crate::decode::{DecoderSelection, SelectedDecoderSlot};
 
 /// Target pixel format for the appsink output.
 ///
@@ -178,6 +178,9 @@ impl PipelineBuilder {
         // best decoder. For `ForceSoftware`, we set `force-sw-decoders` on
         // decodebin. For `Named`, we try the specific element first and fall
         // back to decodebin on failure.
+        let selected_decoder: SelectedDecoderSlot =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+
         let (decode_element, uses_decodebin) = match &self.decoder {
             DecoderSelection::Auto => {
                 let db = gst::ElementFactory::make("decodebin")
@@ -196,9 +199,81 @@ impl PipelineBuilder {
                     })?;
                 (db, true)
             }
+            DecoderSelection::ForceHardware => {
+                let db = gst::ElementFactory::make("decodebin")
+                    .build()
+                    .map_err(|e| MediaError::Unsupported {
+                        detail: format!("failed to create decodebin (force-hw): {e}"),
+                    })?;
+                // Reject software video decoders at the autoplug level so
+                // decodebin only considers hardware decoders. If none can
+                // handle the stream, decodebin will post an error — which is
+                // the correct behaviour for RequireHardware.
+                //
+                // Classification is delegated to `is_hardware_video_decoder`
+                // (the single source of truth shared with capability discovery).
+                db.connect("autoplug-select", false, |values| {
+                    use crate::decode::is_hardware_video_decoder;
+
+                    // values: &[decodebin, pad, caps, factory]
+                    let factory: gst::ElementFactory = match values.get(3)
+                        .and_then(|v| v.get::<gst::ElementFactory>().ok())
+                    {
+                        Some(f) => f,
+                        None => {
+                            tracing::warn!(
+                                "autoplug-select: malformed callback payload, \
+                                 allowing element (safe default)",
+                            );
+                            return Some(0i32.to_value()); // TRY (safe default)
+                        }
+                    };
+                    let klass: String = factory.metadata("klass").unwrap_or_default().into();
+                    let name = factory.name();
+
+                    // Non-video-decoder elements (demuxers, parsers, etc.)
+                    // are always allowed through.
+                    if !is_hardware_video_decoder(&klass, name.as_str()) {
+                        let is_video_decoder =
+                            klass.contains("Decoder") && klass.contains("Video");
+                        if !is_video_decoder {
+                            return Some(0i32.to_value()); // TRY
+                        }
+                        tracing::debug!(
+                            element = %name,
+                            klass = %klass,
+                            "autoplug-select: skipping software video decoder \
+                             (ForceHardware mode)",
+                        );
+                        return Some(2i32.to_value()); // SKIP
+                    }
+                    tracing::debug!(
+                        element = %name,
+                        klass = %klass,
+                        "autoplug-select: accepting hardware video decoder",
+                    );
+                    Some(0i32.to_value()) // TRY
+                });
+                (db, true)
+            }
             DecoderSelection::Named(name) => {
                 match gst::ElementFactory::make(name.as_str()).build() {
-                    Ok(elem) => (elem, false),
+                    Ok(elem) => {
+                        // Populate selected decoder directly — no decodebin.
+                        if let Some(factory) = elem.factory() {
+                            use crate::decode::{is_hardware_video_decoder, SelectedDecoderInfo};
+                            let klass: String =
+                                factory.metadata("klass").unwrap_or_default().into();
+                            let is_hw = is_hardware_video_decoder(&klass, name.as_str());
+                            if let Ok(mut slot) = selected_decoder.lock() {
+                                *slot = Some(SelectedDecoderInfo {
+                                    element_name: name.clone(),
+                                    is_hardware: is_hw,
+                                });
+                            }
+                        }
+                        (elem, false)
+                    }
                     Err(_) => {
                         tracing::warn!(
                             decoder = %name,
@@ -214,6 +289,42 @@ impl PipelineBuilder {
                 }
             }
         };
+
+        // Wire `element-added` on decodebin to capture the effective
+        // video decoder. For non-decodebin pipelines (Named) the slot
+        // is populated directly in the match arm above.
+        if uses_decodebin {
+            let slot_clone = std::sync::Arc::clone(&selected_decoder);
+            decode_element.connect("element-added", false, move |values| {
+                use crate::decode::{is_hardware_video_decoder, SelectedDecoderInfo};
+                let element: gst::Element = match values.get(1)
+                    .and_then(|v| v.get::<gst::Element>().ok())
+                {
+                    Some(e) => e,
+                    None => {
+                        tracing::warn!(
+                            "element-added: malformed callback payload, ignoring",
+                        );
+                        return None;
+                    }
+                };
+                if let Some(factory) = element.factory() {
+                    let klass: String =
+                        factory.metadata("klass").unwrap_or_default().into();
+                    if klass.contains("Decoder") && klass.contains("Video") {
+                        let name = factory.name().to_string();
+                        let is_hw = is_hardware_video_decoder(&klass, &name);
+                        if let Ok(mut slot) = slot_clone.lock() {
+                            *slot = Some(SelectedDecoderInfo {
+                                element_name: name,
+                                is_hardware: is_hw,
+                            });
+                        }
+                    }
+                }
+                None
+            });
+        }
 
         // --- Videoconvert + Appsink ---
         let videoconvert = gst::ElementFactory::make("videoconvert")
@@ -335,6 +446,7 @@ impl PipelineBuilder {
             appsink,
             bus,
             output_format: self.output_format,
+            selected_decoder,
         })
     }
 
@@ -358,6 +470,10 @@ pub(crate) struct BuiltPipeline {
     pub appsink: gstreamer_app::AppSink,
     pub bus: gstreamer::Bus,
     pub output_format: OutputFormat,
+    /// Shared slot that captures the effective video decoder element.
+    /// Populated by `element-added` signal on decodebin, or directly
+    /// for named decoders.
+    pub selected_decoder: SelectedDecoderSlot,
 }
 
 /// Stub for non-GStreamer builds (never constructed).

@@ -816,15 +816,15 @@ fn start_stage_slice(
     feed_id: &FeedId,
     stages: &mut [Box<dyn Stage>],
 ) -> Result<(), (usize, StageError)> {
-    for i in 0..stages.len() {
+    for (i, stage) in stages.iter_mut().enumerate() {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            stages[i].on_start()
+            stage.on_start()
         }));
         match result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err((i, e)),
             Err(_) => {
-                let stage_id = stages[i].id();
+                let stage_id = stage.id();
                 tracing::error!(
                     feed_id = %feed_id,
                     stage_id = %stage_id,
@@ -886,6 +886,7 @@ enum StageSeqOutcome {
 
 /// Run a sequence of stages, collecting artifacts, provenance, and
 /// health events. Shared between pre-batch and post-batch execution.
+#[allow(clippy::too_many_arguments)]
 fn run_stage_sequence(
     stages: &mut [Box<dyn Stage>],
     metrics: &mut [StageMetrics],

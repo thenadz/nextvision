@@ -8,6 +8,9 @@
 //! - **[`MediaIngress`]** — public trait contract for media source lifecycle.
 //! - **[`FrameSink`]** — callback trait for delivering decoded frames.
 //! - **[`MediaIngressFactory`]** — factory for creating ingress instances.
+//! - **[`IngressOptions`]** — config bundle for factory creation.
+//! - **[`DecodePreference`]** — user-facing hardware vs. software decode selection.
+//! - **[`DecodeCapabilities`]** / **[`discover_decode_capabilities()`]** — lightweight capability probing.
 //! - **[`MediaSource`]** — GStreamer-backed implementation of `MediaIngress`.
 //! - **[`PtzTelemetry`]** — optional PTZ metadata extracted from stream.
 //! - **Source management** — constructing GStreamer pipelines from [`SourceSpec`](nv_core::SourceSpec).
@@ -39,11 +42,11 @@
 //! |---|---|---|
 //! | [`ingress`] | **public** | Trait contracts (`MediaIngress`, `FrameSink`, `MediaIngressFactory`) |
 //! | [`source`] | **public** | `MediaSource` — concrete implementation with reconnection |
+//! | [`decode`] | **public** | `DecodePreference`, capability discovery (`pub(crate)` internals) |
 //! | `backend` | `pub(crate)` | `GstSession` — safe adapter around GStreamer pipeline |
 //! | `bridge` | `pub(crate)` | GstSample → `FrameEnvelope` conversion |
 //! | `bus` | `pub(crate)` | Bus message types and mapping to `MediaEvent` |
 //! | `clock` | `pub(crate)` | PTS tracking and discontinuity detection |
-//! | `decode` | `pub(crate)` | Codec handling and decoder selection |
 //! | `event` | `pub(crate)` | Internal `MediaEvent` enum |
 //! | `pipeline` | `pub(crate)` | Pipeline builder and configuration |
 
@@ -57,7 +60,7 @@ pub(crate) mod backend;
 pub(crate) mod bridge;
 pub(crate) mod bus;
 pub(crate) mod clock;
-pub(crate) mod decode;
+pub mod decode;
 pub(crate) mod event;
 pub(crate) mod pipeline;
 pub(crate) mod reconnect;
@@ -66,7 +69,10 @@ pub(crate) mod reconnect;
 pub use ingress::PtzProvider;
 pub use ingress::SourceStatus;
 pub use ingress::TickOutcome;
+pub use ingress::IngressOptions;
 pub use bridge::PtzTelemetry;
+pub use decode::DecodePreference;
+pub use decode::{DecodeCapabilities, DecodeDecisionInfo, DecodeOutcome, discover_decode_capabilities};
 pub use ingress::{FrameSink, HealthSink, MediaIngress, MediaIngressFactory};
 pub use factory::{DefaultMediaFactory, GstMediaIngressFactory};
 pub use source::MediaSource;

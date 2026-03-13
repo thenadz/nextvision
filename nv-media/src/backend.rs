@@ -39,7 +39,7 @@ use nv_core::id::FeedId;
 
 use crate::bus::BusMessage;
 use crate::clock::PtsTracker;
-use crate::decode::DecoderSelection;
+use crate::decode::{DecoderSelection, SelectedDecoderInfo, SelectedDecoderSlot};
 use crate::event::MediaEvent;
 use crate::ingress::{FrameSink, PtzProvider};
 use crate::pipeline::{OutputFormat, PipelineBuilder};
@@ -107,6 +107,10 @@ pub(crate) struct GstSession {
     /// Monotonic frame sequence counter (shared with appsink callback).
     #[allow(dead_code)] // held to keep Arc alive for appsink callback
     frame_seq: Arc<AtomicU64>,
+    /// Shared slot that captures the effective video decoder element.
+    /// Populated by the pipeline's `element-added` signal callback
+    /// (for decodebin) or directly (for named decoders).
+    selected_decoder: SelectedDecoderSlot,
 
     // GStreamer handles — only present when the feature is enabled.
     #[cfg(feature = "gst-backend")]
@@ -286,6 +290,7 @@ impl GstSession {
             config,
             state: SessionState::Running,
             frame_seq,
+            selected_decoder: built.selected_decoder,
             pipeline: built.pipeline,
             bus: built.bus,
             _appsink: built.appsink,
@@ -322,6 +327,7 @@ impl GstSession {
             config,
             state: SessionState::Running,
             frame_seq: Arc::new(AtomicU64::new(0)),
+            selected_decoder: Arc::new(Mutex::new(None)),
             #[cfg(feature = "gst-backend")]
             pipeline: {
                 gstreamer::init().unwrap();
@@ -492,12 +498,27 @@ impl GstSession {
         Ok(())
     }
 
+    /// Query the decoder element selected by the backend, if known.
+    ///
+    /// Returns `None` if the decoder hasn't been identified yet (e.g.,
+    /// RTSP negotiation is still in progress) or if the pipeline does
+    /// not report decoder identity (custom fragments).
+    pub fn selected_decoder(&self) -> Option<SelectedDecoderInfo> {
+        self.selected_decoder.lock().ok().and_then(|g| g.clone())
+    }
 }
 
 #[cfg(test)]
 impl GstSession {
     pub fn state(&self) -> SessionState {
         self.state
+    }
+
+    /// Set the selected decoder info for testing.
+    pub fn set_selected_decoder(&self, info: Option<SelectedDecoderInfo>) {
+        if let Ok(mut slot) = self.selected_decoder.lock() {
+            *slot = info;
+        }
     }
 }
 

@@ -18,6 +18,7 @@ use nv_core::id::FeedId;
 use nv_frame::FrameEnvelope;
 
 use crate::bridge::PtzTelemetry;
+use crate::decode::DecodePreference;
 
 /// Reported lifecycle state of a media source after a [`tick()`](MediaIngress::tick).
 ///
@@ -195,6 +196,18 @@ pub trait MediaIngress: Send + 'static {
 
     /// The feed ID this ingress is associated with.
     fn feed_id(&self) -> FeedId;
+
+    /// The effective decode status after backend negotiation.
+    ///
+    /// Returns `None` if no decode decision has been made yet (the stream
+    /// has not started, or the backend does not report decoder identity).
+    ///
+    /// The tuple contains `(outcome, backend_detail)` where
+    /// `backend_detail` is an opaque diagnostic string (e.g., the
+    /// GStreamer element name). Do not match on its contents.
+    fn decode_status(&self) -> Option<(nv_core::health::DecodeOutcome, String)> {
+        None
+    }
 }
 
 /// Receives decoded frames from a [`MediaIngress`] source.
@@ -238,6 +251,75 @@ pub trait FrameSink: Send + Sync + 'static {
     fn wake(&self) {}
 }
 
+/// Configuration bundle passed to [`MediaIngressFactory::create()`].
+///
+/// Replaces positional arguments with a named struct so new options can
+/// be added without breaking the trait signature.
+///
+/// Construct via [`IngressOptions::new()`] and the `with_*` builder
+/// methods. The struct is `#[non_exhaustive]`, so adding fields in a
+/// future release is not a semver break.
+///
+/// # Examples
+///
+/// ```
+/// use nv_core::config::{ReconnectPolicy, SourceSpec};
+/// use nv_core::id::FeedId;
+/// use nv_media::{DecodePreference, IngressOptions};
+///
+/// let options = IngressOptions::new(
+///         FeedId::new(1),
+///         SourceSpec::rtsp("rtsp://cam/stream"),
+///         ReconnectPolicy::default(),
+///     )
+///     .with_decode_preference(DecodePreference::CpuOnly);
+/// ```
+#[non_exhaustive]
+pub struct IngressOptions {
+    /// Feed identifier.
+    pub feed_id: FeedId,
+    /// Source specification (RTSP URL, file path, etc.).
+    pub spec: SourceSpec,
+    /// Reconnection policy for the source.
+    pub reconnect: ReconnectPolicy,
+    /// Optional PTZ telemetry provider.
+    pub ptz_provider: Option<Arc<dyn PtzProvider>>,
+    /// Decode preference — controls hardware vs. software decode selection.
+    pub decode_preference: DecodePreference,
+}
+
+impl IngressOptions {
+    /// Create a new options bundle with required fields.
+    ///
+    /// Optional fields default to:
+    /// - `ptz_provider`: `None`
+    /// - `decode_preference`: [`DecodePreference::Auto`]
+    #[must_use]
+    pub fn new(feed_id: FeedId, spec: SourceSpec, reconnect: ReconnectPolicy) -> Self {
+        Self {
+            feed_id,
+            spec,
+            reconnect,
+            ptz_provider: None,
+            decode_preference: DecodePreference::default(),
+        }
+    }
+
+    /// Attach a PTZ telemetry provider.
+    #[must_use]
+    pub fn with_ptz_provider(mut self, provider: Arc<dyn PtzProvider>) -> Self {
+        self.ptz_provider = Some(provider);
+        self
+    }
+
+    /// Set the decode preference.
+    #[must_use]
+    pub fn with_decode_preference(mut self, pref: DecodePreference) -> Self {
+        self.decode_preference = pref;
+        self
+    }
+}
+
 /// Factory for creating [`MediaIngress`] instances from a source spec.
 ///
 /// The runtime holds one factory and calls `create()` for each new feed.
@@ -245,11 +327,11 @@ pub trait FrameSink: Send + Sync + 'static {
 /// produces backend-specific media sources. Custom implementations can
 /// substitute alternative backends or test doubles.
 pub trait MediaIngressFactory: Send + Sync + 'static {
-    /// Create a new media ingress for the given feed and source specification.
+    /// Create a new media ingress for the given feed configuration.
     ///
-    /// An optional [`PtzProvider`] can be supplied for feeds that have
-    /// external PTZ telemetry (e.g., ONVIF). The provider is queried on
-    /// every decoded frame so that PTZ metadata can be attached.
+    /// All feed-level options are bundled in [`IngressOptions`], which
+    /// includes an optional [`PtzProvider`] for feeds that have external
+    /// PTZ telemetry (e.g., ONVIF).
     ///
     /// # Errors
     ///
@@ -257,10 +339,7 @@ pub trait MediaIngressFactory: Send + Sync + 'static {
     /// the backend cannot handle the requested format.
     fn create(
         &self,
-        feed_id: FeedId,
-        spec: SourceSpec,
-        reconnect: ReconnectPolicy,
-        ptz_provider: Option<Arc<dyn PtzProvider>>,
+        options: IngressOptions,
     ) -> Result<Box<dyn MediaIngress>, MediaError>;
 }
 

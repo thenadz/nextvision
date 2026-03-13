@@ -12,7 +12,7 @@ use nv_core::geom::BBox;
 use nv_core::id::StageId;
 use nv_perception::detection::{Detection, DetectionSet};
 use nv_perception::{Stage, StageContext, StageOutput};
-use nv_runtime::{FeedConfig, OutputEnvelope, OutputSink, Runtime};
+use nv_runtime::{DecodePreference, FeedConfig, OutputEnvelope, OutputSink, Runtime};
 
 use std::sync::Arc;
 
@@ -107,6 +107,8 @@ fn main() -> Result<(), nv_core::error::NvError> {
             Box::new(MockClassifierStage),
         ])
         .output_sink(Box::new(DetectionLogger))
+        // Force CPU-only decode in CI or headless environments.
+        .decode_preference(DecodePreference::CpuOnly)
         .build()?;
 
     let handle = runtime.add_feed(config)?;

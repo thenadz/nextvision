@@ -1,11 +1,49 @@
-//! Health events and stop reasons.
+//! Health events, stop reasons, and decode outcome classification.
 //!
 //! [`HealthEvent`] is the primary mechanism for observing runtime behavior.
 //! Events are broadcast to subscribers via a channel. They cover source
 //! lifecycle, stage errors, feed restarts, backpressure, and view-state changes.
+//!
+//! [`DecodeOutcome`] provides a backend-neutral classification of which
+//! decoder class is in effect (hardware, software, or unknown).
 
 use crate::error::{MediaError, StageError};
 use crate::id::{FeedId, StageId};
+
+// ---------------------------------------------------------------------------
+// Decode outcome — backend-neutral decoder classification
+// ---------------------------------------------------------------------------
+
+/// Backend-neutral classification of the effective decoder.
+///
+/// After the media backend negotiates a decoder for a stream, this
+/// categorises the result without exposing backend element names, GPU
+/// memory modes, or inference-framework details.
+///
+/// Used in [`HealthEvent::DecodeDecision`] and the internal
+/// `DecodeDecisionInfo` diagnostic report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DecodeOutcome {
+    /// A hardware-accelerated video decoder is in use.
+    Hardware,
+    /// A software (CPU-only) video decoder is in use.
+    Software,
+    /// The backend could not determine which decoder class is active.
+    ///
+    /// This can happen with custom pipeline fragments or when the
+    /// backend does not expose decoder identity.
+    Unknown,
+}
+
+impl std::fmt::Display for DecodeOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Hardware => f.write_str("Hardware"),
+            Self::Software => f.write_str("Software"),
+            Self::Unknown => f.write_str("Unknown"),
+        }
+    }
+}
 
 /// A health event emitted by the runtime.
 ///
@@ -118,6 +156,32 @@ pub enum HealthEvent {
     /// For non-looping file sources this is terminal: the feed stops
     /// with [`StopReason::EndOfStream`] rather than restarting.
     SourceEos { feed_id: FeedId },
+
+    /// A decode decision was made for a feed's video stream.
+    ///
+    /// Emitted once per session start (not per frame) when the backend
+    /// identifies which decoder was selected for the stream. Provides
+    /// visibility into hardware vs. software decode selection without
+    /// exposing backend-specific element names in required fields.
+    ///
+    /// `detail` is a backend-specific diagnostic string (e.g., the
+    /// GStreamer element name). It is intended for logging — do not
+    /// match on its contents.
+    DecodeDecision {
+        feed_id: FeedId,
+        /// Hardware, Software, or Unknown.
+        outcome: DecodeOutcome,
+        /// The user-requested decode preference that was in effect.
+        preference: String,
+        /// Whether the adaptive fallback cache overrode the requested
+        /// preference for this session.
+        fallback_active: bool,
+        /// Human-readable reason for fallback (populated when
+        /// `fallback_active` is `true`).
+        fallback_reason: Option<String>,
+        /// Backend-specific diagnostic detail (element name etc.).
+        detail: String,
+    },
 
     /// The per-feed [`OutputSink`] panicked during `emit()`.
     ///

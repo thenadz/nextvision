@@ -6,11 +6,9 @@
 
 use std::sync::Arc;
 
-use nv_core::config::{ReconnectPolicy, SourceSpec};
 use nv_core::error::MediaError;
-use nv_core::id::FeedId;
 
-use crate::ingress::{HealthSink, MediaIngress, MediaIngressFactory, PtzProvider};
+use crate::ingress::{HealthSink, MediaIngress, MediaIngressFactory, IngressOptions};
 use crate::source::MediaSource;
 
 /// Default [`MediaIngressFactory`] that creates GStreamer-backed [`MediaSource`] instances.
@@ -54,16 +52,18 @@ impl Default for GstMediaIngressFactory {
 impl MediaIngressFactory for GstMediaIngressFactory {
     fn create(
         &self,
-        feed_id: FeedId,
-        spec: SourceSpec,
-        reconnect: ReconnectPolicy,
-        ptz_provider: Option<Arc<dyn PtzProvider>>,
+        options: IngressOptions,
     ) -> Result<Box<dyn MediaIngress>, MediaError> {
-        let mut source = MediaSource::new(feed_id, spec, reconnect);
+        let mut source = MediaSource::new(
+            options.feed_id,
+            options.spec,
+            options.reconnect,
+            options.decode_preference,
+        );
         if let Some(ref hs) = self.health_sink {
             source.set_health_sink(Arc::clone(hs));
         }
-        if let Some(ptz) = ptz_provider {
+        if let Some(ptz) = options.ptz_provider {
             source.set_ptz_provider(ptz);
         }
         Ok(Box::new(source))

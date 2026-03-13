@@ -6,11 +6,11 @@ use super::*;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use nv_core::config::{CameraMode, ReconnectPolicy, SourceSpec};
+use nv_core::config::{CameraMode, SourceSpec};
 use nv_core::health::StopReason;
 use nv_core::id::StageId;
 use nv_frame::PixelFormat;
-use nv_media::ingress::{FrameSink, MediaIngress, MediaIngressFactory, PtzProvider};
+use nv_media::ingress::{FrameSink, IngressOptions, MediaIngress, MediaIngressFactory};
 use nv_perception::{Stage, StageContext, StageOutput};
 use nv_test_util::mock_stage::{NoOpStage, PanicStage};
 use std::sync::atomic::Ordering;
@@ -115,14 +115,11 @@ impl MockFactory {
 impl MediaIngressFactory for MockFactory {
     fn create(
         &self,
-        feed_id: FeedId,
-        spec: SourceSpec,
-        _reconnect: ReconnectPolicy,
-        _ptz: Option<Arc<dyn PtzProvider>>,
+        options: IngressOptions,
     ) -> Result<Box<dyn MediaIngress>, nv_core::error::MediaError> {
         Ok(Box::new(MockIngress {
-            feed_id,
-            spec,
+            feed_id: options.feed_id,
+            spec: options.spec,
             frame_count: self.frame_count,
             fail_on_start: self.fail_on_start,
             frame_delay: self.frame_delay,
@@ -1781,14 +1778,11 @@ struct TickStoppedFactory {
 impl MediaIngressFactory for TickStoppedFactory {
     fn create(
         &self,
-        feed_id: FeedId,
-        spec: SourceSpec,
-        _reconnect: ReconnectPolicy,
-        _ptz: Option<Arc<dyn PtzProvider>>,
+        options: IngressOptions,
     ) -> Result<Box<dyn MediaIngress>, nv_core::error::MediaError> {
         Ok(Box::new(TickStoppedIngress {
-            feed_id,
-            spec,
+            feed_id: options.feed_id,
+            spec: options.spec,
             frame_count: self.frame_count,
             stopped_after_eos: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }))
@@ -1975,14 +1969,11 @@ struct ReconnectingFactory {
 impl MediaIngressFactory for ReconnectingFactory {
     fn create(
         &self,
-        feed_id: FeedId,
-        spec: SourceSpec,
-        _reconnect: ReconnectPolicy,
-        _ptz: Option<Arc<dyn PtzProvider>>,
+        options: IngressOptions,
     ) -> Result<Box<dyn MediaIngress>, nv_core::error::MediaError> {
         Ok(Box::new(ReconnectingIngress {
-            feed_id,
-            spec,
+            feed_id: options.feed_id,
+            spec: options.spec,
             backoff: self.backoff,
             frames_before_reconnect: self.frames_before_reconnect,
             ticks_before_stop: self.ticks_before_stop,
@@ -2440,14 +2431,11 @@ struct TickHintNoFrameFactory;
 impl MediaIngressFactory for TickHintNoFrameFactory {
     fn create(
         &self,
-        feed_id: FeedId,
-        spec: SourceSpec,
-        _reconnect: ReconnectPolicy,
-        _ptz: Option<Arc<dyn PtzProvider>>,
+        options: IngressOptions,
     ) -> Result<Box<dyn MediaIngress>, nv_core::error::MediaError> {
         Ok(Box::new(TickHintNoFrameIngress {
-            feed_id,
-            spec,
+            feed_id: options.feed_id,
+            spec: options.spec,
             ticks: std::sync::atomic::AtomicU32::new(0),
         }))
     }
@@ -2478,4 +2466,49 @@ fn startup_liveness_tick_hint_no_frames() {
     assert!(!feed.is_alive(), "feed should have stopped");
 
     runtime.shutdown().unwrap();
+}
+
+// ===========================================================================
+// DecodePreference builder propagation tests
+// ===========================================================================
+
+#[test]
+fn feed_config_builder_default_decode_preference_is_auto() {
+    let (sink, _) = CountingSink::new();
+    let config = FeedConfig::builder()
+        .source(SourceSpec::rtsp("rtsp://mock/stream"))
+        .camera_mode(CameraMode::Fixed)
+        .stages(vec![Box::new(NoOpStage::new("noop"))])
+        .output_sink(Box::new(sink))
+        .build()
+        .expect("valid config");
+    assert_eq!(config.decode_preference, nv_media::DecodePreference::Auto);
+}
+
+#[test]
+fn feed_config_builder_sets_cpu_only() {
+    let (sink, _) = CountingSink::new();
+    let config = FeedConfig::builder()
+        .source(SourceSpec::rtsp("rtsp://mock/stream"))
+        .camera_mode(CameraMode::Fixed)
+        .stages(vec![Box::new(NoOpStage::new("noop"))])
+        .output_sink(Box::new(sink))
+        .decode_preference(nv_media::DecodePreference::CpuOnly)
+        .build()
+        .expect("valid config");
+    assert_eq!(config.decode_preference, nv_media::DecodePreference::CpuOnly);
+}
+
+#[test]
+fn feed_config_builder_sets_require_hardware() {
+    let (sink, _) = CountingSink::new();
+    let config = FeedConfig::builder()
+        .source(SourceSpec::rtsp("rtsp://mock/stream"))
+        .camera_mode(CameraMode::Fixed)
+        .stages(vec![Box::new(NoOpStage::new("noop"))])
+        .output_sink(Box::new(sink))
+        .decode_preference(nv_media::DecodePreference::RequireHardware)
+        .build()
+        .expect("valid config");
+    assert_eq!(config.decode_preference, nv_media::DecodePreference::RequireHardware);
 }

@@ -150,7 +150,7 @@ pub(crate) mod worker;
 // Re-export key types at crate root.
 pub use backpressure::BackpressurePolicy;
 pub use batch::{BatchConfig, BatchHandle, BatchMetrics};
-pub use feed::{FeedConfig, FeedConfigBuilder, FeedHandle, QueueTelemetry};
+pub use feed::{DecodeStatus, FeedConfig, FeedConfigBuilder, FeedHandle, QueueTelemetry};
 pub use output::{AdmissionSummary, FrameInclusion, OutputEnvelope, OutputSink, SharedOutput};
 pub use pipeline::{FeedPipeline, FeedPipelineBuilder, PipelineError};
 pub use provenance::{
@@ -161,3 +161,9 @@ pub use shutdown::{RestartPolicy, RestartTrigger};
 
 // Re-export validation types from nv-perception for convenience.
 pub use nv_perception::{ValidationMode, ValidationWarning};
+
+// Re-export decode types from nv-media for convenience.
+pub use nv_media::{DecodePreference, DecodeCapabilities, discover_decode_capabilities};
+
+// Re-export health types from nv-core for convenience.
+pub use nv_core::health::{DecodeOutcome, HealthEvent};

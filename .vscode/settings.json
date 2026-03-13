@@ -4,6 +4,6 @@
     "cargo check": true,
     "cargo fmt": true,
     "cargo bench": true,
-    "tee": true
+    "cargo clippy": true
   }
 }

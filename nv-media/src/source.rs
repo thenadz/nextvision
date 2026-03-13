@@ -42,14 +42,13 @@ use std::time::{Duration, Instant};
 
 use nv_core::config::{ReconnectPolicy, SourceSpec};
 use nv_core::error::MediaError;
-use nv_core::health::HealthEvent;
+use nv_core::health::{DecodeOutcome, HealthEvent};
 use nv_core::id::FeedId;
 
 use crate::backend::{EventQueue, GstSession, SessionConfig};
-use crate::ingress::PtzProvider;
-use crate::decode::DecoderSelection;
+use crate::decode::{DecodePreference, HwFailureTracker};
 use crate::event::MediaEvent;
-use crate::ingress::{FrameSink, HealthSink, MediaIngress, SourceStatus};
+use crate::ingress::{FrameSink, HealthSink, MediaIngress, PtzProvider, SourceStatus};
 use crate::pipeline::OutputFormat;
 use crate::reconnect::ReconnectTracker;
 
@@ -123,12 +122,35 @@ pub struct MediaSource {
     /// once the stream is confirmed flowing. If it expires, a reconnection
     /// is forced.
     liveness_deadline: Option<Instant>,
+    /// User-facing decode preference — mapped to internal `DecoderSelection`
+    /// when building each session.
+    decode_preference: DecodePreference,
+    /// Cached capability probe (populated on first use to avoid repeated
+    /// registry scans on reconnect).
+    cached_capabilities: Option<crate::decode::DecodeCapabilities>,
+    /// Adaptive fallback cache — tracks consecutive hardware decoder
+    /// failures to prevent reconnect thrash for `PreferHardware` feeds.
+    hw_failure_tracker: HwFailureTracker,
+    /// Last confirmed decode decision — set once at StreamStarted.
+    last_decode_status: Option<(DecodeOutcome, String)>,
+    /// Whether decoder verification has run for the current session.
+    /// Reset to `false` on each `create_session()` / `create_session_stub()`.
+    /// Set to `true` after `verify_decoder_selection()` completes.
+    decoder_verified: bool,
+    /// Fallback reason captured during session creation (if the adaptive
+    /// fallback cache overrode the decode preference).
+    session_fallback_reason: Option<String>,
 }
 
 impl MediaSource {
     /// Create a new media source (does not start the pipeline).
     #[must_use]
-    pub fn new(feed_id: FeedId, spec: SourceSpec, reconnect_policy: ReconnectPolicy) -> Self {
+    pub fn new(
+        feed_id: FeedId,
+        spec: SourceSpec,
+        reconnect_policy: ReconnectPolicy,
+        decode_preference: DecodePreference,
+    ) -> Self {
         Self {
             feed_id,
             spec,
@@ -141,6 +163,12 @@ impl MediaSource {
             event_queue: Arc::new(std::sync::Mutex::new(VecDeque::new())),
             reconnect_deadline: None,
             liveness_deadline: None,
+            decode_preference,
+            cached_capabilities: None,
+            hw_failure_tracker: HwFailureTracker::new(),
+            last_decode_status: None,
+            decoder_verified: false,
+            session_fallback_reason: None,
         }
     }
 
@@ -201,10 +229,68 @@ impl MediaSource {
     /// On success the session is stored and PTS tracking is reset.
     /// On failure the session field is left as `None`.
     fn create_session(&mut self) -> Result<(), MediaError> {
+        // Lazily probe and cache capabilities so reconnect cycles
+        // don't repeatedly scan the GStreamer registry.
+        let caps = self
+            .cached_capabilities
+            .get_or_insert_with(crate::decode::discover_decode_capabilities);
+
+        // RequireHardware fail-fast: reject before constructing the pipeline.
+        if self.decode_preference.requires_hardware() && !caps.hardware_decode_available {
+            let detail = if caps.backend_available {
+                "DecodePreference::RequireHardware — no hardware video decoder found in backend registry"
+            } else {
+                "DecodePreference::RequireHardware — media backend is not available"
+            };
+            return Err(MediaError::Unsupported {
+                detail: detail.into(),
+            });
+        }
+
+        // PreferHardware: log when falling back to software so operators
+        // can distinguish it from Auto.
+        if self.decode_preference.prefers_hardware() && !caps.hardware_decode_available {
+            tracing::info!(
+                feed_id = %self.feed_id,
+                "DecodePreference::PreferHardware — no hardware decoder detected, \
+                 falling back to software decode",
+            );
+        }
+
+        // Consult adaptive fallback cache — may temporarily override
+        // selection for PreferHardware after repeated hw failures.
+        let (selection, fallback_reason) =
+            match self.hw_failure_tracker.adjust_selection(self.decode_preference) {
+                Some((adjusted, reason)) => {
+                    tracing::info!(
+                        feed_id = %self.feed_id,
+                        reason = %reason,
+                        "adaptive fallback: overriding decoder selection",
+                    );
+                    (adjusted, Some(reason))
+                }
+                None => (self.decode_preference.to_selection(), None),
+            };
+
+        // Persist fallback context so verify_decoder_selection() can
+        // include it in the DecodeDecision health event.
+        self.session_fallback_reason = fallback_reason.clone();
+        // Mark decoder as not yet verified for this new session.
+        self.decoder_verified = false;
+
+        tracing::info!(
+            feed_id = %self.feed_id,
+            preference = ?self.decode_preference,
+            selection = ?selection,
+            hw_available = caps.hardware_decode_available,
+            fallback_active = fallback_reason.is_some(),
+            "creating session with decoder selection",
+        );
+
         let config = SessionConfig {
             feed_id: self.feed_id,
             spec: self.spec.clone(),
-            decoder: DecoderSelection::Auto,
+            decoder: selection,
             output_format: OutputFormat::default(),
             ptz_provider: self.ptz_provider.clone(),
         };
@@ -236,11 +322,13 @@ impl MediaSource {
         let config = SessionConfig {
             feed_id: self.feed_id,
             spec: self.spec.clone(),
-            decoder: DecoderSelection::Auto,
+            decoder: self.decode_preference.to_selection(),
             output_format: OutputFormat::default(),
             ptz_provider: None,
         };
         self.session = Some(GstSession::start_stub(config));
+        self.decoder_verified = false;
+        self.session_fallback_reason = None;
     }
 
     /// Initiate a reconnection cycle.
@@ -272,6 +360,69 @@ impl MediaSource {
         Ok(delay)
     }
 
+    /// Verify the decoder selected by the backend and emit diagnostics.
+    ///
+    /// Called once per session when `StreamStarted` confirms the stream is
+    /// flowing. Returns `Some(delay)` if post-selection enforcement fails
+    /// (e.g., `RequireHardware` with a software or unknown decoder), which
+    /// signals the caller to schedule a reconnection.
+    fn verify_decoder_selection(&mut self) -> Option<Duration> {
+        let selected = self.session.as_ref().and_then(|s| s.selected_decoder());
+        let outcome = match &selected {
+            Some(info) if info.is_hardware => DecodeOutcome::Hardware,
+            Some(_) => DecodeOutcome::Software,
+            None => DecodeOutcome::Unknown,
+        };
+        let element_name = selected
+            .as_ref()
+            .map(|s| s.element_name.as_str())
+            .unwrap_or("unknown");
+
+        // Post-selection enforcement for RequireHardware.
+        // Reject both Software and Unknown — fail closed when we cannot
+        // confirm hardware acceleration.
+        if self.decode_preference.requires_hardware()
+            && matches!(outcome, DecodeOutcome::Software | DecodeOutcome::Unknown)
+        {
+            let detail = format!(
+                "RequireHardware: effective decoder '{}' is {} — aborting",
+                element_name, outcome,
+            );
+            tracing::error!(feed_id = %self.feed_id, detail = %detail);
+            self.hw_failure_tracker.record_failure();
+            return self.disconnect_and_reconnect(MediaError::Unsupported { detail });
+        }
+
+        // Track success for adaptive fallback cache.
+        self.hw_failure_tracker.record_success();
+
+        let fallback_active = self.session_fallback_reason.is_some();
+
+        tracing::info!(
+            feed_id = %self.feed_id,
+            preference = ?self.decode_preference,
+            outcome = ?outcome,
+            decoder = %element_name,
+            fallback_active,
+            "decode decision verified",
+        );
+
+        let detail_string = element_name.to_string();
+        self.last_decode_status = Some((outcome, detail_string.clone()));
+        self.decoder_verified = true;
+
+        self.emit_health(HealthEvent::DecodeDecision {
+            feed_id: self.feed_id,
+            outcome,
+            preference: format!("{:?}", self.decode_preference),
+            fallback_active,
+            fallback_reason: self.session_fallback_reason.clone(),
+            detail: detail_string,
+        });
+
+        None
+    }
+
     /// Process a media event from the backend.
     ///
     /// Called by the source's event loop (driven by the runtime). The return
@@ -287,15 +438,28 @@ impl MediaSource {
                 // and reset the reconnection attempt counter unconditionally.
                 self.liveness_deadline = None;
                 self.reconnect.reset_attempts();
-                if self.state == SourceState::Running {
-                    // Already running — suppress duplicate emission.
-                    // This can happen when start() transitions to Running
-                    // and the GStreamer bus subsequently fires StreamStarted.
+
+                // Guard against duplicate verification within the same
+                // session. This can happen when start() or try_reconnect()
+                // transitions to Running and the GStreamer bus subsequently
+                // fires StreamStarted — the decoder has already been
+                // verified for this session.
+                if self.decoder_verified {
                     return None;
                 }
+
                 self.state = SourceState::Running;
                 self.reconnect_deadline = None;
                 tracing::info!(feed_id = %self.feed_id, "stream started");
+
+                // Verify decoder selection and emit DecodeDecision health
+                // event. If post-selection enforcement fails (e.g.,
+                // RequireHardware with a software decoder), this returns
+                // Some(delay) to trigger reconnection.
+                if let Some(delay) = self.verify_decoder_selection() {
+                    return Some(delay);
+                }
+
                 self.emit_health(HealthEvent::SourceConnected {
                     feed_id: self.feed_id,
                 });
@@ -347,6 +511,14 @@ impl MediaSource {
                     debug_detail = ?debug_detail,
                     "pipeline error"
                 );
+                // Track hardware failure for adaptive fallback when the
+                // stream never confirmed (liveness watchdog still armed)
+                // and the preference is PreferHardware.
+                if self.liveness_deadline.is_some()
+                    && self.decode_preference.prefers_hardware()
+                {
+                    self.hw_failure_tracker.record_failure();
+                }
                 let enriched = self.enrich_error(error);
                 self.disconnect_and_reconnect(enriched)
             }
@@ -664,9 +836,9 @@ impl MediaIngress for MediaSource {
             Ok(()) => {
                 self.state = SourceState::Running;
                 tracing::info!(feed_id = %self.feed_id, "source started");
-                self.emit_health(HealthEvent::SourceConnected {
-                    feed_id: self.feed_id,
-                });
+                // SourceConnected and DecodeDecision are deferred until
+                // handle_event(StreamStarted) confirms the stream is
+                // actually flowing and decoder verification succeeds.
                 Ok(())
             }
             Err(e) => {
@@ -787,6 +959,10 @@ impl MediaIngress for MediaSource {
             SourceState::Stopped => TickOutcome::stopped(),
         }
     }
+
+    fn decode_status(&self) -> Option<(DecodeOutcome, String)> {
+        self.last_decode_status.clone()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -813,6 +989,18 @@ impl MediaSource {
 
     pub(crate) fn current_attempt(&self) -> u32 {
         self.reconnect.current_attempt()
+    }
+
+    pub(crate) fn hw_failure_tracker(&self) -> &HwFailureTracker {
+        &self.hw_failure_tracker
+    }
+
+    pub(crate) fn hw_failure_tracker_mut(&mut self) -> &mut HwFailureTracker {
+        &mut self.hw_failure_tracker
+    }
+
+    pub(crate) fn decoder_verified(&self) -> bool {
+        self.decoder_verified
     }
 }
 

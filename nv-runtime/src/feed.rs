@@ -8,6 +8,7 @@ use nv_core::error::{ConfigError, NvError};
 use nv_core::id::FeedId;
 use nv_core::metrics::FeedMetrics;
 use nv_media::PtzProvider;
+use nv_media::DecodePreference;
 use nv_perception::{Stage, StagePipeline, ValidationMode, validate_pipeline_phased};
 use nv_temporal::RetentionPolicy;
 use nv_view::{EpochPolicy, ViewStateProvider};
@@ -37,6 +38,7 @@ pub struct FeedConfig {
     pub(crate) ptz_provider: Option<Arc<dyn PtzProvider>>,
     pub(crate) frame_inclusion: FrameInclusion,
     pub(crate) sink_queue_capacity: usize,
+    pub(crate) decode_preference: DecodePreference,
 }
 
 /// Builder for [`FeedConfig`].
@@ -69,6 +71,7 @@ pub struct FeedConfigBuilder {
     frame_inclusion: FrameInclusion,
     validation_mode: ValidationMode,
     sink_queue_capacity: usize,
+    decode_preference: DecodePreference,
 }
 
 impl FeedConfig {
@@ -91,6 +94,7 @@ impl FeedConfig {
             frame_inclusion: FrameInclusion::default(),
             validation_mode: ValidationMode::default(),
             sink_queue_capacity: 16,
+            decode_preference: DecodePreference::default(),
         }
     }
 }
@@ -236,6 +240,18 @@ impl FeedConfigBuilder {
         self
     }
 
+    /// Set the decode preference for this feed.
+    ///
+    /// Controls hardware vs. software decoder selection. Default is
+    /// [`DecodePreference::Auto`], which preserves existing behavior.
+    ///
+    /// See [`DecodePreference`] for variant semantics.
+    #[must_use]
+    pub fn decode_preference(mut self, pref: DecodePreference) -> Self {
+        self.decode_preference = pref;
+        self
+    }
+
     /// Append a single stage to the pipeline.
     ///
     /// Convenience alternative to [`stages()`](Self::stages) when
@@ -365,6 +381,7 @@ impl FeedConfigBuilder {
             ptz_provider: self.ptz_provider,
             frame_inclusion: self.frame_inclusion,
             sink_queue_capacity: self.sink_queue_capacity.max(1),
+            decode_preference: self.decode_preference,
         })
     }
 }
@@ -410,6 +427,21 @@ pub struct QueueTelemetry {
     pub sink_depth: usize,
     /// Maximum capacity of the sink queue.
     pub sink_capacity: usize,
+}
+
+/// Snapshot of the decode method selected by the media backend.
+///
+/// Available after the stream starts and the backend confirms decoder
+/// negotiation. Use [`FeedHandle::decode_status()`] to poll.
+#[derive(Debug, Clone)]
+pub struct DecodeStatus {
+    /// Whether hardware or software decoding was selected.
+    pub outcome: nv_core::health::DecodeOutcome,
+    /// Backend-specific detail string (e.g., GStreamer element name).
+    ///
+    /// Intended for diagnostics and dashboards — do not match on its
+    /// contents programmatically.
+    pub detail: String,
 }
 
 impl FeedHandle {
@@ -478,6 +510,17 @@ impl FeedHandle {
     #[must_use]
     pub fn uptime(&self) -> Duration {
         self.shared.session_uptime()
+    }
+
+    /// The decode method confirmed by the media backend for this feed.
+    ///
+    /// Returns `None` if no decode decision has been made yet (the
+    /// stream has not started, the backend has not negotiated a decoder,
+    /// or the feed is between restarts).
+    #[must_use]
+    pub fn decode_status(&self) -> Option<DecodeStatus> {
+        let (outcome, detail) = self.shared.decode_status()?;
+        Some(DecodeStatus { outcome, detail })
     }
 
     /// Pause the feed (stop pulling frames from source; stages idle).
