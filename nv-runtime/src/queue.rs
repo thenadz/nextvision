@@ -102,7 +102,7 @@ impl FrameQueue {
     ///
     /// Called from the media ingress (GStreamer streaming thread).
     pub fn push(&self, frame: FrameEnvelope) -> PushOutcome {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.closed {
             tracing::debug!("FrameQueue::push — rejected: queue is closed");
             return PushOutcome::Rejected;
@@ -132,7 +132,7 @@ impl FrameQueue {
             BackpressurePolicy::Block { .. } => {
                 // Block until space is available or the queue is closed.
                 while inner.buf.len() >= self.depth && !inner.closed {
-                    inner = self.not_full.wait(inner).unwrap();
+                    inner = self.not_full.wait(inner).unwrap_or_else(|e| e.into_inner());
                 }
                 if inner.closed {
                     return PushOutcome::Rejected;
@@ -155,7 +155,7 @@ impl FrameQueue {
     ///
     /// Called from the feed worker thread.
     pub fn pop(&self, shutdown: &AtomicBool, deadline: Option<Instant>) -> PopResult {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             // Highest priority: deliver any buffered frame.
             if let Some(frame) = inner.buf.pop_front() {
@@ -179,7 +179,7 @@ impl FrameQueue {
                         return PopResult::Timeout;
                     }
                     let (guard, result) =
-                        self.not_empty.wait_timeout(inner, dl - now).unwrap();
+                        self.not_empty.wait_timeout(inner, dl - now).unwrap_or_else(|e| e.into_inner());
                     inner = guard;
                     if result.timed_out() && inner.buf.is_empty() {
                         if inner.closed || shutdown.load(Ordering::Relaxed) {
@@ -193,7 +193,7 @@ impl FrameQueue {
                     }
                 }
                 None => {
-                    inner = self.not_empty.wait(inner).unwrap();
+                    inner = self.not_empty.wait(inner).unwrap_or_else(|e| e.into_inner());
                 }
             }
         }
@@ -208,7 +208,7 @@ impl FrameQueue {
     /// the worker to tick the source.
     pub fn wake_consumer(&self) {
         {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.woken = true;
         }
         self.not_empty.notify_all();
@@ -217,7 +217,7 @@ impl FrameQueue {
     /// Close the queue: reject future pushes and wake all waiters.
     pub fn close(&self) {
         tracing::debug!("FrameQueue::close — closing queue");
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.closed = true;
         self.not_empty.notify_all();
         self.not_full.notify_all();
@@ -229,7 +229,7 @@ impl FrameQueue {
     /// stale under concurrent push/pop, but is suitable for monitoring
     /// and dashboards.
     pub(crate) fn depth(&self) -> usize {
-        self.inner.lock().unwrap().buf.len()
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).buf.len()
     }
 
     /// Maximum capacity of the queue.

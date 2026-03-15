@@ -587,7 +587,7 @@ impl FeedHandle {
         }
         // Mirror into the condvar-guarded bool.
         let (lock, _cvar) = &self.shared.pause_condvar;
-        *lock.lock().unwrap() = true;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
         Ok(())
     }
 
@@ -610,7 +610,7 @@ impl FeedHandle {
         }
         // Mirror into the condvar-guarded bool and wake the worker.
         let (lock, cvar) = &self.shared.pause_condvar;
-        *lock.lock().unwrap() = false;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = false;
         cvar.notify_one();
         Ok(())
     }

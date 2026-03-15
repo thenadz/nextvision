@@ -722,5 +722,5 @@ impl RuntimeHandle {
 }
 
 #[cfg(test)]
-#[path = "runtime_tests.rs"]
+#[path = "runtime_tests/mod.rs"]
 mod tests;

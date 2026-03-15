@@ -1,492 +1,24 @@
-//! Per-feed worker thread — owns the source, executor, and processing loop.
-//!
-//! Each feed runs on a dedicated OS thread. This gives perfect isolation:
-//! a stage that blocks or panics affects only its own feed.
-//!
-//! # Thread model
-//!
-//! ```text
-//! ┌──────────────┐    FrameQueue     ┌─────────────────┐   SinkQueue   ┌───────────┐
-//! │ GStreamer     │──── push() ──────▶│ Feed Worker      │── push() ───▶│ Sink      │
-//! │ streaming     │                   │ (OS thread)      │              │ Thread    │
-//! │ thread        │                   │                  │              │           │
-//! │               │                   │  pop() → stages  │              │ emit()    │
-//! │  on_error()   │                   │  → broadcast     │              │ (user     │
-//! │  on_eos()  ───┼── close() ──────▶│  → health events │              │  sink)    │
-//! └──────────────┘                   └─────────────────┘              └───────────┘
-//! ```
-//!
-//! The worker thread owns:
-//! - `PipelineExecutor` (stages, temporal store, view state)
-//! - Source handle (via `MediaIngressFactory`)
-//! - `FrameQueue` (shared with `FeedFrameSink`)
-//!
-//! Output is decoupled from the feed thread via a bounded
-//! per-feed sink queue. The sink thread calls `OutputSink::emit()`
-//! asynchronously, preventing slow sinks from blocking perception.
-//!
-//! Shutdown is coordinated via `FeedSharedState.shutdown` (`AtomicBool`)
-//! and the queue's `close()` / `wake_consumer()` methods.
-
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nv_core::config::{ReconnectPolicy, SourceSpec};
-use nv_core::error::{MediaError, NvError, RuntimeError};
+use nv_core::error::{NvError, RuntimeError};
 use nv_core::health::{HealthEvent, StopReason};
-use nv_core::id::{FeedId, StageId};
-use nv_core::metrics::FeedMetrics;
-use nv_frame::FrameEnvelope;
-use nv_media::ingress::{FrameSink, HealthSink, MediaIngress, MediaIngressFactory, IngressOptions, SourceStatus};
+use nv_core::id::FeedId;
+use nv_media::ingress::{MediaIngress, MediaIngressFactory, IngressOptions, SourceStatus};
 use tokio::sync::broadcast;
 
 use crate::backpressure::BackpressurePolicy;
 use crate::executor::PipelineExecutor;
 use crate::feed::FeedConfig;
 use crate::output::{LagDetector, OutputSink, SharedOutput};
-use crate::queue::{FrameQueue, PopResult, PushOutcome};
+use crate::queue::{FrameQueue, PopResult};
 use crate::shutdown::{RestartPolicy, RestartTrigger};
 
-// ---------------------------------------------------------------------------
-// Shared state between FeedHandle and the worker thread
-// ---------------------------------------------------------------------------
-
-/// Shared state accessed atomically by both the `FeedHandle` (user thread)
-/// and the feed worker thread.
-pub(crate) struct FeedSharedState {
-    pub id: FeedId,
-    pub paused: AtomicBool,
-    pub shutdown: Arc<AtomicBool>,
-    pub frames_received: AtomicU64,
-    pub frames_dropped: AtomicU64,
-    pub frames_processed: AtomicU64,
-    pub tracks_active: AtomicU64,
-    pub view_epoch: AtomicU64,
-    pub restarts: AtomicU32,
-    /// Set to `false` when the worker thread exits.
-    pub alive: AtomicBool,
-    /// Condvar for pause/resume: the worker waits on this instead of spin-sleeping.
-    /// The Mutex guards a `bool` that mirrors `paused` — the Condvar wakes
-    /// the worker when the pause state changes or shutdown is requested.
-    pub pause_condvar: (Mutex<bool>, Condvar),
-    /// Frame queue for the current session — set by the worker when the queue
-    /// is created, cleared when the session ends. Used by `request_shutdown`
-    /// to wake the consumer without waiting for a poll interval.
-    queue: Mutex<Option<Arc<FrameQueue>>>,
-    /// Atomic occupancy counter for the per-feed output sink queue.
-    /// Incremented on successful send, decremented on recv by the sink thread.
-    /// Shared (via `Arc` clone) with the [`SinkWorker`] thread.
-    pub sink_occupancy: Arc<AtomicUsize>,
-    /// Configured capacity of the output sink queue. Written once when the
-    /// feed starts, read by `FeedHandle::queue_telemetry()`.
-    pub sink_capacity: AtomicUsize,
-    /// Instant when the current processing session started (set on each
-    /// start or restart). Used by `FeedHandle::uptime()` to report
-    /// session-scoped uptime.
-    pub session_started_at: Mutex<Instant>,
-    /// Last confirmed decode status from the media backend.
-    /// Written once per session when the stream starts; read by
-    /// `FeedHandle::decode_status()`.
-    pub decode_status: Mutex<Option<(nv_core::health::DecodeOutcome, String)>>,
-    /// View-system stability score stored as `f32::to_bits()`. Updated
-    /// per-frame by the worker. Read by `FeedHandle::diagnostics()`.
-    pub view_stability_score: AtomicU32,
-    /// View-system context validity ordinal. Updated per-frame by the
-    /// worker. 0 = Stable, 1 = Degraded, 2 = Invalid.
-    /// Read by `FeedHandle::diagnostics()`.
-    pub view_context_validity: AtomicU8,
-    /// The batch coordinator this feed submits to, if any.
-    /// Set once at spawn time; read by `FeedHandle::diagnostics()`.
-    pub batch_processor_id: Option<StageId>,
-}
-
-impl FeedSharedState {
-    pub fn new(id: FeedId, batch_processor_id: Option<StageId>) -> Self {
-        Self {
-            id,
-            paused: AtomicBool::new(false),
-            shutdown: Arc::new(AtomicBool::new(false)),
-            frames_received: AtomicU64::new(0),
-            frames_dropped: AtomicU64::new(0),
-            frames_processed: AtomicU64::new(0),
-            tracks_active: AtomicU64::new(0),
-            view_epoch: AtomicU64::new(0),
-            restarts: AtomicU32::new(0),
-            alive: AtomicBool::new(true),
-            pause_condvar: (Mutex::new(false), Condvar::new()),
-            queue: Mutex::new(None),
-            sink_occupancy: Arc::new(AtomicUsize::new(0)),
-            sink_capacity: AtomicUsize::new(0),
-            session_started_at: Mutex::new(Instant::now()),
-            decode_status: Mutex::new(None),
-            view_stability_score: AtomicU32::new(1.0_f32.to_bits()),
-            view_context_validity: AtomicU8::new(0),
-            batch_processor_id,
-        }
-    }
-
-    /// Snapshot the current metrics.
-    pub fn metrics(&self) -> FeedMetrics {
-        FeedMetrics {
-            feed_id: self.id,
-            frames_received: self.frames_received.load(Ordering::Relaxed),
-            frames_dropped: self.frames_dropped.load(Ordering::Relaxed),
-            frames_processed: self.frames_processed.load(Ordering::Relaxed),
-            tracks_active: self.tracks_active.load(Ordering::Relaxed),
-            view_epoch: self.view_epoch.load(Ordering::Relaxed),
-            restarts: self.restarts.load(Ordering::Relaxed),
-        }
-    }
-
-    /// Read the current source queue depth and capacity.
-    ///
-    /// Returns `(depth, capacity)`. If no session is active (between
-    /// restarts or after shutdown), returns `(0, 0)`.
-    pub fn source_queue_telemetry(&self) -> (usize, usize) {
-        if let Ok(guard) = self.queue.lock() {
-            if let Some(ref q) = *guard {
-                return (q.depth(), q.capacity());
-            }
-        }
-        (0, 0)
-    }
-
-    /// Current session uptime (time since last successful start/restart).
-    ///
-    /// Returns `Duration::ZERO` if the lock is poisoned.
-    pub fn session_uptime(&self) -> Duration {
-        self.session_started_at
-            .lock()
-            .map(|t| t.elapsed())
-            .unwrap_or(Duration::ZERO)
-    }
-
-    /// The last confirmed decode status, if known.
-    pub fn decode_status(&self) -> Option<(nv_core::health::DecodeOutcome, String)> {
-        self.decode_status
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
-    }
-
-    /// Request shutdown and wake the worker if it is paused or waiting on
-    /// the frame queue.
-    pub fn request_shutdown(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
-        // Wake the pause condvar.
-        let (_lock, cvar) = &self.pause_condvar;
-        cvar.notify_one();
-        // Wake the frame queue consumer (event-driven — no poll delay).
-        if let Ok(guard) = self.queue.lock() {
-            if let Some(ref q) = *guard {
-                q.wake_consumer();
-            }
-        }
-    }
-
-    /// Register the current session's queue for shutdown notification.
-    pub(crate) fn set_queue(&self, queue: Option<Arc<FrameQueue>>) {
-        if let Ok(mut guard) = self.queue.lock() {
-            *guard = queue;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// FrameSink adapter — bridges media ingress → FrameQueue
-// ---------------------------------------------------------------------------
-
-/// Adapter that implements [`FrameSink`] by pushing into a [`FrameQueue`].
-///
-/// Created per feed session. The `Arc<FrameQueue>` is shared with the
-/// feed worker thread's pop loop.
-struct FeedFrameSink {
-    queue: Arc<FrameQueue>,
-    shared: Arc<FeedSharedState>,
-    health_tx: broadcast::Sender<HealthEvent>,
-    feed_id: FeedId,
-    bp_throttle: BackpressureThrottle,
-}
-
-impl FrameSink for FeedFrameSink {
-    fn on_frame(&self, frame: FrameEnvelope) {
-        self.shared.frames_received.fetch_add(1, Ordering::Relaxed);
-        let outcome = self.queue.push(frame);
-        match outcome {
-            PushOutcome::Accepted => {}
-            PushOutcome::DroppedOldest | PushOutcome::Rejected => {
-                self.shared.frames_dropped.fetch_add(1, Ordering::Relaxed);
-                self.bp_throttle
-                    .record_drop(&self.health_tx, self.feed_id);
-            }
-        }
-    }
-
-    fn on_error(&self, _error: MediaError) {
-        // SourceDisconnected is emitted by the source FSM via its
-        // HealthSink — no duplicate emission here.
-        //
-        // Wake the consumer so the worker thread ticks the source and
-        // advances the reconnection FSM promptly. Without this, an
-        // indefinite-deadline pop() would never return.
-        self.queue.wake_consumer();
-    }
-
-    fn on_eos(&self) {
-        self.queue.close();
-    }
-
-    fn wake(&self) {
-        self.queue.wake_consumer();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// HealthSink adapter — forwards to broadcast channel
-// ---------------------------------------------------------------------------
-
-/// Forwards [`HealthEvent`]s from a [`MediaSource`] to the runtime's
-/// broadcast channel.
-pub(crate) struct BroadcastHealthSink {
-    tx: broadcast::Sender<HealthEvent>,
-}
-
-impl BroadcastHealthSink {
-    pub fn new(tx: broadcast::Sender<HealthEvent>) -> Self {
-        Self { tx }
-    }
-}
-
-impl HealthSink for BroadcastHealthSink {
-    fn emit(&self, event: HealthEvent) {
-        let _ = self.tx.send(event);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// BackpressureThrottle — coalesces per-frame drop events
-// ---------------------------------------------------------------------------
-
-/// Minimum interval between consecutive `BackpressureDrop` events.
-const BP_THROTTLE_INTERVAL: Duration = Duration::from_secs(1);
-
-/// Coalesces `BackpressureDrop` events to avoid per-frame storms.
-///
-/// - On transition into backpressure (first drop), emits immediately.
-/// - During sustained backpressure, emits at most once per second
-///   carrying the accumulated delta.
-///
-/// Thread-safe: accessed from the GStreamer streaming thread. Uses
-/// `try_lock` on the event-emission path to avoid blocking the hot path.
-struct BackpressureThrottle {
-    inner: Mutex<BpThrottleInner>,
-}
-
-struct BpThrottleInner {
-    in_backpressure: bool,
-    accumulated: u64,
-    last_event: Instant,
-}
-
-impl BackpressureThrottle {
-    fn new() -> Self {
-        Self {
-            inner: Mutex::new(BpThrottleInner {
-                in_backpressure: false,
-                accumulated: 0,
-                last_event: Instant::now(),
-            }),
-        }
-    }
-
-    /// Record a frame drop and possibly emit a throttled health event.
-    fn record_drop(&self, health_tx: &broadcast::Sender<HealthEvent>, feed_id: FeedId) {
-        let Ok(mut inner) = self.inner.try_lock() else {
-            // Contention — skip event emission this frame. The drop is
-            // still counted via the atomic counter in FeedSharedState.
-            return;
-        };
-
-        inner.accumulated += 1;
-
-        if !inner.in_backpressure {
-            // Transition into backpressure — emit immediately.
-            inner.in_backpressure = true;
-            let delta = inner.accumulated;
-            inner.accumulated = 0;
-            inner.last_event = Instant::now();
-            let _ = health_tx.send(HealthEvent::BackpressureDrop {
-                feed_id,
-                frames_dropped: delta,
-            });
-            return;
-        }
-
-        // Sustained — emit at most once per throttle interval.
-        if inner.last_event.elapsed() >= BP_THROTTLE_INTERVAL {
-            let delta = inner.accumulated;
-            inner.accumulated = 0;
-            inner.last_event = Instant::now();
-            let _ = health_tx.send(HealthEvent::BackpressureDrop {
-                feed_id,
-                frames_dropped: delta,
-            });
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SinkWorker — decoupled per-feed sink thread
-// ---------------------------------------------------------------------------
-
-/// Maximum time to wait for the sink worker thread to finish during
-/// shutdown. If the sink's `emit()` is blocked (e.g., on network I/O),
-/// we detach the thread rather than hang the feed/runtime shutdown.
-const SINK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Minimum interval between consecutive `SinkBackpressure` health events.
-const SINK_BP_THROTTLE_INTERVAL: Duration = Duration::from_secs(1);
-
-/// Manages a dedicated thread that calls [`OutputSink::emit()`] asynchronously,
-/// isolating the feed processing thread from slow downstream I/O.
-struct SinkWorker {
-    tx: std::sync::mpsc::SyncSender<SharedOutput>,
-    thread: Option<std::thread::JoinHandle<Box<dyn OutputSink>>>,
-    occupancy: Arc<AtomicUsize>,
-}
-
-impl SinkWorker {
-    /// Spawn a sink worker thread for the given feed.
-    fn spawn(
-        feed_id: FeedId,
-        sink: Box<dyn OutputSink>,
-        health_tx: broadcast::Sender<HealthEvent>,
-        capacity: usize,
-        occupancy: Arc<AtomicUsize>,
-    ) -> Result<Self, RuntimeError> {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<SharedOutput>(capacity);
-        let occ = Arc::clone(&occupancy);
-        let thread = std::thread::Builder::new()
-            .name(format!("nv-sink-{}", feed_id))
-            .spawn(move || Self::run(feed_id, sink, rx, health_tx, occ))
-            .map_err(|e| RuntimeError::ThreadSpawnFailed {
-                detail: format!("sink worker for {feed_id}: {e}"),
-            })?;
-        Ok(Self {
-            tx,
-            thread: Some(thread),
-            occupancy,
-        })
-    }
-
-    /// Enqueue output for the sink. Returns `true` if accepted, `false`
-    /// if the sink queue is full (output dropped, throttled health event).
-    fn send(
-        &self,
-        output: SharedOutput,
-        sink_bp: &mut SinkBpThrottle,
-        health_tx: &broadcast::Sender<HealthEvent>,
-        feed_id: FeedId,
-    ) -> bool {
-        // Increment *before* try_send so the sink thread's
-        // fetch_sub on recv cannot race ahead of the add and
-        // transiently underflow, which would produce bogus
-        // telemetry depth values.
-        self.occupancy.fetch_add(1, Ordering::Relaxed);
-        match self.tx.try_send(output) {
-            Ok(()) => true,
-            Err(std::sync::mpsc::TrySendError::Full(rejected)) => {
-                self.occupancy.fetch_sub(1, Ordering::Relaxed);
-                sink_bp.record_drop(health_tx, feed_id);
-                let _ = rejected; // drop explicitly
-                false
-            }
-            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                self.occupancy.fetch_sub(1, Ordering::Relaxed);
-                false
-            }
-        }
-    }
-
-    /// Sink thread main loop. Drains the channel until the sender is
-    /// dropped, then returns the sink so it can be reused across restart
-    /// sessions.
-    fn run(
-        feed_id: FeedId,
-        sink: Box<dyn OutputSink>,
-        rx: std::sync::mpsc::Receiver<SharedOutput>,
-        health_tx: broadcast::Sender<HealthEvent>,
-        occupancy: Arc<AtomicUsize>,
-    ) -> Box<dyn OutputSink> {
-        while let Ok(output) = rx.recv() {
-            occupancy.fetch_sub(1, Ordering::Relaxed);
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                sink.emit(output);
-            }));
-            if result.is_err() {
-                tracing::error!(
-                    feed_id = %feed_id,
-                    "OutputSink::emit() panicked — output dropped",
-                );
-                let _ = health_tx.send(HealthEvent::SinkPanic { feed_id });
-            }
-        }
-        sink
-    }
-
-    /// Shut down the sink worker: drop the sender (closes the channel),
-    /// join the thread with a bounded timeout, and return the recovered
-    /// sink for reuse.
-    ///
-    /// If the sink thread does not finish within [`SINK_SHUTDOWN_TIMEOUT`],
-    /// it is detached and a [`NullSink`] placeholder is returned. This
-    /// prevents a blocked `OutputSink::emit()` from hanging feed
-    /// restart or runtime shutdown.
-    ///
-    /// If the sink thread panicked, returns a [`NullSink`] placeholder.
-    fn shutdown(mut self, health_tx: &broadcast::Sender<HealthEvent>, feed_id: FeedId) -> Box<dyn OutputSink> {
-        // Drop the sender to signal the sink thread to exit.
-        drop(self.tx);
-        let Some(handle) = self.thread.take() else {
-            return Box::new(NullSink);
-        };
-
-        // Wait for the thread with a bounded timeout via a rendezvous channel.
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        // We cannot join with a timeout directly, so park the JoinHandle
-        // on a small helper thread that sends the result back.
-        let _detached = std::thread::Builder::new()
-            .name(format!("nv-sink-join-{feed_id}"))
-            .spawn(move || {
-                let result = handle.join();
-                let _ = done_tx.send(result);
-            });
-        match done_rx.recv_timeout(SINK_SHUTDOWN_TIMEOUT) {
-            Ok(Ok(sink)) => sink,
-            Ok(Err(_)) => {
-                tracing::error!(
-                    feed_id = %feed_id,
-                    "sink worker thread panicked during shutdown",
-                );
-                let _ = health_tx.send(HealthEvent::SinkPanic { feed_id });
-                Box::new(NullSink)
-            }
-            Err(_) => {
-                // Timed out — the sink thread is blocked in emit().
-                // Detach it (the helper thread will eventually join it
-                // when emit() returns or the process exits).
-                tracing::warn!(
-                    feed_id = %feed_id,
-                    timeout_secs = SINK_SHUTDOWN_TIMEOUT.as_secs(),
-                    "sink worker thread did not finish within timeout — detaching",
-                );
-                let _ = health_tx.send(HealthEvent::SinkPanic { feed_id });
-                Box::new(NullSink)
-            }
-        }
-    }
-}
+use super::ingress_adapter::{BackpressureThrottle, FeedFrameSink};
+use super::shared_state::FeedSharedState;
+use super::sink::{NullSink, SinkBpThrottle, SinkWorker};
 
 // ---------------------------------------------------------------------------
 // FeedWorker — the per-feed thread entry point
@@ -723,16 +255,7 @@ impl FeedWorker {
             queue.close();
             self.shared.set_queue(None);
             let _ = source.stop();
-            self.executor.stop_stages();
-            if let Some(evt) = self.executor.flush_batch_rejections() {
-                let _ = self.health_tx.send(evt);
-            }
-            if let Some(evt) = self.executor.flush_batch_timeouts() {
-                let _ = self.health_tx.send(evt);
-            }
-            if let Some(evt) = self.executor.flush_batch_in_flight_rejections() {
-                let _ = self.health_tx.send(evt);
-            }
+            self.stop_and_flush_stages();
 
             match exit_reason {
                 ExitReason::Shutdown => {
@@ -913,9 +436,9 @@ impl FeedWorker {
                     );
                 }
                 let (lock, cvar) = &self.shared.pause_condvar;
-                let mut paused = lock.lock().unwrap();
+                let mut paused = lock.lock().unwrap_or_else(|e| e.into_inner());
                 while *paused && !self.shared.shutdown.load(Ordering::Relaxed) {
-                    paused = cvar.wait(paused).unwrap();
+                    paused = cvar.wait(paused).unwrap_or_else(|e| e.into_inner());
                 }
                 // Resume the source when leaving paused state.
                 if !self.shared.shutdown.load(Ordering::Relaxed) {
@@ -1052,6 +575,22 @@ impl FeedWorker {
         }
     }
 
+    /// Stop all stages and flush any pending batch rejections/timeouts,
+    /// emitting the corresponding health events.
+    fn stop_and_flush_stages(&mut self) {
+        self.executor.stop_stages();
+        for evt in [
+            self.executor.flush_batch_rejections(),
+            self.executor.flush_batch_timeouts(),
+            self.executor.flush_batch_in_flight_rejections(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let _ = self.health_tx.send(evt);
+        }
+    }
+
     /// Common cleanup for source-create or source-start failures:
     /// clear queue, stop stages, flush batch rejections, then try restart.
     ///
@@ -1064,16 +603,7 @@ impl FeedWorker {
         detail: String,
     ) -> bool {
         self.shared.set_queue(None);
-        self.executor.stop_stages();
-        if let Some(evt) = self.executor.flush_batch_rejections() {
-            let _ = self.health_tx.send(evt);
-        }
-        if let Some(evt) = self.executor.flush_batch_timeouts() {
-            let _ = self.health_tx.send(evt);
-        }
-        if let Some(evt) = self.executor.flush_batch_in_flight_rejections() {
-            let _ = self.health_tx.send(evt);
-        }
+        self.stop_and_flush_stages();
         self.try_restart(restart_count, session_start, &ExitReason::SourceEnded, detail)
     }
 
@@ -1164,87 +694,6 @@ impl FeedWorker {
             let sleep_for = remaining.min(step);
             std::thread::sleep(sleep_for);
             remaining = remaining.saturating_sub(sleep_for);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// NullSink — placeholder while the real sink is lent to SinkWorker
-// ---------------------------------------------------------------------------
-
-/// Sink placeholder used while the real `OutputSink` is owned by the
-/// `SinkWorker` thread during a processing session.
-struct NullSink;
-
-impl OutputSink for NullSink {
-    fn emit(&self, _output: SharedOutput) {}
-}
-
-// ---------------------------------------------------------------------------
-// SinkBpThrottle — coalesces per-output SinkBackpressure events
-// ---------------------------------------------------------------------------
-
-/// Coalesces `SinkBackpressure` events to prevent per-drop storms.
-///
-/// Same strategy as `BackpressureThrottle` for frame drops:
-/// - First drop → emit immediately.
-/// - During sustained backpressure → emit at most once per
-///   [`SINK_BP_THROTTLE_INTERVAL`], carrying the accumulated delta.
-///
-/// Lives on the feed worker thread (single-threaded access, no Mutex).
-struct SinkBpThrottle {
-    in_backpressure: bool,
-    accumulated: u64,
-    last_event: Instant,
-}
-
-impl SinkBpThrottle {
-    fn new() -> Self {
-        Self {
-            in_backpressure: false,
-            accumulated: 0,
-            last_event: Instant::now(),
-        }
-    }
-
-    fn record_drop(&mut self, health_tx: &broadcast::Sender<HealthEvent>, feed_id: FeedId) {
-        self.accumulated += 1;
-
-        if !self.in_backpressure {
-            // Transition into backpressure — emit immediately.
-            self.in_backpressure = true;
-            let delta = self.accumulated;
-            self.accumulated = 0;
-            self.last_event = Instant::now();
-            let _ = health_tx.send(HealthEvent::SinkBackpressure {
-                feed_id,
-                outputs_dropped: delta,
-            });
-            return;
-        }
-
-        // Sustained — emit at most once per throttle interval.
-        if self.last_event.elapsed() >= SINK_BP_THROTTLE_INTERVAL {
-            let delta = self.accumulated;
-            self.accumulated = 0;
-            self.last_event = Instant::now();
-            let _ = health_tx.send(HealthEvent::SinkBackpressure {
-                feed_id,
-                outputs_dropped: delta,
-            });
-        }
-    }
-
-    /// Flush any accumulated but un-emitted drop count.
-    fn flush(&mut self, health_tx: &broadcast::Sender<HealthEvent>, feed_id: FeedId) {
-        if self.accumulated > 0 {
-            let delta = self.accumulated;
-            self.accumulated = 0;
-            self.in_backpressure = false;
-            let _ = health_tx.send(HealthEvent::SinkBackpressure {
-                feed_id,
-                outputs_dropped: delta,
-            });
         }
     }
 }

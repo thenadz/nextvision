@@ -2,8 +2,9 @@
 
 use super::*;
 use crate::decode::{DecodePreference, HwFailureTracker, SelectedDecoderInfo};
+use crate::event::MediaEvent;
 use crate::factory::GstMediaIngressFactory;
-use crate::ingress::{IngressOptions, MediaIngressFactory};
+use crate::ingress::{IngressOptions, MediaIngress, MediaIngressFactory};
 use nv_core::config::BackoffKind;
 use nv_core::health::DecodeOutcome;
 use nv_frame::FrameEnvelope;
@@ -1565,4 +1566,112 @@ fn adaptive_fallback_changes_effective_selection() {
         adjusted,
     );
     assert!(reason.contains("consecutive hardware failures"));
+}
+
+// ===========================================================================
+// Finding 1: Reconnect budget bypass — attempts must not reset before
+// decoder verification passes
+// ===========================================================================
+
+/// RequireHardware with software decoder: reconnect attempts must NOT be
+/// reset when verification fails. Without this fix, attempt reset happens
+/// on StreamStarted entry, bypassing the reconnect budget.
+#[test]
+fn require_hardware_verification_failure_preserves_reconnect_attempts() {
+    let (mut src, _, _, _, _health) = started_source_with_preference(
+        test_spec(),
+        limited_reconnect(3),
+        DecodePreference::RequireHardware,
+    );
+    src.state = SourceState::Reconnecting;
+
+    // Simulate 2 prior reconnect attempts.
+    src.reconnect.record_attempt();
+    src.reconnect.record_attempt();
+    assert_eq!(src.reconnect.current_attempt(), 2);
+
+    // Software decoder selected → verification will fail.
+    if let Some(ref session) = src.session {
+        session.set_selected_decoder(Some(SelectedDecoderInfo {
+            element_name: "avdec_h264".to_string(),
+            is_hardware: false,
+        }));
+    }
+
+    let delay = src.handle_event(MediaEvent::StreamStarted);
+    assert!(delay.is_some(), "should trigger reconnect");
+
+    // Key assertion: attempts must NOT have been reset to 0.
+    // They should have been incremented (reconnect attempt via
+    // disconnect_and_reconnect → try_reconnect_or_stop → initiate_reconnect).
+    assert!(
+        src.reconnect.current_attempt() >= 2,
+        "reconnect attempts must not be reset on verification failure; got: {}",
+        src.reconnect.current_attempt(),
+    );
+}
+
+/// Repeated StreamStarted on an already-verified session must not reset
+/// the reconnect attempt counter again.
+#[test]
+fn duplicate_stream_started_does_not_reset_attempts() {
+    let (mut src, _, _, _, _health) = started_source_with_preference(
+        test_spec(),
+        limited_reconnect(5),
+        DecodePreference::Auto,
+    );
+    src.state = SourceState::Reconnecting;
+
+    // First StreamStarted — verifies and resets attempts.
+    src.handle_event(MediaEvent::StreamStarted);
+    assert!(src.decoder_verified, "should be verified after first StreamStarted");
+    assert_eq!(src.reconnect.current_attempt(), 0, "should reset after successful verification");
+
+    // Simulate some reconnect attempts accumulating after the initial connect.
+    src.reconnect.record_attempt();
+    src.reconnect.record_attempt();
+    assert_eq!(src.reconnect.current_attempt(), 2);
+
+    // Second StreamStarted — duplicate, should be no-op (early return).
+    let delay = src.handle_event(MediaEvent::StreamStarted);
+    assert!(delay.is_none(), "duplicate StreamStarted should be no-op");
+    assert_eq!(
+        src.reconnect.current_attempt(),
+        2,
+        "duplicate StreamStarted must not reset reconnect attempts",
+    );
+}
+
+/// RequireHardware budget exhaustion: repeated verification failures must
+/// eventually exhaust the reconnect budget and stop the source.
+#[test]
+fn require_hardware_exhausts_reconnect_budget() {
+    let (mut src, _, _, _, _health) = started_source_with_preference(
+        test_spec(),
+        limited_reconnect(2),
+        DecodePreference::RequireHardware,
+    );
+
+    // Software decoder stub.
+    if let Some(ref session) = src.session {
+        session.set_selected_decoder(Some(SelectedDecoderInfo {
+            element_name: "avdec_h264".to_string(),
+            is_hardware: false,
+        }));
+    }
+
+    // Each StreamStarted should fail verification and consume a reconnect attempt.
+    // With max_attempts=2, after 2 failures the budget should be exhausted.
+    for _ in 0..3 {
+        src.state = SourceState::Reconnecting;
+        src.decoder_verified = false;
+        let _delay = src.handle_event(MediaEvent::StreamStarted);
+    }
+
+    // After budget exhaustion, source should be stopped.
+    assert_eq!(
+        src.source_state(),
+        SourceState::Stopped,
+        "source should stop when reconnect budget is exhausted",
+    );
 }
