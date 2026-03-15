@@ -713,6 +713,12 @@ impl FeedWorker {
             if let Some(evt) = self.executor.flush_batch_rejections() {
                 let _ = self.health_tx.send(evt);
             }
+            if let Some(evt) = self.executor.flush_batch_timeouts() {
+                let _ = self.health_tx.send(evt);
+            }
+            if let Some(evt) = self.executor.flush_batch_in_flight_rejections() {
+                let _ = self.health_tx.send(evt);
+            }
 
             match exit_reason {
                 ExitReason::Shutdown => {
@@ -1040,6 +1046,12 @@ impl FeedWorker {
         self.shared.set_queue(None);
         self.executor.stop_stages();
         if let Some(evt) = self.executor.flush_batch_rejections() {
+            let _ = self.health_tx.send(evt);
+        }
+        if let Some(evt) = self.executor.flush_batch_timeouts() {
+            let _ = self.health_tx.send(evt);
+        }
+        if let Some(evt) = self.executor.flush_batch_in_flight_rejections() {
             let _ = self.health_tx.send(evt);
         }
         self.try_restart(restart_count, session_start, &ExitReason::SourceEnded, detail)

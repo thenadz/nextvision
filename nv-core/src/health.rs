@@ -248,6 +248,44 @@ pub enum HealthEvent {
         /// Number of frames rejected in this throttle window.
         dropped_count: u64,
     },
+
+    /// A feed's batch response timed out — the coordinator did not
+    /// return a result within `max_latency + response_timeout`.
+    ///
+    /// Events are coalesced: under sustained timeout conditions, the
+    /// executor emits one event per throttle window (1 second) with
+    /// `timed_out_count` reflecting the number of timeouts in that
+    /// window. On recovery (a subsequent successful submission), any
+    /// remaining accumulated count is flushed immediately.
+    ///
+    /// Indicates the batch processor is slower than the configured
+    /// safety margin. Consider increasing `response_timeout` or
+    /// reducing `max_batch_size`.
+    BatchTimeout {
+        feed_id: FeedId,
+        processor_id: StageId,
+        /// Number of timeouts in this throttle window.
+        timed_out_count: u64,
+    },
+
+    /// A feed's batch submission was rejected because the feed already
+    /// has the maximum number of in-flight items in the coordinator
+    /// pipeline (default: 1).
+    ///
+    /// This occurs when a prior submission timed out on the feed side
+    /// but has not yet been processed (or drained) by the coordinator.
+    /// The in-flight cap prevents one feed from accumulating orphaned
+    /// items in the shared queue.
+    ///
+    /// Events are coalesced with the same 1-second throttle window as
+    /// other batch rejection events. On recovery, any remaining
+    /// accumulated count is flushed immediately.
+    BatchInFlightExceeded {
+        feed_id: FeedId,
+        processor_id: StageId,
+        /// Number of submissions rejected in this throttle window.
+        rejected_count: u64,
+    },
 }
 
 /// Reason a feed stopped permanently.

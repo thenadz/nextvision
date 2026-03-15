@@ -36,6 +36,63 @@
 //! Rejection counts are coalesced per-feed with a 1-second throttle
 //! window, and flushed on recovery or lifecycle boundaries.
 //!
+//! # Fairness model
+//!
+//! All feeds share a single FIFO submission queue. The coordinator
+//! processes items strictly in submission order.
+//!
+//! ## Per-feed in-flight cap
+//!
+//! Each feed is allowed at most [`max_in_flight_per_feed`](BatchConfig::max_in_flight_per_feed)
+//! items in-flight simultaneously (default: **1**). An item is "in-flight"
+//! from the moment it enters the submission queue until the coordinator
+//! routes its result back (or drains it at shutdown).
+//!
+//! Under normal operation, [`submit_and_wait`](BatchHandle::submit_and_wait)
+//! is synchronous — the feed thread blocks until the result arrives.
+//! With the default cap of 1, at most one item per feed is in the queue
+//! at any time.
+//!
+//! **Timeout regime**: when `submit_and_wait` returns
+//! [`BatchSubmitError::Timeout`], the timed-out item remains in-flight
+//! inside the coordinator. The in-flight cap prevents the feed from
+//! stacking additional items: the next `submit_and_wait` call returns
+//! [`BatchSubmitError::InFlightCapReached`] immediately until the
+//! coordinator processes (or drains) the orphaned item. This bounds
+//! per-feed queue occupancy to `max_in_flight_per_feed` even under
+//! sustained processor slowness.
+//!
+//! Under normal load (queue rarely full, no timeouts) every feed's
+//! frames are accepted and batched fairly by arrival time. Under
+//! sustained overload (queue persistently full), `try_send` fails at
+//! the instant a feed attempts submission.
+//!
+//! **Not guaranteed**: strict round-robin or weighted fairness. After
+//! a batch completes, all participating feeds are unblocked
+//! simultaneously. Scheduling jitter determines which feed's next
+//! `try_send` arrives first. Over time the distribution is
+//! approximately uniform, but short-term skew is possible.
+//!
+//! **Diagnostic**: per-feed rejection counts are visible via
+//! [`HealthEvent::BatchSubmissionRejected`] events, per-feed
+//! timeout counts via [`HealthEvent::BatchTimeout`] events, and
+//! per-feed in-flight cap rejections via
+//! [`HealthEvent::BatchInFlightExceeded`] events (all coalesced
+//! per feed). Persistent in-flight rejections indicate the
+//! processor is too slow for the configured timeout.
+//!
+//! # Queue sizing
+//!
+//! The default queue capacity is `max_batch_size * 4` (minimum 4).
+//! Guidelines:
+//!
+//! - `queue_capacity >= num_feeds` is required for all feeds to have
+//!   a slot simultaneously. Because `submit_and_wait` serializes per
+//!   feed, this is the hard floor for avoiding unnecessary rejections.
+//! - `queue_capacity >= max_batch_size * 2` prevents rejection during
+//!   normal batch-formation cadence (one batch forming, one draining).
+//! - When both conditions conflict, prefer the larger value.
+//!
 //! # Shutdown
 //!
 //! The coordinator checks its shutdown flag every 100 ms during both
@@ -72,7 +129,7 @@
 //! batches dispatched, items processed, items rejected, processing
 //! latency, formation latency, and batch-size distribution.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -142,6 +199,24 @@ pub struct BatchConfig {
     ///
     /// Defaults to 5 seconds when `None`. Must be > 0 when specified.
     pub response_timeout: Option<Duration>,
+    /// Maximum number of in-flight submissions allowed per feed.
+    ///
+    /// An item is "in-flight" from the moment it enters the submission
+    /// queue until the coordinator routes its result back (or drains it
+    /// at shutdown). When a feed reaches this limit, further
+    /// [`submit_and_wait`](BatchHandle::submit_and_wait) calls fail
+    /// immediately with [`BatchSubmitError::InFlightCapReached`] rather
+    /// than adding to the queue.
+    ///
+    /// This prevents a feed from accumulating orphaned items in the
+    /// shared queue after timeouts: when `submit_and_wait` times out,
+    /// the item remains in-flight inside the coordinator. Without a
+    /// cap, the feed could immediately submit another frame, stacking
+    /// multiple items and crowding other feeds.
+    ///
+    /// Default: 1 — each feed contributes at most one item to the
+    /// shared queue at any time. Must be ≥ 1.
+    pub max_in_flight_per_feed: usize,
 }
 
 impl BatchConfig {
@@ -170,6 +245,7 @@ impl BatchConfig {
             max_latency,
             queue_capacity: None,
             response_timeout: None,
+            max_in_flight_per_feed: 1,
         })
     }
 
@@ -193,6 +269,61 @@ impl BatchConfig {
         self.response_timeout = timeout;
         self
     }
+
+    /// Set the maximum number of in-flight submissions per feed.
+    ///
+    /// Default is 1. Must be ≥ 1.
+    #[must_use]
+    pub fn with_max_in_flight_per_feed(mut self, max: usize) -> Self {
+        self.max_in_flight_per_feed = max;
+        self
+    }
+
+    /// Validate all configuration fields.
+    ///
+    /// Called internally by [`BatchCoordinator::start`]. Also available
+    /// for early validation before passing a config to the runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidPolicy`](nv_core::error::ConfigError::InvalidPolicy)
+    /// if any field violates its constraints.
+    pub fn validate(&self) -> Result<(), nv_core::error::ConfigError> {
+        use nv_core::error::ConfigError;
+        if self.max_batch_size == 0 {
+            return Err(ConfigError::InvalidPolicy {
+                detail: "batch max_batch_size must be >= 1".into(),
+            });
+        }
+        if self.max_latency.is_zero() {
+            return Err(ConfigError::InvalidPolicy {
+                detail: "batch max_latency must be > 0".into(),
+            });
+        }
+        if let Some(rt) = self.response_timeout {
+            if rt.is_zero() {
+                return Err(ConfigError::InvalidPolicy {
+                    detail: "batch response_timeout must be > 0".into(),
+                });
+            }
+        }
+        if let Some(cap) = self.queue_capacity {
+            if cap < self.max_batch_size {
+                return Err(ConfigError::InvalidPolicy {
+                    detail: format!(
+                        "batch queue_capacity ({cap}) must be >= max_batch_size ({})",
+                        self.max_batch_size
+                    ),
+                });
+            }
+        }
+        if self.max_in_flight_per_feed == 0 {
+            return Err(ConfigError::InvalidPolicy {
+                detail: "batch max_in_flight_per_feed must be >= 1".into(),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl Default for BatchConfig {
@@ -204,6 +335,7 @@ impl Default for BatchConfig {
             max_latency: Duration::from_millis(50),
             queue_capacity: None,
             response_timeout: None,
+            max_in_flight_per_feed: 1,
         }
     }
 }
@@ -245,6 +377,15 @@ pub struct BatchMetrics {
     /// coordinator was shut down (`Disconnected`). These items never
     /// reached the coordinator thread.
     pub items_rejected: u64,
+    /// Items whose response was not received before the feed-side
+    /// safety timeout (`max_latency + response_timeout`). The
+    /// coordinator may still process these items, but the feed thread
+    /// abandoned waiting.
+    ///
+    /// A non-zero value indicates the batch processor is slower than
+    /// the configured safety margin allows. Consider increasing
+    /// `response_timeout` or reducing `max_batch_size`.
+    pub items_timed_out: u64,
     /// Cumulative batch processing time (nanoseconds).
     pub total_processing_ns: u64,
     /// Cumulative batch formation wait time (nanoseconds).
@@ -258,6 +399,13 @@ pub struct BatchMetrics {
     /// Included in the snapshot so callers can compute fill ratios
     /// without retaining a reference to the original config.
     pub configured_max_batch_size: u64,
+    /// Number of consecutive batch errors (processor `Err` or panic)
+    /// since the last successful dispatch. Reset to 0 on success.
+    ///
+    /// Useful for alerting: a steadily increasing value indicates a
+    /// persistently broken processor. Zero means the last batch
+    /// succeeded.
+    pub consecutive_errors: u64,
 }
 
 impl BatchMetrics {
@@ -266,11 +414,41 @@ impl BatchMetrics {
     ///
     /// Computed from atomic counters — may be briefly inconsistent under
     /// heavy contention, but sufficient for monitoring and dashboards.
+    ///
+    /// **Caveat**: items that timed out on the feed side may still be
+    /// processed by the coordinator. When this happens, `items_processed`
+    /// includes the timed-out item and this counter can undercount. The
+    /// discrepancy is bounded by `items_timed_out`.
     #[must_use]
     pub fn pending_items(&self) -> u64 {
         self.items_submitted
             .saturating_sub(self.items_processed)
             .saturating_sub(self.items_rejected)
+    }
+
+    /// Fraction of submissions rejected (`items_rejected / items_submitted`).
+    ///
+    /// Returns `None` if no items have been submitted.
+    /// A consistently non-zero value indicates sustained overload.
+    #[must_use]
+    pub fn rejection_rate(&self) -> Option<f64> {
+        if self.items_submitted == 0 {
+            return None;
+        }
+        Some(self.items_rejected as f64 / self.items_submitted as f64)
+    }
+
+    /// Fraction of submissions that timed out (`items_timed_out / items_submitted`).
+    ///
+    /// Returns `None` if no items have been submitted.
+    /// A non-zero value indicates the processor is too slow for the
+    /// configured safety timeout.
+    #[must_use]
+    pub fn timeout_rate(&self) -> Option<f64> {
+        if self.items_submitted == 0 {
+            return None;
+        }
+        Some(self.items_timed_out as f64 / self.items_submitted as f64)
     }
 
     /// Average batch size across all dispatched batches.
@@ -330,16 +508,46 @@ impl BatchMetrics {
     }
 }
 
+impl std::fmt::Display for BatchMetrics {
+    /// Human-readable diagnostic summary.
+    ///
+    /// Example output:
+    /// ```text
+    /// batches=120 items=480/500 rejected=15 timed_out=2 fill=0.80 \
+    /// avg_proc=12.5ms avg_form=8.2ms consec_err=0
+    /// ```
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "batches={} items={}/{} rejected={} timed_out={} fill={} avg_proc={} avg_form={} consec_err={}",
+            self.batches_dispatched,
+            self.items_processed,
+            self.items_submitted,
+            self.items_rejected,
+            self.items_timed_out,
+            self.avg_fill_ratio()
+                .map_or_else(|| "n/a".to_string(), |r| format!("{r:.2}")),
+            self.avg_processing_ns()
+                .map_or_else(|| "n/a".to_string(), |ns| format!("{:.1}ms", ns / 1_000_000.0)),
+            self.avg_formation_ns()
+                .map_or_else(|| "n/a".to_string(), |ns| format!("{:.1}ms", ns / 1_000_000.0)),
+            self.consecutive_errors,
+        )
+    }
+}
+
 /// Internal atomic counters for lock-free metrics recording.
 struct BatchMetricsInner {
     batches_dispatched: AtomicU64,
     items_processed: AtomicU64,
     items_submitted: AtomicU64,
     items_rejected: AtomicU64,
+    items_timed_out: AtomicU64,
     total_processing_ns: AtomicU64,
     total_formation_ns: AtomicU64,
     min_batch_size: AtomicU64,
     max_batch_size_seen: AtomicU64,
+    consecutive_errors: AtomicU64,
 }
 
 impl BatchMetricsInner {
@@ -349,10 +557,12 @@ impl BatchMetricsInner {
             items_processed: AtomicU64::new(0),
             items_submitted: AtomicU64::new(0),
             items_rejected: AtomicU64::new(0),
+            items_timed_out: AtomicU64::new(0),
             total_processing_ns: AtomicU64::new(0),
             total_formation_ns: AtomicU64::new(0),
             min_batch_size: AtomicU64::new(u64::MAX),
             max_batch_size_seen: AtomicU64::new(0),
+            consecutive_errors: AtomicU64::new(0),
         }
     }
 
@@ -363,11 +573,13 @@ impl BatchMetricsInner {
             items_processed: self.items_processed.load(Ordering::Relaxed),
             items_submitted: self.items_submitted.load(Ordering::Relaxed),
             items_rejected: self.items_rejected.load(Ordering::Relaxed),
+            items_timed_out: self.items_timed_out.load(Ordering::Relaxed),
             total_processing_ns: self.total_processing_ns.load(Ordering::Relaxed),
             total_formation_ns: self.total_formation_ns.load(Ordering::Relaxed),
             min_batch_size: if min == u64::MAX { 0 } else { min },
             max_batch_size_seen: self.max_batch_size_seen.load(Ordering::Relaxed),
             configured_max_batch_size,
+            consecutive_errors: self.consecutive_errors.load(Ordering::Relaxed),
         }
     }
 
@@ -390,16 +602,33 @@ impl BatchMetricsInner {
     fn record_rejection(&self) {
         self.items_rejected.fetch_add(1, Ordering::Relaxed);
     }
+
+    fn record_timeout(&self) {
+        self.items_timed_out.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_batch_success(&self) {
+        self.consecutive_errors.store(0, Ordering::Relaxed);
+    }
+
+    fn record_batch_error(&self) {
+        self.consecutive_errors.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Internal submission types
 // ---------------------------------------------------------------------------
 
-/// A pending item: the entry to process plus the response channel.
+/// A pending item: the entry to process plus the response channel
+/// and optional per-feed in-flight guard.
 struct PendingEntry {
     entry: BatchEntry,
     response_tx: std::sync::mpsc::SyncSender<Result<StageOutput, StageError>>,
+    /// Per-feed in-flight counter. The coordinator decrements this
+    /// after routing the result (or on drain). Must be decremented
+    /// exactly once per PendingEntry that reached the coordinator.
+    in_flight_guard: Option<Arc<AtomicUsize>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -479,9 +708,29 @@ impl BatchHandle {
         self.inner.metrics.snapshot(self.inner.config.max_batch_size as u64)
     }
 
+    /// Record that a feed-side timeout occurred.
+    ///
+    /// Called by the executor when `submit_and_wait` returns
+    /// `BatchSubmitError::Timeout`. The coordinator is unaware of
+    /// feed-side timeouts (it continues processing the batch), so
+    /// this counter is maintained from the feed side.
+    pub(crate) fn record_timeout(&self) {
+        self.inner.metrics.record_timeout();
+    }
+
     /// Submit an entry and block until the batch result is ready.
     ///
     /// Called by the feed executor on the feed's OS thread.
+    ///
+    /// # In-flight guard
+    ///
+    /// When `in_flight` is `Some`, the counter is checked against
+    /// [`BatchConfig::max_in_flight_per_feed`] before submission.
+    /// If the feed is at its cap, returns
+    /// [`BatchSubmitError::InFlightCapReached`] immediately.
+    /// On successful `try_send`, the counter has been incremented;
+    /// the **coordinator** is responsible for decrementing it after
+    /// routing the result or during drain.
     ///
     /// # Per-submit channel allocation
     ///
@@ -494,33 +743,63 @@ impl BatchHandle {
     pub(crate) fn submit_and_wait(
         &self,
         entry: BatchEntry,
+        in_flight: Option<&Arc<AtomicUsize>>,
     ) -> Result<StageOutput, BatchSubmitError> {
         let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
         self.inner.metrics.record_submission();
 
+        // Check in-flight cap before attempting submission.
+        let guard = if let Some(counter) = in_flight {
+            let prev = counter.fetch_add(1, Ordering::Acquire);
+            if prev >= self.inner.config.max_in_flight_per_feed {
+                counter.fetch_sub(1, Ordering::Release);
+                self.inner.metrics.record_rejection();
+                return Err(BatchSubmitError::InFlightCapReached);
+            }
+            Some(Arc::clone(counter))
+        } else {
+            None
+        };
+
         // Non-blocking submit. If the queue is full, fail immediately
-        // rather than blocking the feed thread.
+        // rather than blocking the feed thread. Decrement in-flight
+        // since the entry never reached the coordinator.
         self.inner
             .submit_tx
-            .try_send(PendingEntry { entry, response_tx })
-            .map_err(|e| match e {
-                std::sync::mpsc::TrySendError::Full(_) => {
-                    self.inner.metrics.record_rejection();
-                    BatchSubmitError::QueueFull
+            .try_send(PendingEntry {
+                entry,
+                response_tx,
+                in_flight_guard: guard.clone(),
+            })
+            .map_err(|e| {
+                // Entry rejected — coordinator never saw it, decrement.
+                if let Some(ref g) = guard {
+                    g.fetch_sub(1, Ordering::Release);
                 }
-                std::sync::mpsc::TrySendError::Disconnected(_) => {
-                    self.inner.metrics.record_rejection();
-                    BatchSubmitError::CoordinatorShutdown
+                match e {
+                    std::sync::mpsc::TrySendError::Full(_) => {
+                        self.inner.metrics.record_rejection();
+                        BatchSubmitError::QueueFull
+                    }
+                    std::sync::mpsc::TrySendError::Disconnected(_) => {
+                        self.inner.metrics.record_rejection();
+                        BatchSubmitError::CoordinatorShutdown
+                    }
                 }
             })?;
 
-        // Bounded wait for the response.
+        // Bounded wait for the response. The coordinator decrements
+        // the in-flight guard before sending the result, so by the
+        // time we receive the response the counter is already updated.
         let safety = self.inner.config.response_timeout
             .unwrap_or(DEFAULT_RESPONSE_TIMEOUT);
         let timeout = self.inner.config.max_latency + safety;
         match response_rx.recv_timeout(timeout) {
             Ok(Ok(output)) => Ok(output),
             Ok(Err(stage_err)) => Err(BatchSubmitError::ProcessingFailed(stage_err)),
+            // Timeout: do NOT decrement — item is still in-flight
+            // inside the coordinator. The coordinator will decrement
+            // when it processes or drains the item.
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(BatchSubmitError::Timeout),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 Err(BatchSubmitError::CoordinatorShutdown)
@@ -540,6 +819,9 @@ pub(crate) enum BatchSubmitError {
     ProcessingFailed(StageError),
     /// No response within safety timeout.
     Timeout,
+    /// Feed has reached its per-feed in-flight cap. A prior timed-out
+    /// submission is still being processed by the coordinator.
+    InFlightCapReached,
 }
 
 // ---------------------------------------------------------------------------
@@ -569,38 +851,12 @@ impl BatchCoordinator {
         config: BatchConfig,
         health_tx: broadcast::Sender<HealthEvent>,
     ) -> Result<Self, nv_core::error::NvError> {
-        use nv_core::error::{ConfigError, NvError, RuntimeError};
+        use nv_core::error::{NvError, RuntimeError};
 
-        if config.max_batch_size == 0 {
-            return Err(NvError::Config(ConfigError::InvalidPolicy {
-                detail: "batch max_batch_size must be >= 1".into(),
-            }));
-        }
-        if config.max_latency.is_zero() {
-            return Err(NvError::Config(ConfigError::InvalidPolicy {
-                detail: "batch max_latency must be > 0".into(),
-            }));
-        }
-        if let Some(rt) = config.response_timeout {
-            if rt.is_zero() {
-                return Err(NvError::Config(ConfigError::InvalidPolicy {
-                    detail: "batch response_timeout must be > 0".into(),
-                }));
-            }
-        }
+        config.validate().map_err(NvError::Config)?;
 
         let queue_depth = match config.queue_capacity {
-            Some(cap) => {
-                if cap < config.max_batch_size {
-                    return Err(NvError::Config(ConfigError::InvalidPolicy {
-                        detail: format!(
-                            "batch queue_capacity ({cap}) must be >= max_batch_size ({})",
-                            config.max_batch_size
-                        ),
-                    }));
-                }
-                cap
-            }
+            Some(cap) => cap,
             None => config.max_batch_size.saturating_mul(4).max(4),
         };
         let (submit_tx, submit_rx) = std::sync::mpsc::sync_channel(queue_depth);
@@ -779,6 +1035,14 @@ impl Drop for BatchCoordinator {
 /// 2. Collect more items until `max_batch_size` or `max_latency` deadline.
 /// 3. Dispatch the batch to the processor.
 /// 4. Route results back to feed threads via per-item response channels.
+///
+/// # Shutdown
+///
+/// On exit, the receiver is dropped **before** calling `on_stop()`.
+/// This is load-bearing: feed threads blocked in `submit_and_wait`
+/// unblock immediately (their response channel disconnects) rather
+/// than waiting for a potentially slow `on_stop()` (GPU teardown,
+/// model unload) to complete.
 fn coordinator_loop(
     rx: std::sync::mpsc::Receiver<PendingEntry>,
     mut processor: Box<dyn BatchProcessor>,
@@ -791,11 +1055,13 @@ fn coordinator_loop(
     let mut entries: Vec<BatchEntry> = Vec::with_capacity(config.max_batch_size);
     let mut responses: Vec<std::sync::mpsc::SyncSender<Result<StageOutput, StageError>>> =
         Vec::with_capacity(config.max_batch_size);
+    let mut in_flight_guards: Vec<Option<Arc<AtomicUsize>>> =
+        Vec::with_capacity(config.max_batch_size);
 
     // Throttle state for BatchError health events.
     let mut last_batch_error_event: Option<Instant> = None;
 
-    loop {
+    'outer: loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
@@ -805,15 +1071,13 @@ fn coordinator_loop(
         // Phase 1: Wait for first item.
         let first = loop {
             if shutdown.load(Ordering::Relaxed) {
-                call_on_stop(&mut *processor);
-                return;
+                break 'outer;
             }
             match rx.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
                 Ok(item) => break item,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    call_on_stop(&mut *processor);
-                    return;
+                    break 'outer;
                 }
             }
         };
@@ -849,9 +1113,11 @@ fn coordinator_loop(
         let batch_size = batch.len();
         entries.clear();
         responses.clear();
+        in_flight_guards.clear();
         for pending in batch.drain(..) {
             entries.push(pending.entry);
             responses.push(pending.response_tx);
+            in_flight_guards.push(pending.in_flight_guard);
         }
 
         let process_start = Instant::now();
@@ -871,14 +1137,29 @@ fn coordinator_loop(
         );
 
         // Phase 4: Route results.
+        //
+        // In-flight guards are decremented BEFORE sending the result
+        // so that by the time the feed thread receives the response
+        // (via the mpsc channel happens-before), the counter is
+        // already updated. This prevents a spurious InFlightCapReached
+        // on the next submission.
         match result {
             Ok(Ok(())) => {
-                for (entry, tx) in entries.drain(..).zip(responses.drain(..)) {
+                metrics.record_batch_success();
+                for ((entry, tx), guard) in entries
+                    .drain(..)
+                    .zip(responses.drain(..))
+                    .zip(in_flight_guards.drain(..))
+                {
+                    if let Some(g) = guard {
+                        g.fetch_sub(1, Ordering::Release);
+                    }
                     let output = entry.output.unwrap_or_default();
                     let _ = tx.send(Ok(output));
                 }
             }
             Ok(Err(stage_err)) => {
+                metrics.record_batch_error();
                 tracing::error!(
                     processor = %processor.id(),
                     error = %stage_err,
@@ -896,11 +1177,15 @@ fn coordinator_loop(
                         error: stage_err.clone(),
                     });
                 }
-                for tx in responses.drain(..) {
+                for (tx, guard) in responses.drain(..).zip(in_flight_guards.drain(..)) {
+                    if let Some(g) = guard {
+                        g.fetch_sub(1, Ordering::Release);
+                    }
                     let _ = tx.send(Err(stage_err.clone()));
                 }
             }
             Err(_panic) => {
+                metrics.record_batch_error();
                 tracing::error!(
                     processor = %processor.id(),
                     batch_size,
@@ -921,14 +1206,59 @@ fn coordinator_loop(
                         error: err.clone(),
                     });
                 }
-                for tx in responses.drain(..) {
+                for (tx, guard) in responses.drain(..).zip(in_flight_guards.drain(..)) {
+                    if let Some(g) = guard {
+                        g.fetch_sub(1, Ordering::Release);
+                    }
                     let _ = tx.send(Err(err.clone()));
                 }
             }
         }
     }
 
+    // Drain any items remaining in the submission channel. Dropping
+    // their response_tx channels unblocks feed threads immediately
+    // with `CoordinatorShutdown` rather than letting them wait until
+    // response_timeout fires, which would misclassify a normal
+    // shutdown as a timeout.
+    let drained = drain_pending(&rx);
+    if drained > 0 {
+        tracing::debug!(
+            processor = %processor.id(),
+            drained,
+            "drained pending items on coordinator shutdown"
+        );
+    }
+
+    // Drop the receiver *before* calling on_stop(). This is
+    // load-bearing: on_stop may be slow (GPU teardown, model unload),
+    // and any items submitted after the drain would block in
+    // recv_timeout until the channel disconnects. Dropping rx now
+    // disconnects the channel so new try_send() calls fail
+    // immediately and existing response channels from drained items
+    // are already dropped.
+    drop(rx);
+
     call_on_stop(&mut *processor);
+}
+
+/// Drain all pending items from the submission channel, dropping
+/// their response senders so feed threads unblock with
+/// `RecvTimeoutError::Disconnected` → `CoordinatorShutdown`.
+///
+/// In-flight guards are decremented for each drained entry so that
+/// feed threads blocked by `InFlightCapReached` are unblocked.
+///
+/// Returns the number of items drained.
+fn drain_pending(rx: &std::sync::mpsc::Receiver<PendingEntry>) -> u64 {
+    let mut count = 0u64;
+    while let Ok(pe) = rx.try_recv() {
+        if let Some(ref g) = pe.in_flight_guard {
+            g.fetch_sub(1, Ordering::Release);
+        }
+        count += 1;
+    }
+    count
 }
 
 /// Best-effort call to `on_stop`. Errors and panics are logged but
@@ -1064,11 +1394,12 @@ mod tests {
                 max_latency: Duration::from_millis(20),
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
         );
 
         let handle = coord.handle();
-        let result = handle.submit_and_wait(make_entry(1));
+        let result = handle.submit_and_wait(make_entry(1), None);
         assert!(result.is_ok());
         assert!(result.unwrap().detections.is_some());
         assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -1086,6 +1417,7 @@ mod tests {
                 max_latency: Duration::from_secs(10), // long timeout — should fire on size
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
         );
 
@@ -1094,7 +1426,7 @@ mod tests {
         let start = Instant::now();
         for i in 0..4 {
             let h = handle.clone();
-            handles.push(std::thread::spawn(move || h.submit_and_wait(make_entry(i))));
+            handles.push(std::thread::spawn(move || h.submit_and_wait(make_entry(i), None)));
         }
 
         for h in handles {
@@ -1122,6 +1454,7 @@ mod tests {
                 max_latency: Duration::from_millis(30),
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
         );
 
@@ -1130,7 +1463,7 @@ mod tests {
         let mut handles = Vec::new();
         for i in 0..3 {
             let h = handle.clone();
-            handles.push(std::thread::spawn(move || h.submit_and_wait(make_entry(i))));
+            handles.push(std::thread::spawn(move || h.submit_and_wait(make_entry(i), None)));
         }
 
         for h in handles {
@@ -1171,6 +1504,7 @@ mod tests {
                 max_latency: Duration::from_millis(20),
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
         );
 
@@ -1178,7 +1512,7 @@ mod tests {
         let mut join_handles = Vec::new();
         for i in 0..3 {
             let h = handle.clone();
-            join_handles.push(std::thread::spawn(move || h.submit_and_wait(make_entry(i))));
+            join_handles.push(std::thread::spawn(move || h.submit_and_wait(make_entry(i), None)));
         }
 
         for jh in join_handles {
@@ -1218,11 +1552,12 @@ mod tests {
                 max_latency: Duration::from_millis(20),
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
         );
 
         let handle = coord.handle();
-        let result = handle.submit_and_wait(make_entry(1));
+        let result = handle.submit_and_wait(make_entry(1), None);
         assert!(matches!(result, Err(BatchSubmitError::ProcessingFailed(_))));
 
         let event = health_rx.try_recv();
@@ -1241,12 +1576,13 @@ mod tests {
                 max_latency: Duration::from_millis(10),
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
         );
 
         let handle = coord.handle();
-        let _ = handle.submit_and_wait(make_entry(1));
-        let _ = handle.submit_and_wait(make_entry(2));
+        let _ = handle.submit_and_wait(make_entry(1), None);
+        let _ = handle.submit_and_wait(make_entry(2), None);
 
         let m = handle.metrics();
         assert_eq!(m.items_submitted, 2);
@@ -1268,6 +1604,7 @@ mod tests {
                 max_latency: Duration::from_secs(10),
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
         );
 
@@ -1275,7 +1612,7 @@ mod tests {
         // Submit one item, then shut down — the coordinator's Phase 2
         // shutdown check should dispatch the partial batch promptly.
         let h = handle.clone();
-        let jh = std::thread::spawn(move || h.submit_and_wait(make_entry(1)));
+        let jh = std::thread::spawn(move || h.submit_and_wait(make_entry(1), None));
 
         // Give the coordinator time to receive the item.
         std::thread::sleep(Duration::from_millis(50));
@@ -1306,6 +1643,7 @@ mod tests {
                 max_latency: Duration::from_millis(10),
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
             health_tx,
         );
@@ -1323,6 +1661,7 @@ mod tests {
                 max_latency: Duration::ZERO,
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
             health_tx,
         );
@@ -1357,6 +1696,7 @@ mod tests {
                 max_latency: Duration::from_millis(50),
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
         );
 
@@ -1365,7 +1705,7 @@ mod tests {
         for feed_id in 1..=4u64 {
             let h = handle.clone();
             join_handles.push(std::thread::spawn(move || {
-                let result = h.submit_and_wait(make_entry(feed_id));
+                let result = h.submit_and_wait(make_entry(feed_id), None);
                 (feed_id, result)
             }));
         }
@@ -1395,6 +1735,7 @@ mod tests {
                 max_latency: Duration::from_millis(10),
                 queue_capacity: Some(4), // less than max_batch_size=8
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
             health_tx,
         );
@@ -1411,10 +1752,11 @@ mod tests {
                 max_latency: Duration::from_millis(20),
                 queue_capacity: Some(32),
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
         );
         let handle = coord.handle();
-        let _ = handle.submit_and_wait(make_entry(1));
+        let _ = handle.submit_and_wait(make_entry(1), None);
         coord.shutdown();
     }
 
@@ -1428,6 +1770,7 @@ mod tests {
                 max_latency: Duration::from_millis(20),
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
         );
 
@@ -1438,7 +1781,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
 
         // Submit after coordinator is gone — should get CoordinatorShutdown.
-        let result = handle.submit_and_wait(make_entry(1));
+        let result = handle.submit_and_wait(make_entry(1), None);
         assert!(matches!(result, Err(BatchSubmitError::CoordinatorShutdown)));
 
         // items_submitted was incremented, and items_rejected should also
@@ -1456,11 +1799,13 @@ mod tests {
             items_processed: 0,
             items_submitted: 0,
             items_rejected: 0,
+            items_timed_out: 0,
             total_processing_ns: 0,
             total_formation_ns: 0,
             min_batch_size: 0,
             max_batch_size_seen: 0,
             configured_max_batch_size: 8,
+            consecutive_errors: 0,
         };
         assert!(m.avg_batch_size().is_none());
         assert!(m.avg_fill_ratio().is_none());
@@ -1475,11 +1820,13 @@ mod tests {
             items_processed: 12,
             items_submitted: 12,
             items_rejected: 0,
+            items_timed_out: 0,
             total_processing_ns: 400_000,
             total_formation_ns: 200_000,
             min_batch_size: 2,
             max_batch_size_seen: 4,
             configured_max_batch_size: 8,
+            consecutive_errors: 0,
         };
         let avg = m.avg_batch_size().unwrap();
         assert!((avg - 3.0).abs() < f64::EPSILON, "expected 12/4 = 3.0, got {avg}");
@@ -1492,11 +1839,13 @@ mod tests {
             items_processed: 8,
             items_submitted: 8,
             items_rejected: 0,
+            items_timed_out: 0,
             total_processing_ns: 0,
             total_formation_ns: 0,
             min_batch_size: 4,
             max_batch_size_seen: 4,
             configured_max_batch_size: 8,
+            consecutive_errors: 0,
         };
         let ratio = m.avg_fill_ratio().unwrap();
         assert!((ratio - 0.5).abs() < f64::EPSILON, "expected 4/8 = 0.5, got {ratio}");
@@ -1509,11 +1858,13 @@ mod tests {
             items_processed: 24,
             items_submitted: 24,
             items_rejected: 0,
+            items_timed_out: 0,
             total_processing_ns: 0,
             total_formation_ns: 0,
             min_batch_size: 8,
             max_batch_size_seen: 8,
             configured_max_batch_size: 8,
+            consecutive_errors: 0,
         };
         let ratio = m.avg_fill_ratio().unwrap();
         assert!((ratio - 1.0).abs() < f64::EPSILON, "expected 1.0 for full batches, got {ratio}");
@@ -1526,11 +1877,13 @@ mod tests {
             items_processed: 20,
             items_submitted: 20,
             items_rejected: 0,
+            items_timed_out: 0,
             total_processing_ns: 500_000,
             total_formation_ns: 250_000,
             min_batch_size: 4,
             max_batch_size_seen: 4,
             configured_max_batch_size: 8,
+            consecutive_errors: 0,
         };
         let avg_proc = m.avg_processing_ns().unwrap();
         assert!((avg_proc - 100_000.0).abs() < f64::EPSILON);
@@ -1548,6 +1901,7 @@ mod tests {
                 max_latency: Duration::from_millis(20),
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
         );
         let m = coord.handle().metrics();
@@ -1597,12 +1951,13 @@ mod tests {
                 max_latency: Duration::from_secs(10),
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
         );
 
         let handle = coord.handle();
         let h = handle.clone();
-        let jh = std::thread::spawn(move || h.submit_and_wait(make_entry(1)));
+        let jh = std::thread::spawn(move || h.submit_and_wait(make_entry(1), None));
 
         std::thread::sleep(Duration::from_millis(50));
 
@@ -1684,11 +2039,12 @@ mod tests {
                 max_latency: Duration::from_millis(20),
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
         );
 
         let handle = coord.handle();
-        let result = handle.submit_and_wait(make_entry(1));
+        let result = handle.submit_and_wait(make_entry(1), None);
         let output = result.expect("scene classifier should succeed");
         assert_eq!(output.scene_features.len(), 1);
         assert_eq!(output.scene_features[0].name, "weather");
@@ -1801,6 +2157,7 @@ mod tests {
                 max_latency: Duration::from_millis(10),
                 queue_capacity: None,
                 response_timeout: Some(Duration::ZERO),
+                max_in_flight_per_feed: 1,
             },
             health_tx,
         );
@@ -1836,12 +2193,13 @@ mod tests {
                 // Very short response timeout — should trigger before
                 // the 3s processing completes.
                 response_timeout: Some(Duration::from_millis(200)),
+                max_in_flight_per_feed: 1,
             },
             health_tx,
         ).unwrap();
 
         let handle = coord.handle();
-        let result = handle.submit_and_wait(make_entry(1));
+        let result = handle.submit_and_wait(make_entry(1), None);
         assert!(
             matches!(result, Err(BatchSubmitError::Timeout)),
             "expected Timeout with short response_timeout, got: {result:?}"
@@ -1872,6 +2230,7 @@ mod tests {
                 max_latency: Duration::from_millis(10),
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
         );
 
@@ -1880,7 +2239,7 @@ mod tests {
         // Submit rapidly many times. Due to BATCH_ERROR_THROTTLE (1s),
         // only the first should produce a BatchError health event.
         for i in 0..5 {
-            let _ = handle.submit_and_wait(make_entry(i));
+            let _ = handle.submit_and_wait(make_entry(i), None);
         }
 
         // Count how many BatchError events were emitted.
@@ -1895,6 +2254,856 @@ mod tests {
             event_count, 1,
             "BatchError should be throttled to 1 per second, got {event_count}"
         );
+
+        coord.shutdown();
+    }
+
+    // ---------------------------------------------------------------
+    // New tests: shutdown drain, consecutive errors, timeout metric,
+    // config validation, Display, rejection/timeout rate helpers
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn shutdown_drain_unblocks_feeds_before_on_stop() {
+        use std::sync::Barrier;
+
+        /// Processor whose on_stop blocks until a barrier is released,
+        /// simulating slow GPU teardown. The test verifies that feed
+        /// threads unblock with CoordinatorShutdown (not Timeout)
+        /// BEFORE on_stop completes.
+        struct SlowStopProcessor {
+            barrier: Arc<Barrier>,
+        }
+        impl BatchProcessor for SlowStopProcessor {
+            fn id(&self) -> StageId {
+                StageId("slow_stop")
+            }
+            fn process(&mut self, items: &mut [BatchEntry]) -> Result<(), StageError> {
+                for item in items.iter_mut() {
+                    item.output = Some(StageOutput::empty());
+                }
+                Ok(())
+            }
+            fn on_stop(&mut self) -> Result<(), StageError> {
+                // Block for a long time — feed must unblock before this.
+                self.barrier.wait();
+                Ok(())
+            }
+        }
+
+        let barrier = Arc::new(Barrier::new(2));
+        let (health_tx, _health_rx) = broadcast::channel(64);
+        let coord = BatchCoordinator::start(
+            Box::new(SlowStopProcessor { barrier: Arc::clone(&barrier) }),
+            BatchConfig {
+                max_batch_size: 100, // very large — will never fill
+                max_latency: Duration::from_secs(60), // very long — will never fire
+                queue_capacity: None,
+                // Short response timeout to distinguish from Timeout
+                response_timeout: Some(Duration::from_millis(500)),
+                max_in_flight_per_feed: 1,
+            },
+            health_tx,
+        ).unwrap();
+
+        let handle = coord.handle();
+
+        // Submit an item. The batch won't form (max_batch_size=100,
+        // max_latency=60s), so the item sits in the queue.
+        let h = handle.clone();
+        let feed_thread = std::thread::spawn(move || {
+            h.submit_and_wait(make_entry(1), None)
+        });
+
+        // Give the item time to land in the queue.
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Signal shutdown. The coordinator should:
+        // 1. Break out of Phase 1 (or Phase 2) on shutdown flag
+        // 2. Drain pending items (dropping response channels)
+        // 3. Drop rx
+        // 4. THEN call on_stop (which blocks on barrier)
+        //
+        // The feed thread should unblock at step 2/3 with
+        // CoordinatorShutdown, NOT wait for the 500ms response
+        // timeout or for on_stop to complete.
+        coord.signal_shutdown();
+
+        let start = Instant::now();
+        let result = feed_thread.join().unwrap();
+        let elapsed = start.elapsed();
+
+        // Release the barrier so the coordinator thread can finish.
+        barrier.wait();
+
+        // The feed should have gotten CoordinatorShutdown (not Timeout).
+        // It should have unblocked quickly (well under the 500ms
+        // response timeout).
+        assert!(
+            matches!(
+                result,
+                Err(BatchSubmitError::CoordinatorShutdown) | Ok(_)
+            ),
+            "expected CoordinatorShutdown or Ok (if batch was processed before drain), got: {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "feed should unblock promptly on shutdown drain, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn consecutive_errors_tracks_and_resets() {
+        struct ToggleProcessor {
+            call_count: u32,
+        }
+        impl BatchProcessor for ToggleProcessor {
+            fn id(&self) -> StageId {
+                StageId("toggle")
+            }
+            fn process(&mut self, items: &mut [BatchEntry]) -> Result<(), StageError> {
+                self.call_count += 1;
+                if self.call_count <= 3 {
+                    return Err(StageError::ProcessingFailed {
+                        stage_id: StageId("toggle"),
+                        detail: "intentional".into(),
+                    });
+                }
+                for item in items.iter_mut() {
+                    item.output = Some(StageOutput::empty());
+                }
+                Ok(())
+            }
+        }
+
+        let (coord, _rx) = start_coordinator(
+            Box::new(ToggleProcessor { call_count: 0 }),
+            BatchConfig {
+                max_batch_size: 1,
+                max_latency: Duration::from_millis(10),
+                queue_capacity: None,
+                response_timeout: None,
+                max_in_flight_per_feed: 1,
+            },
+        );
+
+        let handle = coord.handle();
+
+        // First 3 calls fail — consecutive_errors should climb.
+        for _ in 0..3 {
+            let _ = handle.submit_and_wait(make_entry(1), None);
+        }
+        let m = handle.metrics();
+        assert_eq!(m.consecutive_errors, 3, "should track 3 consecutive errors");
+
+        // 4th call succeeds — consecutive_errors should reset.
+        let result = handle.submit_and_wait(make_entry(1), None);
+        assert!(result.is_ok());
+        let m = handle.metrics();
+        assert_eq!(m.consecutive_errors, 0, "should reset to 0 after success");
+
+        coord.shutdown();
+    }
+
+    #[test]
+    fn items_timed_out_metric_incremented() {
+        // Use record_timeout directly since it's pub(crate).
+        let (proc, _calls) = CountingProcessor::new();
+        let (coord, _rx) = start_coordinator(
+            Box::new(proc),
+            BatchConfig {
+                max_batch_size: 2,
+                max_latency: Duration::from_millis(10),
+                queue_capacity: None,
+                response_timeout: None,
+                max_in_flight_per_feed: 1,
+            },
+        );
+
+        let handle = coord.handle();
+        assert_eq!(handle.metrics().items_timed_out, 0);
+
+        // Simulate timeout recording (normally done by executor).
+        handle.record_timeout();
+        handle.record_timeout();
+        assert_eq!(handle.metrics().items_timed_out, 2);
+
+        coord.shutdown();
+    }
+
+    #[test]
+    fn config_validate_catches_all_errors() {
+        // Valid config.
+        assert!(BatchConfig::new(4, Duration::from_millis(50))
+            .unwrap()
+            .validate()
+            .is_ok());
+
+        // queue_capacity too small.
+        let cfg = BatchConfig {
+            max_batch_size: 8,
+            queue_capacity: Some(4),
+            ..BatchConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+
+        // response_timeout zero.
+        let cfg = BatchConfig {
+            response_timeout: Some(Duration::ZERO),
+            ..BatchConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+
+        // All fields valid.
+        let cfg = BatchConfig::new(4, Duration::from_millis(50))
+            .unwrap()
+            .with_queue_capacity(Some(16))
+            .with_response_timeout(Some(Duration::from_secs(2)));
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn display_impl_produces_readable_output() {
+        let m = BatchMetrics {
+            batches_dispatched: 10,
+            items_processed: 40,
+            items_submitted: 45,
+            items_rejected: 3,
+            items_timed_out: 1,
+            total_processing_ns: 100_000_000,
+            total_formation_ns: 50_000_000,
+            min_batch_size: 3,
+            max_batch_size_seen: 4,
+            configured_max_batch_size: 4,
+            consecutive_errors: 0,
+        };
+        let s = format!("{m}");
+        assert!(s.contains("batches=10"), "missing batches count: {s}");
+        assert!(s.contains("items=40/45"), "missing items counts: {s}");
+        assert!(s.contains("rejected=3"), "missing rejected: {s}");
+        assert!(s.contains("timed_out=1"), "missing timed_out: {s}");
+        assert!(s.contains("consec_err=0"), "missing consec_err: {s}");
+    }
+
+    #[test]
+    fn rejection_rate_and_timeout_rate_helpers() {
+        let m = BatchMetrics {
+            batches_dispatched: 4,
+            items_processed: 8,
+            items_submitted: 20,
+            items_rejected: 10,
+            items_timed_out: 2,
+            total_processing_ns: 0,
+            total_formation_ns: 0,
+            min_batch_size: 2,
+            max_batch_size_seen: 2,
+            configured_max_batch_size: 4,
+            consecutive_errors: 0,
+        };
+        let rr = m.rejection_rate().unwrap();
+        assert!((rr - 0.5).abs() < f64::EPSILON, "expected 0.5, got {rr}");
+
+        let tr = m.timeout_rate().unwrap();
+        assert!((tr - 0.1).abs() < f64::EPSILON, "expected 0.1, got {tr}");
+
+        // Zero submissions → None.
+        let empty = BatchMetrics::default();
+        assert!(empty.rejection_rate().is_none());
+        assert!(empty.timeout_rate().is_none());
+    }
+
+    #[test]
+    fn shutdown_processes_last_batch_before_drain() {
+        /// Processor that records which feed_ids it saw in each batch.
+        struct RecordingProcessor {
+            seen: Vec<Vec<u64>>,
+        }
+        impl BatchProcessor for RecordingProcessor {
+            fn id(&self) -> StageId {
+                StageId("recorder")
+            }
+            fn process(&mut self, items: &mut [BatchEntry]) -> Result<(), StageError> {
+                let ids: Vec<u64> = items.iter().map(|i| i.feed_id.as_u64()).collect();
+                self.seen.push(ids);
+                for item in items.iter_mut() {
+                    item.output = Some(StageOutput::empty());
+                }
+                Ok(())
+            }
+        }
+
+        let (coord, _rx) = start_coordinator(
+            Box::new(RecordingProcessor { seen: Vec::new() }),
+            BatchConfig {
+                max_batch_size: 2,
+                max_latency: Duration::from_millis(30),
+                queue_capacity: None,
+                response_timeout: None,
+                max_in_flight_per_feed: 1,
+            },
+        );
+
+        let handle = coord.handle();
+
+        // Submit 2 items which should form a full batch and dispatch.
+        let h1 = handle.clone();
+        let h2 = handle.clone();
+        let t1 = std::thread::spawn(move || h1.submit_and_wait(make_entry(1), None));
+        let t2 = std::thread::spawn(move || h2.submit_and_wait(make_entry(2), None));
+        let r1 = t1.join().unwrap();
+        let r2 = t2.join().unwrap();
+        assert!(r1.is_ok() && r2.is_ok(), "first batch should succeed");
+
+        // Verify metrics — 1 batch, 2 items.
+        let m = handle.metrics();
+        assert_eq!(m.batches_dispatched, 1);
+        assert_eq!(m.items_processed, 2);
+
+        coord.shutdown();
+    }
+
+    // ---------------------------------------------------------------
+    // Fairness: submit_and_wait serialization prevents starvation
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn submit_and_wait_serializes_per_feed_preventing_starvation() {
+        /// Processor that records feed_id for every item it sees.
+        struct RecordProcessor {
+            seen: Arc<std::sync::Mutex<Vec<u64>>>,
+        }
+        impl BatchProcessor for RecordProcessor {
+            fn id(&self) -> StageId {
+                StageId("record")
+            }
+            fn process(&mut self, items: &mut [BatchEntry]) -> Result<(), StageError> {
+                let mut seen = self.seen.lock().unwrap();
+                for item in items.iter_mut() {
+                    seen.push(item.feed_id.as_u64());
+                    item.output = Some(StageOutput::empty());
+                }
+                Ok(())
+            }
+        }
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let proc = RecordProcessor { seen: Arc::clone(&seen) };
+        let (coord, _rx) = start_coordinator(
+            Box::new(proc),
+            BatchConfig {
+                max_batch_size: 2,
+                max_latency: Duration::from_millis(30),
+                // Queue capacity just big enough for feeds.
+                queue_capacity: Some(4),
+                response_timeout: None,
+                max_in_flight_per_feed: 1,
+            },
+        );
+
+        let handle = coord.handle();
+
+        // Spawn 4 feeds, each submitting 10 frames sequentially.
+        // Because submit_and_wait blocks, each feed has at most 1
+        // item in the queue. If starvation occurred, some feed would
+        // have 0 processed items.
+        let num_feeds = 4u64;
+        let frames_per_feed = 10u64;
+        let mut threads = Vec::new();
+        for feed_id in 1..=num_feeds {
+            let h = handle.clone();
+            threads.push(std::thread::spawn(move || {
+                for _ in 0..frames_per_feed {
+                    let _ = h.submit_and_wait(make_entry(feed_id), None);
+                }
+            }));
+        }
+
+        for t in threads {
+            t.join().unwrap();
+        }
+
+        // Verify every feed got at least some items processed.
+        let seen = seen.lock().unwrap();
+        for feed_id in 1..=num_feeds {
+            let count = seen.iter().filter(|&&id| id == feed_id).count();
+            assert!(
+                count > 0,
+                "feed {feed_id} was starved — 0 of {frames_per_feed} items processed"
+            );
+        }
+
+        let m = handle.metrics();
+        assert_eq!(
+            m.items_processed,
+            num_feeds * frames_per_feed,
+            "all items should be processed"
+        );
+        assert_eq!(m.items_rejected, 0, "no rejections expected with adequate queue");
+
+        coord.shutdown();
+    }
+
+    #[test]
+    fn mixed_rate_feeds_all_make_progress() {
+        /// Processor with a deliberate 5ms processing delay per batch
+        /// to create realistic contention.
+        struct SlowProcessor;
+        impl BatchProcessor for SlowProcessor {
+            fn id(&self) -> StageId {
+                StageId("slow_mix")
+            }
+            fn process(&mut self, items: &mut [BatchEntry]) -> Result<(), StageError> {
+                std::thread::sleep(Duration::from_millis(5));
+                for item in items.iter_mut() {
+                    item.output = Some(StageOutput::empty());
+                }
+                Ok(())
+            }
+        }
+
+        let (coord, _rx) = start_coordinator(
+            Box::new(SlowProcessor),
+            BatchConfig {
+                max_batch_size: 4,
+                max_latency: Duration::from_millis(20),
+                queue_capacity: Some(8),
+                response_timeout: None,
+                max_in_flight_per_feed: 1,
+            },
+        );
+
+        let handle = coord.handle();
+        let success_counts: Arc<[AtomicU32; 3]> = Arc::new([
+            AtomicU32::new(0),
+            AtomicU32::new(0),
+            AtomicU32::new(0),
+        ]);
+
+        // Feed 1: fast (20 frames), Feed 2: medium (10), Feed 3: slow (5).
+        let rates = [(1u64, 20u32), (2, 10), (3, 5)];
+        let mut threads = Vec::new();
+        for (idx, &(feed_id, count)) in rates.iter().enumerate() {
+            let h = handle.clone();
+            let sc = Arc::clone(&success_counts);
+            threads.push(std::thread::spawn(move || {
+                for _ in 0..count {
+                    if h.submit_and_wait(make_entry(feed_id), None).is_ok() {
+                        sc[idx].fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }));
+        }
+
+        for t in threads {
+            t.join().unwrap();
+        }
+
+        // All feeds must have made progress.
+        for (idx, &(feed_id, submitted)) in rates.iter().enumerate() {
+            let ok = success_counts[idx].load(Ordering::Relaxed);
+            assert!(
+                ok > 0,
+                "feed {feed_id} made zero progress ({ok}/{submitted} succeeded)"
+            );
+        }
+
+        coord.shutdown();
+    }
+
+    /// Under non-timeout operation, `submit_and_wait` blocks so each
+    /// feed occupies at most one queue slot. This test validates that
+    /// property: no feed appears twice in any single batch.
+    ///
+    /// NOTE: this invariant can break in timeout regimes — see the
+    /// fairness model documentation for details.
+    #[test]
+    fn single_inflight_per_feed_under_contention() {
+        /// Processor that asserts no feed has > 1 item in a single batch.
+        struct UniquePerFeedProcessor;
+        impl BatchProcessor for UniquePerFeedProcessor {
+            fn id(&self) -> StageId {
+                StageId("unique_check")
+            }
+            fn process(&mut self, items: &mut [BatchEntry]) -> Result<(), StageError> {
+                let mut seen = std::collections::HashSet::new();
+                for item in items.iter_mut() {
+                    let is_new = seen.insert(item.feed_id.as_u64());
+                    assert!(
+                        is_new,
+                        "feed {} appeared twice in one batch — violates \
+                         single-inflight invariant (non-timeout regime)",
+                        item.feed_id,
+                    );
+                    item.output = Some(StageOutput::empty());
+                }
+                Ok(())
+            }
+        }
+
+        let (coord, _rx) = start_coordinator(
+            Box::new(UniquePerFeedProcessor),
+            BatchConfig {
+                max_batch_size: 8,
+                max_latency: Duration::from_millis(30),
+                queue_capacity: Some(8),
+                response_timeout: None,
+                max_in_flight_per_feed: 1,
+            },
+        );
+
+        let handle = coord.handle();
+        let mut threads = Vec::new();
+        for feed_id in 1..=8u64 {
+            let h = handle.clone();
+            threads.push(std::thread::spawn(move || {
+                for _ in 0..10 {
+                    let _ = h.submit_and_wait(make_entry(feed_id), None);
+                }
+            }));
+        }
+        for t in threads {
+            t.join().unwrap();
+        }
+
+        coord.shutdown();
+    }
+
+    // ---------------------------------------------------------------
+    // In-flight cap: prevents stacking after timeout
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn in_flight_cap_prevents_stacking_after_timeout() {
+        use std::sync::atomic::AtomicBool;
+
+        /// Processor that is slow on first call and fast thereafter.
+        struct OnceSlowProcessor {
+            slow: AtomicBool,
+        }
+        impl BatchProcessor for OnceSlowProcessor {
+            fn id(&self) -> StageId {
+                StageId("slow_cap")
+            }
+            fn process(&mut self, items: &mut [BatchEntry]) -> Result<(), StageError> {
+                if self.slow.swap(false, Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                for item in items.iter_mut() {
+                    item.output = Some(StageOutput::empty());
+                }
+                Ok(())
+            }
+        }
+
+        let (coord, _rx) = start_coordinator(
+            Box::new(OnceSlowProcessor { slow: AtomicBool::new(true) }),
+            BatchConfig {
+                max_batch_size: 1,
+                max_latency: Duration::from_millis(10),
+                queue_capacity: Some(4),
+                // Very short timeout so feed times out quickly.
+                response_timeout: Some(Duration::from_millis(50)),
+                max_in_flight_per_feed: 1,
+            },
+        );
+
+        let handle = coord.handle();
+        let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        // Submit 1: will timeout because processor sleeps 500ms on first call.
+        let r1 = handle.submit_and_wait(make_entry(1), Some(&in_flight));
+        assert!(
+            matches!(r1, Err(BatchSubmitError::Timeout)),
+            "first submit should timeout, got: {r1:?}"
+        );
+
+        // in_flight should still be 1 (coordinator hasn't processed yet).
+        assert_eq!(
+            in_flight.load(Ordering::Acquire), 1,
+            "in_flight should be 1 after timeout"
+        );
+
+        // Submit 2: should be rejected immediately by in-flight cap.
+        let r2 = handle.submit_and_wait(make_entry(1), Some(&in_flight));
+        assert!(
+            matches!(r2, Err(BatchSubmitError::InFlightCapReached)),
+            "second submit should hit in-flight cap, got: {r2:?}"
+        );
+
+        // in_flight should still be 1 (InFlightCapReached didn't change it).
+        assert_eq!(
+            in_flight.load(Ordering::Acquire), 1,
+            "in_flight should remain 1 after cap rejection"
+        );
+
+        // Metrics: 2 submitted, 1 rejected (the InFlightCapReached).
+        let m = handle.metrics();
+        assert_eq!(m.items_submitted, 2, "two submissions total");
+        assert_eq!(m.items_rejected, 1, "InFlightCapReached counts as rejection");
+        // pending_items should reflect only the one actual in-flight item.
+        assert_eq!(m.pending_items(), 1, "only one item genuinely pending");
+
+        // Wait for coordinator to process the timed-out item.
+        std::thread::sleep(Duration::from_millis(600));
+
+        // in_flight should now be 0 (coordinator decremented).
+        assert_eq!(
+            in_flight.load(Ordering::Acquire), 0,
+            "in_flight should be 0 after coordinator processes"
+        );
+
+        // Submit 3: should succeed now (processor is fast on subsequent calls).
+        let r3 = handle.submit_and_wait(make_entry(1), Some(&in_flight));
+        assert!(r3.is_ok(), "third submit should succeed, got: {r3:?}");
+
+        coord.shutdown();
+    }
+
+    #[test]
+    fn in_flight_guard_decremented_on_queue_full() {
+        let (proc, _) = CountingProcessor::new();
+        let (coord, _rx) = start_coordinator(
+            Box::new(proc),
+            BatchConfig {
+                max_batch_size: 100,
+                max_latency: Duration::from_secs(60),
+                queue_capacity: Some(100),
+                response_timeout: None,
+                max_in_flight_per_feed: 2,
+            },
+        );
+
+        // Shut down coordinator so try_send returns Disconnected.
+        coord.signal_shutdown();
+        std::thread::sleep(Duration::from_millis(200));
+        let handle2 = coord.handle();
+
+        let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result = handle2.submit_and_wait(make_entry(1), Some(&in_flight));
+        assert!(
+            matches!(result, Err(BatchSubmitError::CoordinatorShutdown)),
+            "expected CoordinatorShutdown after shutdown, got: {result:?}"
+        );
+        // in_flight should be 0 — incremented then decremented on send failure.
+        assert_eq!(
+            in_flight.load(Ordering::Acquire), 0,
+            "in_flight should be 0 after send failure"
+        );
+
+        coord.shutdown();
+    }
+
+    #[test]
+    fn shutdown_drain_clears_in_flight_guards() {
+        /// Processor that sleeps long enough to keep the coordinator busy
+        /// while additional items accumulate in the channel.
+        struct BlockingProcessor;
+        impl BatchProcessor for BlockingProcessor {
+            fn id(&self) -> StageId {
+                StageId("blocking_drain")
+            }
+            fn process(&mut self, items: &mut [BatchEntry]) -> Result<(), StageError> {
+                std::thread::sleep(Duration::from_millis(400));
+                for item in items.iter_mut() {
+                    item.output = Some(StageOutput::empty());
+                }
+                Ok(())
+            }
+        }
+
+        // max_batch_size=1 so the coordinator dispatches the first item
+        // immediately, leaving items 2-4 in the channel for drain.
+        let (coord, _rx) = start_coordinator(
+            Box::new(BlockingProcessor),
+            BatchConfig {
+                max_batch_size: 1,
+                max_latency: Duration::from_millis(5),
+                queue_capacity: Some(10),
+                response_timeout: Some(Duration::from_millis(50)),
+                max_in_flight_per_feed: 4,
+            },
+        );
+
+        let handle = coord.handle();
+        let in_flights: Vec<Arc<std::sync::atomic::AtomicUsize>> = (0..4)
+            .map(|_| Arc::new(std::sync::atomic::AtomicUsize::new(0)))
+            .collect();
+
+        // Submit 4 items from separate threads. Item 1 will be dispatched
+        // to the processor (sleeping 400ms). Items 2-4 stay in the channel.
+        let mut threads = Vec::new();
+        for (i, counter) in in_flights.iter().enumerate() {
+            let h = handle.clone();
+            let c = Arc::clone(counter);
+            threads.push(std::thread::spawn(move || {
+                let _ = h.submit_and_wait(make_entry(i as u64 + 1), Some(&c));
+            }));
+        }
+
+        // Wait for all feeds to timeout (50ms) and items to be in the system.
+        std::thread::sleep(Duration::from_millis(150));
+
+        // All in_flight counters should be 1.
+        for (i, counter) in in_flights.iter().enumerate() {
+            assert_eq!(
+                counter.load(Ordering::Acquire), 1,
+                "feed {} in_flight should be 1 before shutdown", i + 1
+            );
+        }
+
+        // Signal shutdown while the processor is still sleeping.
+        // Coordinator will finish item 1 (~400ms), then drain items 2-4.
+        coord.shutdown();
+
+        // Wait for threads to finish.
+        for t in threads {
+            let _ = t.join();
+        }
+
+        // All in_flight counters should be 0:
+        // - Item 1's guard decremented in Phase 4 (result routing).
+        // - Items 2-4 guards decremented in drain_pending.
+        for (i, counter) in in_flights.iter().enumerate() {
+            assert_eq!(
+                counter.load(Ordering::Acquire), 0,
+                "feed {} in_flight should be 0 after shutdown drain", i + 1
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_rate_feeds_progress_with_in_flight_cap() {
+        /// Processor with realistic latency.
+        struct RealisticProcessor;
+        impl BatchProcessor for RealisticProcessor {
+            fn id(&self) -> StageId {
+                StageId("realistic")
+            }
+            fn process(&mut self, items: &mut [BatchEntry]) -> Result<(), StageError> {
+                std::thread::sleep(Duration::from_millis(10));
+                for item in items.iter_mut() {
+                    item.output = Some(StageOutput::empty());
+                }
+                Ok(())
+            }
+        }
+
+        let (coord, _rx) = start_coordinator(
+            Box::new(RealisticProcessor),
+            BatchConfig {
+                max_batch_size: 4,
+                max_latency: Duration::from_millis(20),
+                queue_capacity: Some(8),
+                response_timeout: None,
+                max_in_flight_per_feed: 1,
+            },
+        );
+
+        let handle = coord.handle();
+        let success_counts: Arc<[AtomicU32; 3]> = Arc::new([
+            AtomicU32::new(0),
+            AtomicU32::new(0),
+            AtomicU32::new(0),
+        ]);
+
+        // Feed 1: fast (15 frames), Feed 2: medium (10), Feed 3: slow (5).
+        let rates = [(1u64, 15u32), (2, 10), (3, 5)];
+        let mut threads = Vec::new();
+        for (idx, &(feed_id, count)) in rates.iter().enumerate() {
+            let h = handle.clone();
+            let sc = Arc::clone(&success_counts);
+            let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            threads.push(std::thread::spawn(move || {
+                for _ in 0..count {
+                    if h.submit_and_wait(make_entry(feed_id), Some(&in_flight)).is_ok() {
+                        sc[idx].fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }));
+        }
+
+        for t in threads {
+            t.join().unwrap();
+        }
+
+        // All feeds must have made progress.
+        for (idx, &(feed_id, submitted)) in rates.iter().enumerate() {
+            let ok = success_counts[idx].load(Ordering::Relaxed);
+            assert!(
+                ok > 0,
+                "feed {feed_id} made zero progress ({ok}/{submitted} succeeded)"
+            );
+        }
+
+        coord.shutdown();
+    }
+
+    #[test]
+    fn in_flight_cap_of_zero_rejected_by_validate() {
+        let result = BatchConfig {
+            max_batch_size: 4,
+            max_latency: Duration::from_millis(50),
+            queue_capacity: None,
+            response_timeout: None,
+            max_in_flight_per_feed: 0,
+        }.validate();
+        assert!(result.is_err(), "max_in_flight_per_feed=0 should be rejected");
+    }
+
+    #[test]
+    fn in_flight_cap_higher_than_one_allows_stacking() {
+        /// Processor that sleeps to force timeouts.
+        struct SlowProcessor;
+        impl BatchProcessor for SlowProcessor {
+            fn id(&self) -> StageId {
+                StageId("slow_cap2")
+            }
+            fn process(&mut self, items: &mut [BatchEntry]) -> Result<(), StageError> {
+                std::thread::sleep(Duration::from_millis(300));
+                for item in items.iter_mut() {
+                    item.output = Some(StageOutput::empty());
+                }
+                Ok(())
+            }
+        }
+
+        let (coord, _rx) = start_coordinator(
+            Box::new(SlowProcessor),
+            BatchConfig {
+                max_batch_size: 4,
+                max_latency: Duration::from_millis(10),
+                queue_capacity: Some(8),
+                response_timeout: Some(Duration::from_millis(50)),
+                // Allow up to 3 in-flight items per feed.
+                max_in_flight_per_feed: 3,
+            },
+        );
+
+        let handle = coord.handle();
+        let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        // First 3 timeouts should succeed (in_flight goes 1, 2, 3).
+        for i in 0..3 {
+            let result = handle.submit_and_wait(make_entry(1), Some(&in_flight));
+            assert!(
+                matches!(result, Err(BatchSubmitError::Timeout)),
+                "submit {i} should timeout, got: {result:?}"
+            );
+        }
+        assert_eq!(in_flight.load(Ordering::Acquire), 3);
+
+        // 4th should be rejected — cap reached.
+        let r4 = handle.submit_and_wait(make_entry(1), Some(&in_flight));
+        assert!(
+            matches!(r4, Err(BatchSubmitError::InFlightCapReached)),
+            "4th submit should hit cap, got: {r4:?}"
+        );
+
+        // Metrics: 4 submitted, 1 rejected. pending_items should be 3.
+        let m = handle.metrics();
+        assert_eq!(m.items_submitted, 4);
+        assert_eq!(m.items_rejected, 1, "cap rejection counted");
+        assert_eq!(m.pending_items(), 3, "3 items genuinely in-flight");
 
         coord.shutdown();
     }

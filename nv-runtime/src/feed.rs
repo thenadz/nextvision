@@ -588,7 +588,7 @@ mod tests {
             Ok(StageOutput::empty())
         }
         fn capabilities(&self) -> Option<StageCapabilities> {
-            Some(self.caps.clone())
+            Some(self.caps)
         }
     }
 

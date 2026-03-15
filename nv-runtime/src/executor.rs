@@ -80,6 +80,17 @@ use crate::output::OutputEnvelope;
 /// per feed. During sustained overload, rejections are accumulated
 /// and reported in a single coalesced event per window.
 const BATCH_REJECTION_THROTTLE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Minimum interval between `BatchTimeout` health events per feed.
+/// Under sustained timeout conditions, timeouts are accumulated and
+/// reported in a single coalesced event per window.
+const BATCH_TIMEOUT_THROTTLE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Minimum interval between `BatchInFlightExceeded` health events per
+/// feed. Under sustained in-flight cap hits (prior timed-out items
+/// still in the coordinator), rejections are accumulated and reported
+/// in a single coalesced event per window.
+const BATCH_IN_FLIGHT_THROTTLE: std::time::Duration = std::time::Duration::from_secs(1);
 use crate::output::FrameInclusion;
 use crate::provenance::{
     Provenance, StageOutcomeCategory, StageProvenance, StageResult, ViewProvenance,
@@ -127,6 +138,20 @@ pub(crate) struct PipelineExecutor {
     batch_rejection_count: u64,
     /// Last time a BatchSubmissionRejected event was emitted.
     last_batch_rejection_event: Option<Instant>,
+    /// Throttle state for BatchTimeout health events:
+    /// accumulated timeout count since last emission.
+    batch_timeout_count: u64,
+    /// Last time a BatchTimeout event was emitted.
+    last_batch_timeout_event: Option<Instant>,
+    /// Per-feed in-flight counter shared with the coordinator via
+    /// PendingEntry. The coordinator decrements when it processes or
+    /// drains each item; the executor checks before submit.
+    batch_in_flight: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    /// Throttle state for BatchInFlightExceeded health events:
+    /// accumulated rejection count since last emission.
+    batch_in_flight_rejection_count: u64,
+    /// Last time a BatchInFlightExceeded event was emitted.
+    last_batch_in_flight_rejection_event: Option<Instant>,
     /// Reference to the feed's shutdown flag. Used to distinguish expected
     /// coordinator shutdown (feed/runtime is shutting down) from unexpected
     /// coordinator death (coordinator crashed while feed is alive).
@@ -158,6 +183,9 @@ impl PipelineExecutor {
         };
         let view_snapshot = ViewSnapshot::new(view_state.clone());
         let total_stage_count = stages.len() + post_batch_stages.len();
+        let batch_in_flight = batch.as_ref().map(|_| {
+            Arc::new(std::sync::atomic::AtomicUsize::new(0))
+        });
         let now = Instant::now();
         Self {
             feed_id,
@@ -186,6 +214,11 @@ impl PipelineExecutor {
             ended_buf: Vec::new(),
             batch_rejection_count: 0,
             last_batch_rejection_event: None,
+            batch_timeout_count: 0,
+            last_batch_timeout_event: None,
+            batch_in_flight,
+            batch_in_flight_rejection_count: 0,
+            last_batch_in_flight_rejection_event: None,
             feed_shutdown,
             coordinator_loss_emitted: false,
         }
@@ -273,6 +306,47 @@ impl PipelineExecutor {
             feed_id: self.feed_id,
             processor_id,
             dropped_count: count,
+        })
+    }
+
+    /// Flush any accumulated batch timeout count as a final
+    /// [`HealthEvent::BatchTimeout`].
+    ///
+    /// Called at lifecycle boundaries (stop/restart) so that short
+    /// timeout bursts that didn't reach the throttle window are
+    /// still surfaced.
+    pub fn flush_batch_timeouts(&mut self) -> Option<HealthEvent> {
+        if self.batch_timeout_count == 0 {
+            return None;
+        }
+        let processor_id = self.batch.as_ref()?.processor_id();
+        let count = self.batch_timeout_count;
+        self.batch_timeout_count = 0;
+        self.last_batch_timeout_event = None;
+        Some(HealthEvent::BatchTimeout {
+            feed_id: self.feed_id,
+            processor_id,
+            timed_out_count: count,
+        })
+    }
+
+    /// Flush any accumulated batch in-flight cap rejections as a final
+    /// [`HealthEvent::BatchInFlightExceeded`].
+    ///
+    /// Called at lifecycle boundaries (stop/restart) so that short
+    /// bursts that didn't reach the throttle window are still surfaced.
+    pub fn flush_batch_in_flight_rejections(&mut self) -> Option<HealthEvent> {
+        if self.batch_in_flight_rejection_count == 0 {
+            return None;
+        }
+        let processor_id = self.batch.as_ref()?.processor_id();
+        let count = self.batch_in_flight_rejection_count;
+        self.batch_in_flight_rejection_count = 0;
+        self.last_batch_in_flight_rejection_event = None;
+        Some(HealthEvent::BatchInFlightExceeded {
+            feed_id: self.feed_id,
+            processor_id,
+            rejected_count: count,
         })
     }
 
@@ -513,7 +587,10 @@ impl PipelineExecutor {
                 output: None,
             };
 
-            let batch_result = batch_handle.submit_and_wait(entry);
+            let batch_result = batch_handle.submit_and_wait(
+                entry,
+                self.batch_in_flight.as_ref(),
+            );
             let t_batch_end = Instant::now();
             let batch_latency = Duration::from_nanos(t_batch_start.elapsed().as_nanos() as u64);
 
@@ -530,6 +607,28 @@ impl PipelineExecutor {
                         });
                         self.batch_rejection_count = 0;
                         self.last_batch_rejection_event = None;
+                    }
+
+                    // Flush any accumulated timeout count on recovery.
+                    if self.batch_timeout_count > 0 {
+                        health_events.push(HealthEvent::BatchTimeout {
+                            feed_id: self.feed_id,
+                            processor_id: batch_id,
+                            timed_out_count: self.batch_timeout_count,
+                        });
+                        self.batch_timeout_count = 0;
+                        self.last_batch_timeout_event = None;
+                    }
+
+                    // Flush any accumulated in-flight cap rejections on recovery.
+                    if self.batch_in_flight_rejection_count > 0 {
+                        health_events.push(HealthEvent::BatchInFlightExceeded {
+                            feed_id: self.feed_id,
+                            processor_id: batch_id,
+                            rejected_count: self.batch_in_flight_rejection_count,
+                        });
+                        self.batch_in_flight_rejection_count = 0;
+                        self.last_batch_in_flight_rejection_event = None;
                     }
 
                     artifacts.merge(output);
@@ -605,16 +704,54 @@ impl PipelineExecutor {
                             )
                         }
                         BatchSubmitError::Timeout => {
+                            batch_handle.record_timeout();
+                            // Throttle: accumulate timeouts, emit at
+                            // most once per second.
+                            self.batch_timeout_count += 1;
+                            let now = Instant::now();
+                            let should_emit = self
+                                .last_batch_timeout_event
+                                .is_none_or(|t| now.duration_since(t) >= BATCH_TIMEOUT_THROTTLE);
+                            let health = if should_emit {
+                                let count = self.batch_timeout_count;
+                                self.batch_timeout_count = 0;
+                                self.last_batch_timeout_event = Some(now);
+                                Some(HealthEvent::BatchTimeout {
+                                    feed_id: self.feed_id,
+                                    processor_id: batch_id,
+                                    timed_out_count: count,
+                                })
+                            } else {
+                                None
+                            };
                             (
                                 StageResult::Error(StageOutcomeCategory::ProcessingFailed),
-                                Some(HealthEvent::StageError {
+                                health,
+                            )
+                        }
+                        BatchSubmitError::InFlightCapReached => {
+                            // Prior timed-out item still in coordinator.
+                            // Throttle: same pattern as QueueFull.
+                            self.batch_in_flight_rejection_count += 1;
+                            let now = Instant::now();
+                            let should_emit = self
+                                .last_batch_in_flight_rejection_event
+                                .is_none_or(|t| now.duration_since(t) >= BATCH_IN_FLIGHT_THROTTLE);
+                            let health = if should_emit {
+                                let count = self.batch_in_flight_rejection_count;
+                                self.batch_in_flight_rejection_count = 0;
+                                self.last_batch_in_flight_rejection_event = Some(now);
+                                Some(HealthEvent::BatchInFlightExceeded {
                                     feed_id: self.feed_id,
-                                    stage_id: batch_id,
-                                    error: StageError::ProcessingFailed {
-                                        stage_id: batch_id,
-                                        detail: "batch response timeout".into(),
-                                    },
-                                }),
+                                    processor_id: batch_id,
+                                    rejected_count: count,
+                                })
+                            } else {
+                                None
+                            };
+                            (
+                                StageResult::Error(StageOutcomeCategory::ResourceExhausted),
+                                health,
                             )
                         }
                     };
@@ -2505,6 +2642,7 @@ mod tests {
                 max_latency: std::time::Duration::from_millis(10),
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
             health_tx,
         ).unwrap();
@@ -2565,6 +2703,7 @@ mod tests {
                 max_latency: std::time::Duration::from_millis(10),
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
             health_tx,
         ).unwrap();
@@ -2622,6 +2761,7 @@ mod tests {
                 max_latency: std::time::Duration::from_millis(10),
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
             health_tx,
         ).unwrap();
@@ -2685,6 +2825,7 @@ mod tests {
                 max_latency: std::time::Duration::from_millis(10),
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
             health_tx,
         ).unwrap();
@@ -2722,5 +2863,208 @@ mod tests {
         let (_, h2) = exec.process_frame(&frame2);
         let errs2: Vec<_> = h2.iter().filter(|e| matches!(e, HealthEvent::StageError { .. })).collect();
         assert!(errs2.is_empty(), "second frame should suppress duplicate StageError, got: {errs2:?}");
+    }
+
+    // ---------------------------------------------------------------
+    // Batch timeout coalescing tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn flush_batch_timeouts_returns_none_when_empty() {
+        let mut exec = make_executor();
+        assert!(exec.flush_batch_timeouts().is_none());
+    }
+
+    #[test]
+    fn flush_batch_timeouts_emits_accumulated_count() {
+        use crate::batch::{BatchConfig, BatchCoordinator};
+        use nv_core::health::HealthEvent;
+        use nv_perception::batch::{BatchEntry, BatchProcessor};
+
+        struct Noop;
+        impl BatchProcessor for Noop {
+            fn id(&self) -> StageId { StageId("noop_to") }
+            fn process(&mut self, _: &mut [BatchEntry]) -> Result<(), nv_core::error::StageError> { Ok(()) }
+        }
+
+        let (health_tx, _) = tokio::sync::broadcast::channel::<HealthEvent>(4);
+        let coord = BatchCoordinator::start(
+            Box::new(Noop),
+            BatchConfig {
+                max_batch_size: 1,
+                max_latency: std::time::Duration::from_millis(10),
+                queue_capacity: None,
+                response_timeout: None,
+                max_in_flight_per_feed: 1,
+            },
+            health_tx,
+        ).unwrap();
+        let handle = coord.handle();
+
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(77),
+            Vec::new(),
+            Some(handle),
+            Vec::new(),
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        // Simulate accumulated timeouts.
+        exec.batch_timeout_count = 3;
+
+        let evt = exec.flush_batch_timeouts();
+        assert!(evt.is_some(), "should have flushed accumulated timeouts");
+        match evt.unwrap() {
+            HealthEvent::BatchTimeout { feed_id, processor_id, timed_out_count } => {
+                assert_eq!(feed_id, FeedId::new(77));
+                assert_eq!(processor_id, StageId("noop_to"));
+                assert_eq!(timed_out_count, 3);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        // After flush, count should be zero.
+        assert!(exec.flush_batch_timeouts().is_none());
+
+        coord.shutdown();
+    }
+
+    /// Integration test: timeout coalescing through process_frame.
+    ///
+    /// Uses a slow processor that triggers feed-side timeouts, and
+    /// verifies:
+    /// 1. First timeout emits a BatchTimeout health event immediately.
+    /// 2. Rapid subsequent timeouts within the 1s window are coalesced
+    ///    (no event emitted).
+    /// 3. Recovery (successful batch) flushes any accumulated count.
+    #[test]
+    fn timeout_coalescing_through_process_frame() {
+        use crate::batch::{BatchConfig, BatchCoordinator};
+        use nv_core::health::HealthEvent;
+        use nv_perception::batch::{BatchEntry, BatchProcessor};
+
+        /// Processor that sleeps longer than the response timeout,
+        /// causing every submission to time out on the feed side.
+        /// Controlled by a shared flag to switch to fast mode.
+        struct ControllableProcessor {
+            slow: Arc<AtomicBool>,
+        }
+        impl BatchProcessor for ControllableProcessor {
+            fn id(&self) -> StageId { StageId("ctrl_slow") }
+            fn process(&mut self, items: &mut [BatchEntry]) -> Result<(), nv_core::error::StageError> {
+                if self.slow.load(Ordering::Relaxed) {
+                    // Sleep longer than max_latency + response_timeout to
+                    // ensure the feed-side recv_timeout fires.
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                }
+                for item in items.iter_mut() {
+                    item.output = Some(nv_perception::StageOutput::empty());
+                }
+                Ok(())
+            }
+        }
+
+        let slow_flag = Arc::new(AtomicBool::new(true));
+        let (health_tx, _) = tokio::sync::broadcast::channel::<HealthEvent>(64);
+        let coord = BatchCoordinator::start(
+            Box::new(ControllableProcessor { slow: Arc::clone(&slow_flag) }),
+            BatchConfig {
+                max_batch_size: 1,
+                max_latency: std::time::Duration::from_millis(10),
+                queue_capacity: None,
+                // Very short response timeout so timeout triggers quickly.
+                response_timeout: Some(std::time::Duration::from_millis(50)),
+                // Allow 2 in-flight so the test can verify timeout
+                // coalescing rather than in-flight cap behavior.
+                max_in_flight_per_feed: 2,
+            },
+            health_tx,
+        ).unwrap();
+        let handle = coord.handle();
+
+        let mut exec = PipelineExecutor::new(
+            FeedId::new(55),
+            Vec::new(),
+            Some(handle.clone()),
+            Vec::new(),
+            RetentionPolicy::default(),
+            CameraMode::Fixed,
+            None,
+            Box::new(DefaultEpochPolicy::default()),
+            FrameInclusion::Never,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        let make_frame = |seq: u64| {
+            nv_test_util::synthetic::solid_gray(
+                FeedId::new(55), seq, MonotonicTs::from_nanos(seq * 33_000_000), 2, 2, 128,
+            )
+        };
+
+        // --- Frame 1: first timeout, should emit BatchTimeout immediately ---
+        let (_, h1) = exec.process_frame(&make_frame(0));
+        let timeout_events_1: Vec<_> = h1.iter()
+            .filter(|e| matches!(e, HealthEvent::BatchTimeout { .. }))
+            .collect();
+        assert_eq!(
+            timeout_events_1.len(), 1,
+            "first timeout should emit one BatchTimeout event, got {timeout_events_1:?}"
+        );
+        // Verify the event contents.
+        match &timeout_events_1[0] {
+            HealthEvent::BatchTimeout { feed_id, timed_out_count, .. } => {
+                assert_eq!(*feed_id, FeedId::new(55));
+                assert_eq!(*timed_out_count, 1);
+            }
+            _ => unreachable!(),
+        }
+
+        // --- Frame 2: rapid second timeout within throttle window ---
+        // Should NOT emit an event (coalesced into accumulator).
+        let (_, h2) = exec.process_frame(&make_frame(1));
+        let timeout_events_2: Vec<_> = h2.iter()
+            .filter(|e| matches!(e, HealthEvent::BatchTimeout { .. }))
+            .collect();
+        assert!(
+            timeout_events_2.is_empty(),
+            "second timeout within throttle window should be coalesced, got {timeout_events_2:?}"
+        );
+
+        // Verify the internal accumulator has tracked it.
+        assert_eq!(exec.batch_timeout_count, 1, "one coalesced timeout in accumulator");
+
+        // --- Switch to fast mode and process a successful frame ---
+        slow_flag.store(false, Ordering::Relaxed);
+        // Give the coordinator time to finish any in-flight slow batches
+        // (timed-out items from above may still be processing).
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let (output, h3) = exec.process_frame(&make_frame(2));
+        assert!(output.is_some(), "frame should succeed after processor speeds up");
+
+        // Recovery should flush the accumulated timeout count.
+        let timeout_events_3: Vec<_> = h3.iter()
+            .filter(|e| matches!(e, HealthEvent::BatchTimeout { .. }))
+            .collect();
+        assert_eq!(
+            timeout_events_3.len(), 1,
+            "recovery should flush accumulated timeouts, got {timeout_events_3:?}"
+        );
+        match &timeout_events_3[0] {
+            HealthEvent::BatchTimeout { timed_out_count, .. } => {
+                assert_eq!(*timed_out_count, 1, "flushed count should be 1 (one coalesced timeout)");
+            }
+            _ => unreachable!(),
+        }
+
+        // After recovery, no more pending timeouts.
+        assert_eq!(exec.batch_timeout_count, 0);
+
+        coord.shutdown();
     }
 }

@@ -164,6 +164,7 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 max_latency: Duration::from_millis(args.batch_latency_ms),
                 queue_capacity: None,
                 response_timeout: None,
+                max_in_flight_per_feed: 1,
             },
         )?;
         batch_handle = Some(batch_hdl.clone());
