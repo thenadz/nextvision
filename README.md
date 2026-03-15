@@ -130,7 +130,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Telemetry
 
-The runtime exposes lightweight, zero-allocation telemetry through public APIs.
+The runtime exposes lightweight telemetry through public APIs. Per-feed and
+batch counters are atomic and allocation-free. Aggregate diagnostics snapshots
+(`Runtime::diagnostics()`) allocate a `Vec` for the feed/batch lists and may
+clone short strings (e.g. decode-status detail).
 
 ```rust
 use nv_runtime::{Runtime, FeedHandle, QueueTelemetry, BatchMetrics};

@@ -523,6 +523,51 @@ impl FeedHandle {
         Some(DecodeStatus { outcome, detail })
     }
 
+    /// Get a consolidated diagnostics snapshot of this feed.
+    ///
+    /// Composes lifecycle state, metrics, queue depths, decode status,
+    /// and view-system health into a single read. All data comes from
+    /// the same atomic counters the individual accessors use — this is
+    /// a convenience composite, not a new data source.
+    ///
+    /// Suitable for periodic polling (1–5 s) by dashboards and health
+    /// probes.
+    #[must_use]
+    pub fn diagnostics(&self) -> crate::diagnostics::FeedDiagnostics {
+        use crate::diagnostics::{ViewDiagnostics, ViewStatus};
+
+        let metrics = self.metrics();
+        let validity_ordinal = self
+            .shared
+            .view_context_validity
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let status = match validity_ordinal {
+            0 => ViewStatus::Stable,
+            1 => ViewStatus::Degraded,
+            _ => ViewStatus::Invalid,
+        };
+        let stability_bits = self
+            .shared
+            .view_stability_score
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        crate::diagnostics::FeedDiagnostics {
+            feed_id: self.id(),
+            alive: self.is_alive(),
+            paused: self.is_paused(),
+            uptime: self.uptime(),
+            metrics,
+            queues: self.queue_telemetry(),
+            decode: self.decode_status(),
+            view: ViewDiagnostics {
+                epoch: metrics.view_epoch,
+                stability_score: f32::from_bits(stability_bits),
+                status,
+            },
+            batch_processor_id: self.shared.batch_processor_id,
+        }
+    }
+
     /// Pause the feed (stop pulling frames from source; stages idle).
     ///
     /// Uses a condvar to wake the worker without spin-sleeping.

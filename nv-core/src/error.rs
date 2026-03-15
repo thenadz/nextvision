@@ -168,4 +168,8 @@ pub enum ConfigError {
     /// Stage capability validation failed.
     #[error("stage validation failed: {detail}")]
     StageValidation { detail: String },
+
+    /// A batch coordinator with this processor ID already exists.
+    #[error("duplicate batch processor id: {id}")]
+    DuplicateBatchProcessorId { id: StageId },
 }

@@ -934,6 +934,23 @@ impl PipelineExecutor {
     pub fn track_count(&self) -> usize {
         self.temporal.track_count()
     }
+
+    /// Current view-system stability score in `[0.0, 1.0]`.
+    pub fn stability_score(&self) -> f32 {
+        self.view_snapshot.stability_score()
+    }
+
+    /// Context validity as a `u8` ordinal (0 = Valid, 1 = Degraded, 2 = Invalid).
+    ///
+    /// Used by the worker to store in an `AtomicU8` without importing nv-view types.
+    pub fn context_validity_ordinal(&self) -> u8 {
+        use nv_view::ContextValidity;
+        match self.view_snapshot.validity() {
+            ContextValidity::Valid => 0,
+            ContextValidity::Degraded { .. } => 1,
+            ContextValidity::Invalid => 2,
+        }
+    }
 }
 
 /// Convert an [`Instant`] to [`MonotonicTs`] using given anchor values.

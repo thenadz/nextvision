@@ -32,6 +32,7 @@
 //! - **[`OutputSink`]** — user-implementable trait for receiving outputs.
 //! - **[`Provenance`]** — full audit trail of stage and view-system decisions.
 //! - **[`BackpressurePolicy`]** — queue behavior configuration.
+//! - **[`FeedDiagnostics`]** / **[`RuntimeDiagnostics`]** — consolidated diagnostic snapshots.
 //!
 //! ## PTZ / view-state handling
 //!
@@ -138,6 +139,7 @@
 
 pub mod backpressure;
 pub mod batch;
+pub mod diagnostics;
 pub(crate) mod executor;
 pub mod feed;
 pub mod output;
@@ -151,6 +153,7 @@ pub(crate) mod worker;
 // Re-export key types at crate root.
 pub use backpressure::BackpressurePolicy;
 pub use batch::{BatchConfig, BatchHandle, BatchMetrics};
+pub use diagnostics::{BatchDiagnostics, FeedDiagnostics, OutputLagStatus, RuntimeDiagnostics, ViewDiagnostics, ViewStatus};
 pub use feed::{DecodeStatus, FeedConfig, FeedConfigBuilder, FeedHandle, QueueTelemetry};
 pub use output::{AdmissionSummary, FrameInclusion, OutputEnvelope, OutputSink, SharedOutput};
 pub use pipeline::{FeedPipeline, FeedPipelineBuilder, PipelineError};

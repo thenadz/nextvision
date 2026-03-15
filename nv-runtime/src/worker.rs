@@ -28,14 +28,14 @@
 //! Shutdown is coordinated via `FeedSharedState.shutdown` (`AtomicBool`)
 //! and the queue's `close()` / `wake_consumer()` methods.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use nv_core::config::{ReconnectPolicy, SourceSpec};
 use nv_core::error::{MediaError, NvError, RuntimeError};
 use nv_core::health::{HealthEvent, StopReason};
-use nv_core::id::FeedId;
+use nv_core::id::{FeedId, StageId};
 use nv_core::metrics::FeedMetrics;
 use nv_frame::FrameEnvelope;
 use nv_media::ingress::{FrameSink, HealthSink, MediaIngress, MediaIngressFactory, IngressOptions, SourceStatus};
@@ -89,10 +89,20 @@ pub(crate) struct FeedSharedState {
     /// Written once per session when the stream starts; read by
     /// `FeedHandle::decode_status()`.
     pub decode_status: Mutex<Option<(nv_core::health::DecodeOutcome, String)>>,
+    /// View-system stability score stored as `f32::to_bits()`. Updated
+    /// per-frame by the worker. Read by `FeedHandle::diagnostics()`.
+    pub view_stability_score: AtomicU32,
+    /// View-system context validity ordinal. Updated per-frame by the
+    /// worker. 0 = Stable, 1 = Degraded, 2 = Invalid.
+    /// Read by `FeedHandle::diagnostics()`.
+    pub view_context_validity: AtomicU8,
+    /// The batch coordinator this feed submits to, if any.
+    /// Set once at spawn time; read by `FeedHandle::diagnostics()`.
+    pub batch_processor_id: Option<StageId>,
 }
 
 impl FeedSharedState {
-    pub fn new(id: FeedId) -> Self {
+    pub fn new(id: FeedId, batch_processor_id: Option<StageId>) -> Self {
         Self {
             id,
             paused: AtomicBool::new(false),
@@ -110,6 +120,9 @@ impl FeedSharedState {
             sink_capacity: AtomicUsize::new(0),
             session_started_at: Mutex::new(Instant::now()),
             decode_status: Mutex::new(None),
+            view_stability_score: AtomicU32::new(1.0_f32.to_bits()),
+            view_context_validity: AtomicU8::new(0),
+            batch_processor_id,
         }
     }
 
@@ -513,7 +526,8 @@ pub(crate) fn spawn_feed_worker(
     output_tx: broadcast::Sender<SharedOutput>,
     lag_detector: Arc<LagDetector>,
 ) -> Result<(Arc<FeedSharedState>, std::thread::JoinHandle<()>), NvError> {
-    let shared = Arc::new(FeedSharedState::new(feed_id));
+    let batch_processor_id = config.batch.as_ref().map(|b| b.processor_id());
+    let shared = Arc::new(FeedSharedState::new(feed_id, batch_processor_id));
     let shared_clone = Arc::clone(&shared);
     let is_file_nonloop = config.source.is_file_nonloop();
 
@@ -969,6 +983,12 @@ impl FeedWorker {
             self.shared
                 .view_epoch
                 .store(self.executor.view_epoch(), Ordering::Relaxed);
+            self.shared
+                .view_stability_score
+                .store(self.executor.stability_score().to_bits(), Ordering::Relaxed);
+            self.shared
+                .view_context_validity
+                .store(self.executor.context_validity_ordinal(), Ordering::Relaxed);
 
             // Only emit output if the frame was not dropped.
             if let Some(output) = maybe_output {

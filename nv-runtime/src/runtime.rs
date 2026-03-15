@@ -10,14 +10,14 @@
 //!
 //! Each feed runs on a dedicated OS thread (see [`worker`](crate::worker)).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nv_core::error::{NvError, RuntimeError};
 use nv_core::health::HealthEvent;
-use nv_core::id::FeedId;
+use nv_core::id::{FeedId, StageId};
 use nv_media::DefaultMediaFactory;
 use nv_media::ingress::MediaIngressFactory;
 use nv_perception::BatchProcessor;
@@ -140,6 +140,7 @@ impl RuntimeBuilder {
             next_feed_id: AtomicU64::new(1),
             feeds: Mutex::new(HashMap::new()),
             coordinators: Mutex::new(Vec::new()),
+            batch_ids: Mutex::new(HashSet::new()),
             health_tx,
             output_tx,
             lag_detector,
@@ -162,6 +163,10 @@ struct RuntimeInner {
     feeds: Mutex<HashMap<FeedId, RunningFeed>>,
     /// Batch coordinators owned by the runtime for lifecycle management.
     coordinators: Mutex<Vec<BatchCoordinator>>,
+    /// Tracks all claimed batch-processor IDs (active + in-progress starts).
+    /// Used as the serialization point for duplicate-ID rejection without
+    /// holding the heavier `coordinators` lock during `BatchCoordinator::start`.
+    batch_ids: Mutex<HashSet<StageId>>,
     health_tx: broadcast::Sender<HealthEvent>,
     output_tx: broadcast::Sender<SharedOutput>,
     lag_detector: Arc<LagDetector>,
@@ -186,6 +191,53 @@ impl RuntimeInner {
         Ok(feeds.len())
     }
 
+    fn diagnostics(&self) -> Result<crate::diagnostics::RuntimeDiagnostics, NvError> {
+        // Snapshot Arc refs under the feed lock, then release immediately.
+        let shared_refs: Vec<Arc<FeedSharedState>> = {
+            let feeds = self
+                .feeds
+                .lock()
+                .map_err(|_| NvError::Runtime(RuntimeError::RegistryPoisoned))?;
+            feeds.values().map(|entry| Arc::clone(&entry.shared)).collect()
+        };
+
+        // Build per-feed diagnostics outside the lock.
+        let mut feed_diags: Vec<crate::diagnostics::FeedDiagnostics> = shared_refs
+            .iter()
+            .map(|shared| FeedHandle::new(Arc::clone(shared)).diagnostics())
+            .collect();
+
+        // Stable ordering by FeedId for deterministic dashboard diffing.
+        feed_diags.sort_by_key(|d| d.feed_id.as_u64());
+
+        // Batch coordinator diagnostics.
+        let batches: Vec<crate::diagnostics::BatchDiagnostics> = self
+            .coordinators
+            .lock()
+            .map_err(|_| NvError::Runtime(RuntimeError::RegistryPoisoned))?
+            .iter()
+            .map(|c| {
+                let h = c.handle();
+                crate::diagnostics::BatchDiagnostics {
+                    processor_id: h.processor_id(),
+                    metrics: h.metrics(),
+                }
+            })
+            .collect();
+
+        // Output channel lag status.
+        let output_lag = self.lag_detector.status();
+
+        Ok(crate::diagnostics::RuntimeDiagnostics {
+            uptime: self.started_at.elapsed(),
+            feed_count: feed_diags.len(),
+            max_feeds: self.max_feeds,
+            feeds: feed_diags,
+            batches,
+            output_lag,
+        })
+    }
+
     fn create_batch(
         &self,
         processor: Box<dyn BatchProcessor>,
@@ -195,15 +247,60 @@ impl RuntimeInner {
             return Err(NvError::Runtime(RuntimeError::ShutdownInProgress));
         }
 
-        let coordinator =
-            BatchCoordinator::start(processor, config, self.health_tx.clone())?;
+        // Reserve the processor ID in the lightweight batch_ids set.  This
+        // is the serialization point for duplicate rejection — it avoids
+        // holding the heavier `coordinators` lock during the potentially
+        // slow `BatchCoordinator::start` (up to ON_START_TIMEOUT = 30 s).
+        let processor_id = processor.id();
+        {
+            let mut ids = self
+                .batch_ids
+                .lock()
+                .map_err(|_| NvError::Runtime(RuntimeError::RegistryPoisoned))?;
+            if !ids.insert(processor_id) {
+                return Err(NvError::Config(
+                    nv_core::error::ConfigError::DuplicateBatchProcessorId { id: processor_id },
+                ));
+            }
+        }
+
+        // Start coordinator without holding any lock (can block up to 30 s).
+        let coordinator = match BatchCoordinator::start(processor, config, self.health_tx.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                // Release the ID reservation on startup failure.
+                if let Ok(mut ids) = self.batch_ids.lock() {
+                    ids.remove(&processor_id);
+                }
+                return Err(e);
+            }
+        };
         let handle = coordinator.handle();
 
-        let mut coordinators = self
-            .coordinators
-            .lock()
-            .map_err(|_| NvError::Runtime(RuntimeError::RegistryPoisoned))?;
-        coordinators.push(coordinator);
+        {
+            let mut coords = self
+                .coordinators
+                .lock()
+                .map_err(|_| NvError::Runtime(RuntimeError::RegistryPoisoned))?;
+            coords.push(coordinator);
+
+            // Re-check shutdown *under the same lock* that shutdown_all
+            // acquires to iterate coordinators.  If shutdown slipped in
+            // during the (potentially 30 s) BatchCoordinator::start()
+            // window, this coordinator was never signaled.  Remove it,
+            // shut it down inline, and return an error so the caller
+            // does not receive a handle to a dead coordinator.
+            if self.shutdown.load(Ordering::Acquire) {
+                if let Some(orphan) = coords.pop() {
+                    drop(coords);
+                    orphan.shutdown();
+                }
+                if let Ok(mut ids) = self.batch_ids.lock() {
+                    ids.remove(&processor_id);
+                }
+                return Err(NvError::Runtime(RuntimeError::ShutdownInProgress));
+            }
+        }
 
         Ok(handle)
     }
@@ -268,7 +365,8 @@ impl RuntimeInner {
     }
 
     fn shutdown_all(&self) -> Result<(), NvError> {
-        self.shutdown.store(true, Ordering::Relaxed);
+        // Release so that the Acquire re-check in create_batch() sees it.
+        self.shutdown.store(true, Ordering::Release);
 
         // --- Phase 1: Signal everything to stop. ---
         //
@@ -432,6 +530,23 @@ impl Runtime {
         self.inner.started_at.elapsed()
     }
 
+    /// Get a consolidated diagnostics snapshot of the runtime and all feeds.
+    ///
+    /// Returns per-feed lifecycle state, metrics, queue depths, decode status,
+    /// and view-system health, plus batch coordinator metrics and output
+    /// channel lag status.
+    ///
+    /// Designed for periodic polling (1–5 s) by dashboards and health
+    /// probes. Complement with [`health_subscribe()`](Self::health_subscribe)
+    /// for event-driven state transitions.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RuntimeError::RegistryPoisoned` if an internal lock is poisoned.
+    pub fn diagnostics(&self) -> Result<crate::diagnostics::RuntimeDiagnostics, NvError> {
+        self.inner.diagnostics()
+    }
+
     /// Subscribe to aggregate health events from all feeds.
     pub fn health_subscribe(&self) -> broadcast::Receiver<HealthEvent> {
         self.inner.health_tx.subscribe()
@@ -448,7 +563,9 @@ impl Runtime {
     /// When the sentinel detects ring-buffer wrap, the runtime emits a
     /// global [`HealthEvent::OutputLagged`] event carrying the
     /// sentinel-observed per-event delta. This is a saturation signal,
-    /// not a per-subscriber loss report.
+    /// not a per-subscriber loss report. Live saturation state is also
+    /// available via [`Runtime::diagnostics()`] in
+    /// [`RuntimeDiagnostics::output_lag`](crate::diagnostics::RuntimeDiagnostics::output_lag).
     pub fn output_subscribe(&self) -> broadcast::Receiver<SharedOutput> {
         self.inner.output_tx.subscribe()
     }
@@ -477,6 +594,8 @@ impl Runtime {
     /// # Errors
     ///
     /// - `RuntimeError::ShutdownInProgress` if shutdown has been initiated.
+    /// - `ConfigError::DuplicateBatchProcessorId` if a coordinator with the
+    ///   same processor ID already exists.
     /// - `ConfigError::InvalidPolicy` if `config` has invalid values.
     /// - `RuntimeError::ThreadSpawnFailed` if the coordinator thread fails.
     pub fn create_batch(
@@ -539,6 +658,13 @@ impl RuntimeHandle {
     #[must_use]
     pub fn uptime(&self) -> Duration {
         self.inner.started_at.elapsed()
+    }
+
+    /// Get a consolidated diagnostics snapshot of the runtime and all feeds.
+    ///
+    /// See [`Runtime::diagnostics()`] for details.
+    pub fn diagnostics(&self) -> Result<crate::diagnostics::RuntimeDiagnostics, NvError> {
+        self.inner.diagnostics()
     }
 
     /// Subscribe to aggregate health events from all feeds.

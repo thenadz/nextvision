@@ -307,6 +307,18 @@ impl LagDetector {
         }
     }
 
+    /// Snapshot the current lag status without emitting any health events.
+    ///
+    /// Uses a blocking lock with poison recovery — safe for the
+    /// diagnostics polling path (off hot path, 1–5 s interval).
+    pub fn status(&self) -> crate::diagnostics::OutputLagStatus {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        crate::diagnostics::OutputLagStatus {
+            in_lag: inner.in_lag,
+            pending_lost: inner.accumulated_lost,
+        }
+    }
+
     /// Reset the detector after transitioning to a no-external-subscriber
     /// state.
     ///
