@@ -151,6 +151,7 @@ impl OcSortTracker {
                     confidence: t.confidence,
                     state,
                     detection_id: t.last_detection_id,
+                    metadata: TypedMetadata::new(),
                 },
                 metadata: TypedMetadata::new(),
             });

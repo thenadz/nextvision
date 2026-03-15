@@ -17,6 +17,7 @@ fn make_observation(ts_nanos: u64) -> TrackObservation {
         confidence: 0.9,
         state: TrackState::Confirmed,
         detection_id: None,
+        metadata: nv_core::TypedMetadata::new(),
     }
 }
 

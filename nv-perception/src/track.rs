@@ -18,6 +18,20 @@ pub enum TrackState {
 /// One observation of a track in a single frame.
 ///
 /// Records the spatial and temporal state at the moment of observation.
+///
+/// # Per-observation metadata
+///
+/// The [`metadata`](Self::metadata) field allows stages to attach
+/// arbitrary per-observation data: embeddings, model-specific scores,
+/// attention weights, or feature vectors. This is especially useful
+/// for **joint detection+tracking models** that produce tracks directly
+/// (without an intermediate `DetectionSet`) and need somewhere to store
+/// per-observation features.
+///
+/// When metadata is unused (the common case for classical trackers),
+/// the field is zero-cost — `TypedMetadata::new()` does not allocate.
+/// If storing large data (e.g., a full feature map), wrap it in
+/// `Arc<T>` to keep clone costs low.
 #[derive(Clone, Debug)]
 pub struct TrackObservation {
     /// Timestamp of this observation.
@@ -29,12 +43,24 @@ pub struct TrackObservation {
     /// Track state at time of observation.
     pub state: TrackState,
     /// The detection that was associated with this track, if any.
-    /// `None` when the track is coasting (no matching detection).
+    /// `None` when the track is coasting (no matching detection), or
+    /// when the track was produced by a joint model that does not
+    /// generate intermediate detections.
     pub detection_id: Option<DetectionId>,
+    /// Extensible per-observation metadata.
+    ///
+    /// Stages can store embeddings, features, model-specific scores,
+    /// or any `Clone + Send + Sync + 'static` data here. The field is
+    /// zero-cost when empty (no heap allocation until first insert).
+    pub metadata: TypedMetadata,
 }
 
 impl TrackObservation {
     /// Create a new observation with optional detection association.
+    ///
+    /// Metadata starts empty. Attach per-observation data (embeddings,
+    /// features, etc.) by setting the public `metadata` field after
+    /// construction.
     #[must_use]
     pub fn new(
         ts: MonotonicTs,
@@ -49,6 +75,7 @@ impl TrackObservation {
             confidence,
             state,
             detection_id,
+            metadata: TypedMetadata::new(),
         }
     }
 }
@@ -106,6 +133,26 @@ mod tests {
         assert!((obs.confidence - 0.95).abs() < f32::EPSILON);
         assert_eq!(obs.state, TrackState::Confirmed);
         assert_eq!(obs.detection_id, Some(DetectionId::new(7)));
+        assert!(obs.metadata.is_empty());
+    }
+
+    #[test]
+    fn track_observation_with_metadata() {
+        #[derive(Clone, Debug, PartialEq)]
+        struct Embedding(Vec<f32>);
+
+        let mut obs = TrackObservation::new(
+            MonotonicTs::from_nanos(1_000_000),
+            BBox::new(0.1, 0.2, 0.3, 0.4),
+            0.95,
+            TrackState::Confirmed,
+            None,
+        );
+        obs.metadata.insert(Embedding(vec![0.1, 0.2, 0.3]));
+        assert_eq!(
+            obs.metadata.get::<Embedding>(),
+            Some(&Embedding(vec![0.1, 0.2, 0.3]))
+        );
     }
 
     #[test]

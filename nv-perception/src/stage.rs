@@ -16,6 +16,22 @@
 //! [`StageContext::artifacts`]. Specialization happens by convention (which
 //! fields a stage populates), not by type hierarchy.
 //!
+//! # Supported model patterns
+//!
+//! The single-trait design naturally supports several model architectures:
+//!
+//! - **Classical detector → tracker**: a `FrameAnalysis` stage produces
+//!   detections, then an `Association` stage consumes them and produces tracks.
+//! - **Joint detection+tracking**: a single `FrameAnalysis` stage sets both
+//!   `detections` and `tracks` in its [`StageOutput`]. No separate tracker
+//!   stage is needed.
+//! - **Direct track emitter**: a stage produces `tracks` without intermediate
+//!   detections. Set `detection_id` to `None` on each [`TrackObservation`].
+//! - **Richer observations**: per-observation metadata (embeddings, features,
+//!   model-specific scores) is stored in [`TrackObservation::metadata`].
+//!   Per-track metadata goes in [`Track::metadata`]. Per-frame shared data
+//!   goes in [`StageOutput::artifacts`].
+//!
 //! # What a stage should do
 //!
 //! - Process a single frame and return structured results.
@@ -55,15 +71,32 @@ use nv_view::{ViewEpoch, ViewSnapshot};
 /// - **Composition validation** — pipeline builders can warn about
 ///   unusual orderings (e.g., a tracker before a detector).
 ///
+/// A stage may produce **any combination** of output fields regardless of
+/// its declared category. Categories describe the stage's *primary role*,
+/// not a hard constraint on what it can output. For example, a joint
+/// detection+tracking model that reads pixels and produces both detections
+/// and tracks in one forward pass is best categorized as `FrameAnalysis`.
+///
 /// Stages report their category via [`Stage::category()`], which defaults
 /// to [`StageCategory::Custom`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StageCategory {
-    /// Reads frame pixel data, produces detections and/or scene features.
+    /// Reads frame pixel data, produces perception artifacts.
     ///
-    /// Examples: object detector, feature extractor, background subtractor.
+    /// This is the natural category for any model that takes raw pixels
+    /// as primary input, regardless of what it produces:
+    ///
+    /// - Classical object detectors (outputs: detections)
+    /// - Joint detection+tracking models (outputs: detections + tracks)
+    /// - Direct track-emitting models (outputs: tracks only)
+    /// - Feature extractors, scene classifiers (outputs: scene features)
+    /// - Background subtractors (outputs: detections or scene features)
     FrameAnalysis,
-    /// Reads detections (and optionally temporal state), produces tracks.
+    /// Reads upstream artifacts (detections, features) and produces tracks.
+    ///
+    /// Use this for stages whose primary role is *association* — matching
+    /// observations across time — when the tracking logic is separate from
+    /// the pixel-reading model.
     ///
     /// Examples: multi-object tracker, re-identification matcher.
     Association,
@@ -213,6 +246,26 @@ pub struct StageContext<'a> {
 ///
 /// Each field is optional — a stage only sets the fields it produces.
 /// The pipeline executor merges this into the [`PerceptionArtifacts`] accumulator.
+///
+/// # Joint-model and direct-track-emitter patterns
+///
+/// A stage is not limited to producing a single artifact type. Common
+/// patterns beyond classical detection:
+///
+/// - **Joint det+track model**: set both `detections` and `tracks` in a
+///   single `StageOutput`. The executor merges both into the accumulator.
+///   Tracks produced this way can carry per-observation metadata via
+///   [`TrackObservation::metadata`](crate::TrackObservation::metadata).
+/// - **Direct track emitter**: set only `tracks` (leave `detections` as
+///   `None`). No intermediate `DetectionSet` is required. Set
+///   `TrackObservation::detection_id` to `None` since there are no
+///   upstream detections to reference.
+/// - **Richer observations**: stages that produce typed artifacts
+///   (embeddings, feature maps, attention weights) can store them in
+///   [`TrackObservation::metadata`](crate::TrackObservation::metadata)
+///   (per-observation) or [`Track::metadata`](crate::Track::metadata)
+///   (per-track), or pass them as `artifacts` (per-frame typed metadata)
+///   for downstream stage consumption.
 #[derive(Clone, Debug, Default)]
 pub struct StageOutput {
     /// New or updated detection set.
@@ -239,6 +292,16 @@ pub struct StageOutput {
     pub scene_features: Vec<SceneFeature>,
 
     /// Typed artifacts for downstream stages — **merged** (last-writer-wins by `TypeId`).
+    ///
+    /// This is the primary extension seam for inter-stage communication
+    /// beyond the built-in fields. Any `Clone + Send + Sync + 'static`
+    /// value can be stored here by type, and downstream stages retrieve
+    /// it from [`StageContext::artifacts.stage_artifacts`](crate::PerceptionArtifacts::stage_artifacts).
+    ///
+    /// Example uses:
+    /// - Feature maps or embeddings from a detector for a downstream classifier.
+    /// - Prepared multi-frame input tensors for a temporal/clip-based model.
+    /// - Confidence calibration metadata from an upstream stage.
     pub artifacts: TypedMetadata,
 }
 
@@ -413,14 +476,20 @@ impl StageOutputBuilder {
 /// - `on_start()` returning `Err` prevents the feed from starting.
 /// - A panic in `process()` is caught; the feed restarts per its restart policy.
 ///
-/// # Typical stage categories (by convention, not by type)
+/// # Supported model patterns
 ///
-/// | Category | Reads | Writes |
-/// |---|---|---|
-/// | Detection | frame pixels | `detections` |
-/// | Tracking | `detections`, temporal | `tracks` |
-/// | Classification | `detections` or `tracks` | `artifacts` (typed metadata) |
-/// | Scene analysis | frame pixels, temporal | `scene_features`, `signals` |
+/// The library supports multiple perception model patterns through the
+/// same `Stage` trait. A stage may produce *any combination* of output
+/// fields — the pipeline does not enforce a single pattern.
+///
+/// | Pattern | Reads | Writes | Category |
+/// |---|---|---|---|
+/// | Classical detector | frame pixels | `detections` | `FrameAnalysis` |
+/// | Classical tracker | `detections`, temporal | `tracks` | `Association` |
+/// | Joint det+track model | frame pixels, temporal | `detections` + `tracks` | `FrameAnalysis` |
+/// | Direct track emitter | frame pixels | `tracks` (skip detections) | `FrameAnalysis` |
+/// | Classifier / enricher | `detections` or `tracks` | `artifacts` (typed metadata) | `Custom` |
+/// | Scene analysis | frame pixels, temporal | `scene_features`, `signals` | `TemporalAnalysis` |
 ///
 /// These are conventions, not enforced constraints. A stage may read and write
 /// any combination of fields.

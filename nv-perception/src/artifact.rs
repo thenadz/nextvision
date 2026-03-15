@@ -20,6 +20,19 @@ use nv_core::TypedMetadata;
 /// | `signals` | **Append** — all signals accumulate |
 /// | `scene_features` | **Append** — all scene features accumulate |
 /// | `stage_artifacts` | **Merge** — last-writer-wins per `TypeId` |
+///
+/// ## Extension seam: `stage_artifacts`
+///
+/// The [`stage_artifacts`](Self::stage_artifacts) field is the primary
+/// inter-stage communication channel for data that does not fit the
+/// built-in fields. Any `Clone + Send + Sync + 'static` value can be
+/// stored by type.
+///
+/// This is also the intended extension point for **future sequence/window
+/// support**. A pre-processing stage could assemble a sliding window of
+/// frames (e.g., `Arc<[FrameEnvelope]>`) and store it as a typed artifact
+/// for a downstream temporal or clip-based model to consume, without any
+/// changes to the core pipeline execution model.
 #[derive(Clone, Debug, Default)]
 pub struct PerceptionArtifacts {
     /// Current detection set (replaced by each stage that returns detections).
@@ -43,6 +56,11 @@ pub struct PerceptionArtifacts {
     /// Scene-level features accumulated from all stages.
     pub scene_features: Vec<SceneFeature>,
     /// Typed artifacts from stages — keyed by `TypeId`, last-writer-wins.
+    ///
+    /// This is the extension seam for arbitrary inter-stage data: feature
+    /// maps, prepared input tensors, multi-frame windows, calibration
+    /// metadata, or any domain-specific payload. Downstream stages access
+    /// stored values via [`StageContext::artifacts.stage_artifacts.get::<T>()`].
     pub stage_artifacts: TypedMetadata,
 }
 

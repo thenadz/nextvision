@@ -1098,6 +1098,7 @@ mod tests {
                 confidence: 0.9,
                 state: nv_perception::TrackState::Lost,
                 detection_id: None,
+                metadata: nv_core::TypedMetadata::new(),
             },
             metadata: nv_core::TypedMetadata::new(),
         };
@@ -1142,6 +1143,7 @@ mod tests {
                     confidence: 0.9,
                     state: nv_perception::TrackState::Lost,
                     detection_id: None,
+                    metadata: nv_core::TypedMetadata::new(),
                 },
                 metadata: nv_core::TypedMetadata::new(),
             };
@@ -1202,6 +1204,7 @@ mod tests {
                             confidence: 0.9,
                             state: nv_perception::TrackState::Confirmed,
                             detection_id: None,
+                            metadata: nv_core::TypedMetadata::new(),
                         },
                         metadata: nv_core::TypedMetadata::new(),
                     })
@@ -1335,6 +1338,7 @@ mod tests {
                 confidence: 0.95,
                 state: nv_perception::TrackState::Confirmed,
                 detection_id: None,
+                metadata: nv_core::TypedMetadata::new(),
             },
             metadata: nv_core::TypedMetadata::new(),
         };
@@ -1390,6 +1394,7 @@ mod tests {
                 confidence: 0.95,
                 state: nv_perception::TrackState::Confirmed,
                 detection_id: None,
+                metadata: nv_core::TypedMetadata::new(),
             },
             metadata: nv_core::TypedMetadata::new(),
         };
@@ -1468,6 +1473,7 @@ mod tests {
                 confidence: 0.9,
                 state,
                 detection_id: None,
+                metadata: nv_core::TypedMetadata::new(),
             },
             metadata: nv_core::TypedMetadata::new(),
         }

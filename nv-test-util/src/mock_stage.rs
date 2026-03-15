@@ -292,6 +292,7 @@ impl Stage for MockTrackerStage {
                         confidence: det.confidence,
                         state: nv_perception::TrackState::Confirmed,
                         detection_id: Some(det.id),
+                        metadata: nv_core::TypedMetadata::new(),
                     },
                     metadata: nv_core::TypedMetadata::new(),
                 }

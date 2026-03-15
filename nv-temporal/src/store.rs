@@ -733,6 +733,7 @@ mod tests {
             confidence: 0.9,
             state: TrackState::Confirmed,
             detection_id: None,
+            metadata: nv_core::TypedMetadata::new(),
         }
     }
 

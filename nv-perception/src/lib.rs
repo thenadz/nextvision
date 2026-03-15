@@ -13,6 +13,24 @@
 //! - **[`StagePipeline`]** — ordered pipeline builder with **[`validate()`](StagePipeline::validate)**.
 //! - **[`StageCapabilities`]** — declared stage inputs/outputs for validation.
 //!
+//! ## Supported model patterns
+//!
+//! The library supports multiple perception model architectures through
+//! the same [`Stage`] trait. A stage may produce *any combination* of
+//! output fields — the pipeline does not enforce a fixed detect→track
+//! sequence.
+//!
+//! | Pattern | Description |
+//! |---|---|
+//! | Classical detector → tracker | Separate detection and tracking stages in sequence. |
+//! | Joint detection+tracking | Single stage producing both `detections` and `tracks`. |
+//! | Direct track emitter | Model outputs tracks directly, no intermediate detections. |
+//! | Richer observations | Per-observation metadata via [`TrackObservation::metadata`]. |
+//! | Scene/temporal analysis | Stages producing [`SceneFeature`]s or [`DerivedSignal`]s. |
+//!
+//! See the [`Stage`] trait documentation for detailed examples and the
+//! [`StageOutput`] docs for joint-model and direct-track-emitter patterns.
+//!
 //! ## Ergonomic entity construction
 //!
 //! Use [`Detection::builder()`] and [`Track::new()`] to avoid manual struct
@@ -46,6 +64,15 @@
 //! (which [`StageOutput`] fields a stage populates), not by type hierarchy.
 //! This keeps the abstraction minimal, avoids taxonomy assumptions, and lets
 //! users compose arbitrary pipeline shapes without framework-imposed constraints.
+//!
+//! ## Extension seam: typed artifacts
+//!
+//! For inter-stage data that does not fit the built-in fields (feature maps,
+//! prepared clip/window tensors, calibration data), stages use the
+//! [`stage_artifacts`](PerceptionArtifacts::stage_artifacts) type-map.
+//! This is also the intended path for future temporal/window model support:
+//! a pre-processing stage assembles the window and stores it as a typed
+//! artifact for a downstream inference stage.
 //!
 //! ## Backend independence
 //!
