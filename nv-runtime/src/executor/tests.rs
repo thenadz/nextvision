@@ -8,7 +8,7 @@
     use nv_core::timestamp::Duration;
     use nv_perception::{StageContext, StageOutput};
     use nv_temporal::RetentionPolicy;
-    use nv_view::{DefaultEpochPolicy, ViewEpoch};
+    use nv_view::{DefaultEpochPolicy, TransitionPhase, ViewEpoch};
     fn make_executor() -> PipelineExecutor {
         PipelineExecutor::new(
             FeedId::new(1),
