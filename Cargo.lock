@@ -2711,6 +2711,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "nv-core",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

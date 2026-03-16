@@ -4,25 +4,52 @@
 //! used on the hot path — stages that need a specific format should convert
 //! explicitly.
 
-use crate::frame::{FrameEnvelope, PixelFormat};
+use crate::frame::{FrameEnvelope, FrameAccessError, PixelFormat};
+
+/// Errors from [`convert()`].
+#[derive(Debug, thiserror::Error)]
+pub enum ConvertError {
+    /// The source and target formats are identical — clone instead.
+    #[error("source format already matches target")]
+    SameFormat,
+    /// No conversion path exists for the given format pair.
+    #[error("unsupported conversion: {from:?} -> {to:?}")]
+    Unsupported {
+        /// Source pixel format.
+        from: PixelFormat,
+        /// Target pixel format.
+        to: PixelFormat,
+    },
+    /// Host bytes could not be obtained from the frame.
+    #[error("frame data not accessible: {0}")]
+    Access(#[from] FrameAccessError),
+}
 
 /// Convert a frame to a different pixel format.
 ///
-/// Returns `None` if the conversion is not supported or the source format
-/// matches the target (in which case, just clone the frame).
+/// Works with host-resident **and** [`MappableToHost`](crate::DataAccess::MappableToHost)
+/// device frames. Conversion always allocates a new output buffer, so the
+/// additional cost of materializing device data is negligible.
 ///
-/// Currently supports:
+/// # Errors
+///
+/// - [`ConvertError::SameFormat`] — source already matches `target`; clone instead.
+/// - [`ConvertError::Unsupported`] — no conversion path for this format pair.
+/// - [`ConvertError::Access`] — host bytes could not be obtained (opaque device frame).
+///
+/// Currently supported paths:
 /// - `Bgr8` → `Rgb8`
 /// - `Rgb8` → `Bgr8`
 /// - `Rgba8` → `Rgb8`
 /// - `Rgb8` → `Gray8`
 ///
 /// Additional conversions will be added as needed.
-#[must_use]
-pub fn convert(frame: &FrameEnvelope, target: PixelFormat) -> Option<FrameEnvelope> {
+pub fn convert(frame: &FrameEnvelope, target: PixelFormat) -> Result<FrameEnvelope, ConvertError> {
     if frame.format() == target {
-        return None; // caller should clone instead
+        return Err(ConvertError::SameFormat);
     }
+
+    let host_bytes = frame.require_host_data()?;
 
     let w = frame.width();
     let h = frame.height();
@@ -30,21 +57,31 @@ pub fn convert(frame: &FrameEnvelope, target: PixelFormat) -> Option<FrameEnvelo
 
     let converted = match (frame.format(), target) {
         (PixelFormat::Bgr8, PixelFormat::Rgb8) | (PixelFormat::Rgb8, PixelFormat::Bgr8) => {
-            swap_rb(frame.data(), w, h, src_stride)
+            swap_rb(&host_bytes, w, h, src_stride)
         }
-        (PixelFormat::Rgba8, PixelFormat::Rgb8) => rgba_to_rgb(frame.data(), w, h, src_stride),
-        (PixelFormat::Rgb8, PixelFormat::Gray8) => rgb_to_gray(frame.data(), w, h, src_stride),
-        _ => return None,
+        (PixelFormat::Rgba8, PixelFormat::Rgb8) => rgba_to_rgb(&host_bytes, w, h, src_stride),
+        (PixelFormat::Rgb8, PixelFormat::Gray8) => rgb_to_gray(&host_bytes, w, h, src_stride),
+        _ => {
+            return Err(ConvertError::Unsupported {
+                from: frame.format(),
+                to: target,
+            })
+        }
     };
 
     let out_stride = match target {
         PixelFormat::Gray8 => w,
         PixelFormat::Rgb8 | PixelFormat::Bgr8 => w * 3,
         PixelFormat::Rgba8 => w * 4,
-        _ => return None,
+        _ => {
+            return Err(ConvertError::Unsupported {
+                from: frame.format(),
+                to: target,
+            })
+        }
     };
 
-    Some(FrameEnvelope::new_owned(
+    Ok(FrameEnvelope::new_owned(
         frame.feed_id(),
         frame.seq(),
         frame.ts(),
@@ -141,9 +178,12 @@ mod tests {
     }
 
     #[test]
-    fn same_format_returns_none() {
+    fn same_format_returns_error() {
         let f = make_frame(PixelFormat::Rgb8, vec![0; 12], 2, 2);
-        assert!(convert(&f, PixelFormat::Rgb8).is_none());
+        assert!(matches!(
+            convert(&f, PixelFormat::Rgb8),
+            Err(ConvertError::SameFormat)
+        ));
     }
 
     #[test]
@@ -152,7 +192,7 @@ mod tests {
         let f = make_frame(PixelFormat::Bgr8, data, 2, 1);
         let converted = convert(&f, PixelFormat::Rgb8).unwrap();
         assert_eq!(converted.format(), PixelFormat::Rgb8);
-        assert_eq!(converted.data(), &[30, 20, 10, 60, 50, 40]);
+        assert_eq!(converted.host_data().unwrap(), &[30, 20, 10, 60, 50, 40]);
     }
 
     #[test]
@@ -177,7 +217,7 @@ mod tests {
         let converted = convert(&f, PixelFormat::Rgb8).unwrap();
         // Padding bytes must NOT appear in output
         assert_eq!(
-            converted.data(),
+            converted.host_data().unwrap(),
             &[30, 20, 10, 60, 50, 40, 90, 80, 70, 33, 22, 11]
         );
         assert_eq!(converted.stride(), 6); // tightly packed output

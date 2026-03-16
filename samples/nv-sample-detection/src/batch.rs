@@ -83,8 +83,15 @@ impl BatchProcessor for DetectorBatchProcessor {
             inference::require_rgb8(item.frame.format(), Self::PROCESSOR_ID)?;
 
             let offset = i * pixels_per_frame;
+            let host_pixels =
+                item.frame
+                    .require_host_data()
+                    .map_err(|e| StageError::ProcessingFailed {
+                        stage_id: Self::PROCESSOR_ID,
+                        detail: e.to_string(),
+                    })?;
             let lb_info = letterbox_preprocess_into(
-                item.frame.data(),
+                &host_pixels,
                 item.frame.width(),
                 item.frame.height(),
                 item.frame.stride(),
@@ -96,12 +103,7 @@ impl BatchProcessor for DetectorBatchProcessor {
 
         // Run batched inference: [N, 3, H, W] → decode per-item output
         // using a zero-copy closure over the ORT output.
-        let shape = vec![
-            batch_size as i64,
-            3,
-            input_size as i64,
-            input_size as i64,
-        ];
+        let shape = vec![batch_size as i64, 3, input_size as i64, input_size as i64];
         let conf_threshold = self.config.confidence_threshold;
         let det_counter = self.det_counter;
 
@@ -156,16 +158,15 @@ impl BatchProcessor for DetectorBatchProcessor {
                         detail: format!(
                             "batch output too short: expected at least {} floats \
                              ({} items × {} per item), got {}",
-                            expected_len, batch_size, item_len, output_flat.len(),
+                            expected_len,
+                            batch_size,
+                            item_len,
+                            output_flat.len(),
                         ),
                     });
                 }
 
-                debug!(
-                    batch_size,
-                    max_dets,
-                    "batch inference complete"
-                );
+                debug!(batch_size, max_dets, "batch inference complete");
 
                 // Decode per-item output.
                 let mut counter = det_counter;
@@ -173,12 +174,8 @@ impl BatchProcessor for DetectorBatchProcessor {
                     let start = i * item_len;
                     let item_output = &output_flat[start..start + item_len];
 
-                    let detection_set = decode_end2end_output(
-                        item_output,
-                        conf_threshold,
-                        &lb_infos[i],
-                        counter,
-                    );
+                    let detection_set =
+                        decode_end2end_output(item_output, conf_threshold, &lb_infos[i], counter);
                     counter += detection_set.len() as u64;
                     item.output = Some(StageOutput::with_detections(detection_set));
                 }

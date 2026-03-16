@@ -60,7 +60,10 @@ pub struct BatchEntry {
     /// The video frame to process.
     ///
     /// `FrameEnvelope` is `Arc`-backed — zero-copy reference, cheap to
-    /// clone. Pixel data is accessed via `frame.data()`.
+    /// clone. Use `frame.require_host_data()` to obtain host-readable
+    /// bytes (zero-copy for host frames, cached materialization for
+    /// device frames), or `frame.host_data()` when host residency is
+    /// guaranteed.
     pub frame: FrameEnvelope,
     /// View-state snapshot at the time of this frame.
     ///
@@ -133,8 +136,12 @@ pub struct BatchEntry {
 ///
 ///     fn process(&mut self, items: &mut [BatchEntry]) -> Result<(), StageError> {
 ///         for item in items.iter_mut() {
-///             let _pixels = item.frame.data();
-///             // ... run model ...
+///             let pixels = item.frame.require_host_data()
+///                 .map_err(|e| StageError::ProcessingFailed {
+///                     stage_id: self.id(),
+///                     detail: e.to_string(),
+///                 })?;
+///             // ... run model on &*pixels ...
 ///             item.output = Some(StageOutput::with_detections(DetectionSet::empty()));
 ///         }
 ///         Ok(())

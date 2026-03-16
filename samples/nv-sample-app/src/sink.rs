@@ -107,7 +107,13 @@ impl OutputSink for OverlaySink {
         let stride = frame.stride();
 
         // Work on a mutable copy so we can draw on it.
-        let mut rgb = frame.data().to_vec();
+        let mut rgb = match frame.require_host_data() {
+            Ok(cow) => cow.into_owned(),
+            Err(_) => {
+                warn!("frame is not host-accessible, skipping");
+                return;
+            }
+        };
 
         overlay::draw_tracks(&mut rgb, w, h, stride, &output.tracks);
         overlay::draw_fps(&mut rgb, w, h, stride, fps);

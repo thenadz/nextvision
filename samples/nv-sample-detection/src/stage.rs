@@ -75,8 +75,14 @@ impl Stage for DetectorStage {
         let input_size = self.config.input_size;
 
         // Letterbox preprocess.
+        let host_pixels = frame
+            .require_host_data()
+            .map_err(|e| StageError::ProcessingFailed {
+                stage_id: Self::STAGE_ID,
+                detail: e.to_string(),
+            })?;
         let (tensor_data, lb_info) = letterbox_preprocess(
-            frame.data(),
+            &host_pixels,
             frame.width(),
             frame.height(),
             frame.stride(),
@@ -94,12 +100,8 @@ impl Stage for DetectorStage {
             tensor_data,
             Self::STAGE_ID,
             |_shape, output_flat| {
-                let detection_set = decode_end2end_output(
-                    output_flat,
-                    conf_threshold,
-                    &lb_info,
-                    det_offset,
-                );
+                let detection_set =
+                    decode_end2end_output(output_flat, conf_threshold, &lb_info, det_offset);
                 let counter = det_offset + detection_set.len() as u64;
                 Ok((StageOutput::with_detections(detection_set), counter))
             },

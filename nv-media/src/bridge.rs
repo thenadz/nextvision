@@ -216,7 +216,7 @@ mod tests {
         assert_eq!(frame.width(), 2);
         assert_eq!(frame.height(), 2);
         assert_eq!(frame.format(), PixelFormat::Rgb8);
-        assert_eq!(frame.data().len(), 12);
+        assert_eq!(frame.host_data().unwrap().len(), 12);
     }
 
     #[test]

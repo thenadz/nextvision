@@ -104,9 +104,9 @@ mod tests {
         let f = solid_rgb(FeedId::new(1), 0, MonotonicTs::ZERO, 64, 48, 255, 0, 0);
         assert_eq!(f.width(), 64);
         assert_eq!(f.height(), 48);
-        assert_eq!(f.data().len(), 64 * 48 * 3);
+        assert_eq!(f.host_data().unwrap().len(), 64 * 48 * 3);
         // First pixel should be red.
-        assert_eq!(&f.data()[..3], &[255, 0, 0]);
+        assert_eq!(&f.host_data().unwrap()[..3], &[255, 0, 0]);
     }
 
     #[test]
