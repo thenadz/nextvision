@@ -67,9 +67,7 @@ impl StagePipeline {
     /// Create a new builder.
     #[must_use]
     pub fn builder() -> StagePipelineBuilder {
-        StagePipelineBuilder {
-            stages: Vec::new(),
-        }
+        StagePipelineBuilder { stages: Vec::new() }
     }
 
     /// Number of stages in the pipeline.
@@ -93,10 +91,7 @@ impl StagePipeline {
     /// Get `(StageId, StageCategory)` pairs in execution order.
     #[must_use]
     pub fn categories(&self) -> Vec<(StageId, StageCategory)> {
-        self.stages
-            .iter()
-            .map(|s| (s.id(), s.category()))
-            .collect()
+        self.stages.iter().map(|s| (s.id(), s.category())).collect()
     }
 
     /// Consume the pipeline and return the ordered stage list.
@@ -339,10 +334,7 @@ mod tests {
         fn id(&self) -> StageId {
             StageId(self.name)
         }
-        fn process(
-            &mut self,
-            _ctx: &StageContext<'_>,
-        ) -> Result<StageOutput, StageError> {
+        fn process(&mut self, _ctx: &StageContext<'_>) -> Result<StageOutput, StageError> {
             Ok(StageOutput::empty())
         }
         fn category(&self) -> StageCategory {
@@ -429,10 +421,7 @@ mod tests {
         fn id(&self) -> StageId {
             StageId(self.name)
         }
-        fn process(
-            &mut self,
-            _ctx: &StageContext<'_>,
-        ) -> Result<StageOutput, StageError> {
+        fn process(&mut self, _ctx: &StageContext<'_>) -> Result<StageOutput, StageError> {
             Ok(StageOutput::empty())
         }
         fn capabilities(&self) -> Option<StageCapabilities> {
@@ -498,7 +487,10 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert!(matches!(
             &warnings[0],
-            ValidationWarning::UnsatisfiedDependency { missing: "tracks", .. }
+            ValidationWarning::UnsatisfiedDependency {
+                missing: "tracks",
+                ..
+            }
         ));
     }
 
@@ -601,12 +593,8 @@ mod tests {
             caps: Some(StageCapabilities::new().consumes_tracks()),
         })];
 
-        let warnings = validate_pipeline_phased(
-            &pre,
-            Some(&batch_caps),
-            Some(StageId("batch")),
-            &post,
-        );
+        let warnings =
+            validate_pipeline_phased(&pre, Some(&batch_caps), Some(StageId("batch")), &post);
         assert!(warnings.is_empty());
     }
 
@@ -615,12 +603,8 @@ mod tests {
         let pre: Vec<Box<dyn Stage>> = vec![];
         let batch_caps = StageCapabilities::new().consumes_detections();
 
-        let warnings = validate_pipeline_phased(
-            &pre,
-            Some(&batch_caps),
-            Some(StageId("batch")),
-            &[],
-        );
+        let warnings =
+            validate_pipeline_phased(&pre, Some(&batch_caps), Some(StageId("batch")), &[]);
         assert_eq!(warnings.len(), 1);
         assert_eq!(
             warnings[0],
@@ -640,12 +624,8 @@ mod tests {
             caps: Some(StageCapabilities::new().consumes_detections()),
         })];
 
-        let warnings = validate_pipeline_phased(
-            &pre,
-            Some(&batch_caps),
-            Some(StageId("batch")),
-            &post,
-        );
+        let warnings =
+            validate_pipeline_phased(&pre, Some(&batch_caps), Some(StageId("batch")), &post);
         assert!(warnings.is_empty());
     }
 
@@ -660,8 +640,7 @@ mod tests {
             caps: None,
         })];
 
-        let warnings =
-            validate_pipeline_phased(&pre, None, None, &post);
+        let warnings = validate_pipeline_phased(&pre, None, None, &post);
         assert_eq!(warnings.len(), 1);
         assert!(matches!(
             &warnings[0],
@@ -676,12 +655,7 @@ mod tests {
             caps: None,
         })];
 
-        let warnings = validate_pipeline_phased(
-            &pre,
-            None,
-            Some(StageId("batch")),
-            &[],
-        );
+        let warnings = validate_pipeline_phased(&pre, None, Some(StageId("batch")), &[]);
         assert_eq!(warnings.len(), 1);
         assert!(matches!(
             &warnings[0],
@@ -700,8 +674,7 @@ mod tests {
             caps: Some(StageCapabilities::new().consumes_detections()),
         })];
 
-        let warnings =
-            validate_pipeline_phased(&pre, None, None, &post);
+        let warnings = validate_pipeline_phased(&pre, None, None, &post);
         assert!(warnings.is_empty());
     }
 }

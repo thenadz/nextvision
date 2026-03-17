@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use nv_core::error::MediaError;
 
-use crate::ingress::{HealthSink, MediaIngress, MediaIngressFactory, IngressOptions};
+use crate::ingress::{HealthSink, IngressOptions, MediaIngress, MediaIngressFactory};
 use crate::source::MediaSource;
 
 /// Default [`MediaIngressFactory`] that creates GStreamer-backed [`MediaSource`] instances.
@@ -50,10 +50,7 @@ impl Default for GstMediaIngressFactory {
 }
 
 impl MediaIngressFactory for GstMediaIngressFactory {
-    fn create(
-        &self,
-        options: IngressOptions,
-    ) -> Result<Box<dyn MediaIngress>, MediaError> {
+    fn create(&self, options: IngressOptions) -> Result<Box<dyn MediaIngress>, MediaError> {
         let mut source = MediaSource::new(
             options.feed_id,
             options.spec,

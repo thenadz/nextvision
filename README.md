@@ -28,7 +28,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full specification.
 ```rust
 use nv_runtime::{Runtime, FeedConfig};
 use nv_core::{SourceSpec, CameraMode};
-use nv_runtime::{BackpressurePolicy, OutputSink, SharedOutput};
+use nv_runtime::{OutputSink, SharedOutput};
 
 struct MyOutputSink;
 impl OutputSink for MyOutputSink {

@@ -1,12 +1,12 @@
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use nv_core::config::{ReconnectPolicy, SourceSpec};
 use nv_core::error::{NvError, RuntimeError};
 use nv_core::health::{HealthEvent, StopReason};
 use nv_core::id::FeedId;
-use nv_media::ingress::{MediaIngress, MediaIngressFactory, IngressOptions, SourceStatus};
+use nv_media::ingress::{IngressOptions, MediaIngress, MediaIngressFactory, SourceStatus};
 use tokio::sync::broadcast;
 
 use crate::backpressure::BackpressurePolicy;
@@ -40,8 +40,6 @@ enum ExitReason {
     /// event has already been emitted by `processing_loop`.
     SinkSpawnFailed,
 }
-
-
 
 /// Spawns and runs the per-feed worker thread.
 ///
@@ -201,7 +199,8 @@ impl FeedWorker {
                 self.feed_id,
                 self.source_spec.clone(),
                 self.reconnect_policy.clone(),
-            ).with_decode_preference(self.decode_preference);
+            )
+            .with_decode_preference(self.decode_preference);
             if let Some(ref ptz) = self.ptz_provider {
                 options = options.with_ptz_provider(Arc::clone(ptz));
             }
@@ -297,10 +296,7 @@ impl FeedWorker {
                             "stage panic (trigger {:?} does not allow restart, or budget exhausted after {} restarts)",
                             self.restart_policy.restart_on, restart_count,
                         ),
-                        _ => format!(
-                            "restart budget exhausted after {} restarts",
-                            restart_count,
-                        ),
+                        _ => format!("restart budget exhausted after {} restarts", restart_count,),
                     };
                     if !self.try_restart(
                         &mut restart_count,
@@ -336,14 +332,13 @@ impl FeedWorker {
         if let Ok(mut t) = self.shared.session_started_at.lock() {
             *t = Instant::now();
         }
-        self.shared.sink_capacity.store(self.sink_queue_capacity, Ordering::Relaxed);
+        self.shared
+            .sink_capacity
+            .store(self.sink_queue_capacity, Ordering::Relaxed);
         self.shared.sink_occupancy.store(0, Ordering::Relaxed);
 
         // Spawn sink worker — output is decoupled from this thread.
-        let sink = std::mem::replace(
-            &mut self.output_sink,
-            Box::new(NullSink),
-        );
+        let sink = std::mem::replace(&mut self.output_sink, Box::new(NullSink));
         let sink_worker = match SinkWorker::spawn(
             self.feed_id,
             sink,
@@ -402,7 +397,13 @@ impl FeedWorker {
 
         let mut sink_bp = SinkBpThrottle::new();
 
-        let reason = self.run_loop_inner(queue, source, sink_worker, &mut sink_bp, &mut next_tick_hint);
+        let reason = self.run_loop_inner(
+            queue,
+            source,
+            sink_worker,
+            &mut sink_bp,
+            &mut next_tick_hint,
+        );
 
         // Flush any accumulated tail from the sink backpressure
         // coalescer so the final delta is not silently lost.
@@ -497,9 +498,7 @@ impl FeedWorker {
             }
 
             // Update shared metrics.
-            self.shared
-                .frames_processed
-                .fetch_add(1, Ordering::Relaxed);
+            self.shared.frames_processed.fetch_add(1, Ordering::Relaxed);
             self.shared
                 .tracks_active
                 .store(self.executor.track_count() as u64, Ordering::Relaxed);
@@ -604,7 +603,12 @@ impl FeedWorker {
     ) -> bool {
         self.shared.set_queue(None);
         self.stop_and_flush_stages();
-        self.try_restart(restart_count, session_start, &ExitReason::SourceEnded, detail)
+        self.try_restart(
+            restart_count,
+            session_start,
+            &ExitReason::SourceEnded,
+            detail,
+        )
     }
 
     /// Attempt a restart. Returns `true` if the restart was accepted
@@ -655,11 +659,7 @@ impl FeedWorker {
     }
 
     /// Increment restart counter and emit FeedRestarting health event.
-    fn bump_restart(
-        &self,
-        session_start: &mut Instant,
-        current_count: u32,
-    ) -> u32 {
+    fn bump_restart(&self, session_start: &mut Instant, current_count: u32) -> u32 {
         let window: std::time::Duration = self.restart_policy.restart_window.into();
         let new_count = if session_start.elapsed() >= window {
             1

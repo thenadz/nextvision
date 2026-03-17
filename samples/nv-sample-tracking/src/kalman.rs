@@ -94,9 +94,8 @@ impl KalmanBoxTracker {
             // P[i,j] += P[vi,j] + P[i,vj] + P[vi,vj]  for j < DIM_X
             for j in 0..DIM_X {
                 let vj = if j < 3 { j + 4 } else { j };
-                p_new[i * DIM_X + j] += self.p[vi * DIM_X + j]
-                    + self.p[i * DIM_X + vj]
-                    + self.p[vi * DIM_X + vj];
+                p_new[i * DIM_X + j] +=
+                    self.p[vi * DIM_X + j] + self.p[i * DIM_X + vj] + self.p[vi * DIM_X + vj];
             }
         }
         // Add process noise on diagonal.
@@ -330,10 +329,12 @@ mod tests {
 
     #[test]
     fn invert_identity() {
-        let id = [[1.0, 0.0, 0.0, 0.0],
-                   [0.0, 1.0, 0.0, 0.0],
-                   [0.0, 0.0, 1.0, 0.0],
-                   [0.0, 0.0, 0.0, 1.0]];
+        let id = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
         let inv = invert_4x4(id);
         for i in 0..4 {
             for j in 0..4 {

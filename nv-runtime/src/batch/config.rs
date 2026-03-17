@@ -77,6 +77,15 @@ pub struct BatchConfig {
     /// Default: 1 — each feed contributes at most one item to the
     /// shared queue at any time. Must be ≥ 1.
     pub max_in_flight_per_feed: usize,
+    /// Maximum time to wait for [`BatchProcessor::on_start()`] to
+    /// complete before returning an error.
+    ///
+    /// GPU-backed processors (e.g. TensorRT engine compilation) may
+    /// need significantly longer than CPU-only models. Set this to
+    /// accommodate worst-case first-run warm-up on the target hardware.
+    ///
+    /// Defaults to 30 seconds when `None`. Must be > 0 when specified.
+    pub startup_timeout: Option<Duration>,
 }
 
 impl BatchConfig {
@@ -106,6 +115,7 @@ impl BatchConfig {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         })
     }
 
@@ -136,6 +146,17 @@ impl BatchConfig {
     #[must_use]
     pub fn with_max_in_flight_per_feed(mut self, max: usize) -> Self {
         self.max_in_flight_per_feed = max;
+        self
+    }
+
+    /// Set the maximum time to wait for `on_start()` to complete.
+    ///
+    /// Pass `None` for the default (30 seconds). GPU-backed processors
+    /// (e.g. TensorRT engine build on first run) may need 2–5 minutes.
+    /// Must be > 0 when specified.
+    #[must_use]
+    pub fn with_startup_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.startup_timeout = timeout;
         self
     }
 
@@ -182,6 +203,13 @@ impl BatchConfig {
                 detail: "batch max_in_flight_per_feed must be >= 1".into(),
             });
         }
+        if let Some(st) = self.startup_timeout {
+            if st.is_zero() {
+                return Err(ConfigError::InvalidPolicy {
+                    detail: "batch startup_timeout must be > 0".into(),
+                });
+            }
+        }
         Ok(())
     }
 }
@@ -196,6 +224,7 @@ impl Default for BatchConfig {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         }
     }
 }

@@ -62,19 +62,28 @@ impl TickOutcome {
     /// Source is running, no specific tick urgency.
     #[inline]
     pub fn running() -> Self {
-        Self { status: SourceStatus::Running, next_tick: None }
+        Self {
+            status: SourceStatus::Running,
+            next_tick: None,
+        }
     }
 
     /// Source is reconnecting; tick again after `delay`.
     #[inline]
     pub fn reconnecting(delay: Duration) -> Self {
-        Self { status: SourceStatus::Reconnecting, next_tick: Some(delay) }
+        Self {
+            status: SourceStatus::Reconnecting,
+            next_tick: Some(delay),
+        }
     }
 
     /// Source is permanently stopped.
     #[inline]
     pub fn stopped() -> Self {
-        Self { status: SourceStatus::Stopped, next_tick: None }
+        Self {
+            status: SourceStatus::Stopped,
+            next_tick: None,
+        }
     }
 }
 
@@ -337,10 +346,7 @@ pub trait MediaIngressFactory: Send + Sync + 'static {
     ///
     /// Returns `MediaError` if the source specification is invalid or
     /// the backend cannot handle the requested format.
-    fn create(
-        &self,
-        options: IngressOptions,
-    ) -> Result<Box<dyn MediaIngress>, MediaError>;
+    fn create(&self, options: IngressOptions) -> Result<Box<dyn MediaIngress>, MediaError>;
 }
 
 /// Receives [`HealthEvent`]s emitted by a [`MediaIngress`] source.

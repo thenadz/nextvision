@@ -87,10 +87,7 @@ impl OutputSink for DetectionLogger {
 
         println!(
             "seq={} detections={} stages={:?} total_latency={:?}",
-            output.frame_seq,
-            det_count,
-            stage_names,
-            output.provenance.total_latency,
+            output.frame_seq, det_count, stage_names, output.provenance.total_latency,
         );
     }
 }
@@ -112,7 +109,10 @@ fn main() -> Result<(), nv_core::error::NvError> {
         .build()?;
 
     let handle = runtime.add_feed(config)?;
-    println!("Feed {:?} running with mock detector + classifier", handle.id());
+    println!(
+        "Feed {:?} running with mock detector + classifier",
+        handle.id()
+    );
 
     // Let the feed run for a while.
     std::thread::sleep(std::time::Duration::from_secs(5));

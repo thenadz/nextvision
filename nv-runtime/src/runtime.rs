@@ -24,7 +24,8 @@ use nv_perception::BatchProcessor;
 use tokio::sync::broadcast;
 
 use crate::batch::{BatchConfig, BatchCoordinator, BatchHandle};
-use crate::feed::{FeedConfig, FeedHandle};
+use crate::feed::FeedConfig;
+use crate::feed_handle::FeedHandle;
 use crate::output::{LagDetector, SharedOutput};
 use crate::worker::{self, BroadcastHealthSink, FeedSharedState};
 
@@ -250,7 +251,7 @@ impl RuntimeInner {
         // Reserve the processor ID in the lightweight batch_ids set.  This
         // is the serialization point for duplicate rejection — it avoids
         // holding the heavier `coordinators` lock during the potentially
-        // slow `BatchCoordinator::start` (up to ON_START_TIMEOUT = 30 s).
+        // slow `BatchCoordinator::start` (up to startup_timeout).
         let processor_id = processor.id();
         {
             let mut ids = self

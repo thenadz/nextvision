@@ -41,22 +41,23 @@ impl OverlaySink {
     /// Spawn the UI thread and return a sink that feeds it.
     ///
     /// `init_width` / `init_height` set the initial window dimensions.
-    pub fn spawn(init_width: usize, init_height: usize) -> Self {
+    ///
+    /// Returns an error if the OS thread cannot be spawned.
+    pub fn spawn(init_width: usize, init_height: usize) -> Result<Self, std::io::Error> {
         // Bounded to 2 — if the UI falls behind we drop frames.
         let (tx, rx) = mpsc::sync_channel::<UiFrame>(2);
 
         thread::Builder::new()
             .name("overlay-ui".into())
-            .spawn(move || ui_thread(rx, init_width, init_height))
-            .expect("failed to spawn overlay UI thread");
+            .spawn(move || ui_thread(rx, init_width, init_height))?;
 
-        Self {
+        Ok(Self {
             tx,
             frame_count: AtomicU64::new(0),
             fps_ema_bits: AtomicU64::new(0_f64.to_bits()),
             last_ns: AtomicU64::new(0),
             start: Instant::now(),
-        }
+        })
     }
 
     /// Compute a smoothed FPS using exponential moving average.

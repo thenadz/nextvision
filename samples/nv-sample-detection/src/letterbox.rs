@@ -185,7 +185,7 @@ mod tests {
         let w = 4u32;
         let h = 2u32;
         let stride = w * 3;
-        let data = vec![255u8, 0, 0].repeat((w * h) as usize);
+        let data = [255u8, 0, 0].repeat((w * h) as usize);
         let target = 8;
         let (tensor, info) = letterbox_preprocess(&data, w, h, stride, target);
         assert_eq!(tensor.len(), 3 * 8 * 8);

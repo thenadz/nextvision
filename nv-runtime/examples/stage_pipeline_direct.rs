@@ -1,11 +1,14 @@
-//! Example: multi-feed pipeline using the stage system.
+//! Example: **direct stage pipeline execution** using synthetic frames.
 //!
-//! This example demonstrates how to compose a multi-stage perception
-//! pipeline using `StagePipeline` and run it through the `PipelineExecutor`.
+//! This example demonstrates how to compose multi-stage perception pipelines
+//! using `StagePipeline` and drive them directly with synthetic frames.
+//!
+//! **This is NOT a Runtime example.** For using the full Runtime with live
+//! feeds, see the `multi_feed` or `mock_detector` examples instead.
 //!
 //! Since this example does not require a live video source or GStreamer,
-//! it drives the executor directly with synthetic frames — the same pattern
-//! used by the runtime's feed worker threads.
+//! it drives stages directly with synthetic frames — the same execution
+//! pattern the runtime's feed worker threads use internally.
 //!
 //! ## Pipeline shape
 //!
@@ -20,7 +23,7 @@
 //! Each feed runs its own isolated executor with independent stage instances
 //! and temporal stores — exactly as the runtime would do on separate OS threads.
 //!
-//! Run with: `cargo run --example multi_feed_pipeline`
+//! Run with: `cargo run --example stage_pipeline_direct`
 
 use nv_core::error::StageError;
 use nv_core::id::{FeedId, StageId};
@@ -195,7 +198,10 @@ fn main() {
         };
 
         for stage in stages.iter_mut() {
-            stage.on_start().expect("stage start failed");
+            if let Err(e) = stage.on_start() {
+                eprintln!("[{feed_label}] stage {} failed to start: {e}", stage.id());
+                return;
+            }
         }
 
         for frame in frames {
@@ -226,10 +232,18 @@ fn main() {
     }
 
     println!("--- Processing Feed A (2 detections/frame) ---");
-    run_pipeline("Feed-A", &mut stages_a.into_iter().collect::<Vec<_>>(), &frames_a);
+    run_pipeline(
+        "Feed-A",
+        &mut stages_a.into_iter().collect::<Vec<_>>(),
+        &frames_a,
+    );
 
     println!("\n--- Processing Feed B (5 detections/frame) ---");
-    run_pipeline("Feed-B", &mut stages_b.into_iter().collect::<Vec<_>>(), &frames_b);
+    run_pipeline(
+        "Feed-B",
+        &mut stages_b.into_iter().collect::<Vec<_>>(),
+        &frames_b,
+    );
 
     println!("\n=== Example complete ===");
 }

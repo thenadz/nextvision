@@ -115,8 +115,7 @@ impl FrameSink for FeedFrameSink {
             PushOutcome::Accepted => {}
             PushOutcome::DroppedOldest | PushOutcome::Rejected => {
                 self.shared.frames_dropped.fetch_add(1, Ordering::Relaxed);
-                self.bp_throttle
-                    .record_drop(&self.health_tx, self.feed_id);
+                self.bp_throttle.record_drop(&self.health_tx, self.feed_id);
             }
         }
     }

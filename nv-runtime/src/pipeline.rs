@@ -189,10 +189,7 @@ mod tests {
         fn id(&self) -> StageId {
             StageId(self.0)
         }
-        fn process(
-            &mut self,
-            _ctx: &StageContext<'_>,
-        ) -> Result<StageOutput, StageError> {
+        fn process(&mut self, _ctx: &StageContext<'_>) -> Result<StageOutput, StageError> {
             Ok(StageOutput::empty())
         }
     }
@@ -239,16 +236,28 @@ mod tests {
 
         struct Noop;
         impl BatchProcessor for Noop {
-            fn id(&self) -> StageId { StageId("noop") }
-            fn process(&mut self, _: &mut [BatchEntry]) -> Result<(), nv_core::error::StageError> { Ok(()) }
+            fn id(&self) -> StageId {
+                StageId("noop")
+            }
+            fn process(&mut self, _: &mut [BatchEntry]) -> Result<(), nv_core::error::StageError> {
+                Ok(())
+            }
         }
 
         let (health_tx, _) = tokio::sync::broadcast::channel::<HealthEvent>(4);
         let coord = BatchCoordinator::start(
             Box::new(Noop),
-            BatchConfig { max_batch_size: 1, max_latency: Duration::from_millis(10), queue_capacity: None, response_timeout: None, max_in_flight_per_feed: 1 },
+            BatchConfig {
+                max_batch_size: 1,
+                max_latency: Duration::from_millis(10),
+                queue_capacity: None,
+                response_timeout: None,
+                max_in_flight_per_feed: 1,
+            startup_timeout: None,
+            },
             health_tx,
-        ).unwrap();
+        )
+        .unwrap();
         let handle = coord.handle();
 
         // The second `.batch()` call should return an error.
@@ -259,4 +268,3 @@ mod tests {
         assert!(result.is_err(), "duplicate batch point should return error");
     }
 }
-

@@ -54,10 +54,10 @@ use crate::scene::SceneFeature;
 use crate::signal::DerivedSignal;
 use crate::temporal_access::TemporalAccess;
 use crate::track::Track;
+use nv_core::TypedMetadata;
 use nv_core::error::StageError;
 use nv_core::id::{FeedId, StageId};
 use nv_core::metrics::StageMetrics;
-use nv_core::TypedMetadata;
 use nv_frame::FrameEnvelope;
 use nv_view::{ViewEpoch, ViewSnapshot};
 

@@ -93,7 +93,10 @@ pub mod track;
 pub use artifact::PerceptionArtifacts;
 pub use batch::{BatchEntry, BatchProcessor};
 pub use detection::{Detection, DetectionBuilder, DetectionSet};
-pub use pipeline::{StagePipeline, StagePipelineBuilder, ValidationMode, ValidationWarning, validate_pipeline_phased, validate_stages};
+pub use pipeline::{
+    StagePipeline, StagePipelineBuilder, ValidationMode, ValidationWarning,
+    validate_pipeline_phased, validate_stages,
+};
 pub use scene::{SceneFeature, SceneFeatureValue};
 pub use signal::{DerivedSignal, SignalValue};
 pub use stage::{
@@ -105,9 +108,9 @@ pub use track::{Track, TrackObservation, TrackState};
 // Re-export types that appear in Stage trait signatures and StageContext,
 // so that stage authors can import everything from `nv_perception` without
 // needing direct dependencies on nv-core, nv-frame, or nv-view.
+pub use nv_core::TypedMetadata;
 pub use nv_core::error::StageError;
 pub use nv_core::id::{FeedId, StageId};
 pub use nv_core::metrics::StageMetrics;
-pub use nv_core::TypedMetadata;
 pub use nv_frame::FrameEnvelope;
 pub use nv_view::{ViewEpoch, ViewSnapshot};

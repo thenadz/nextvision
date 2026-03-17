@@ -5,7 +5,7 @@ use nv_core::id::StageId;
 use nv_core::{BBox, DetectionId, MonotonicTs, TrackId};
 use nv_perception::track::{Track, TrackObservation};
 use nv_perception::{
-    Detection, DetectionSet, DerivedSignal, SignalValue, Stage, StageCategory, StageContext,
+    DerivedSignal, Detection, DetectionSet, SignalValue, Stage, StageCategory, StageContext,
     StageOutput, TemporalAccess,
 };
 use nv_view::ViewEpoch;

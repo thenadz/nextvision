@@ -66,7 +66,6 @@ impl ReconnectTracker {
     pub(crate) fn current_attempt(&self) -> u32 {
         self.attempt
     }
-
 }
 
 #[cfg(test)]

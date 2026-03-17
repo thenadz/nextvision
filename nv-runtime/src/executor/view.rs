@@ -5,12 +5,12 @@ use nv_core::health::HealthEvent;
 use nv_core::timestamp::{Duration, MonotonicTs};
 use nv_frame::FrameEnvelope;
 use nv_view::{
-    CameraMotionState, EpochDecision, EpochPolicyContext, MotionPollContext,
-    MotionReport, MotionSource, ViewSnapshot,
+    CameraMotionState, EpochDecision, EpochPolicyContext, MotionPollContext, MotionReport,
+    MotionSource, ViewSnapshot,
 };
 
-use super::lifecycle::notify_epoch_change;
 use super::PipelineExecutor;
+use super::lifecycle::notify_epoch_change;
 
 impl PipelineExecutor {
     /// Convert a wall-clock [`Instant`] to a [`MonotonicTs`] anchored to
@@ -99,9 +99,7 @@ impl PipelineExecutor {
                 }
             }
             EpochDecision::Degrade { reason } => {
-                self.view_state.validity = nv_view::ContextValidity::Degraded {
-                    reason: *reason,
-                };
+                self.view_state.validity = nv_view::ContextValidity::Degraded { reason: *reason };
                 self.view_state.stability_score = (self.view_state.stability_score - 0.2).max(0.0);
 
                 health_events.push(HealthEvent::ViewDegraded {
@@ -110,9 +108,7 @@ impl PipelineExecutor {
                 });
             }
             EpochDecision::Compensate { reason, transform } => {
-                self.view_state.validity = nv_view::ContextValidity::Degraded {
-                    reason: *reason,
-                };
+                self.view_state.validity = nv_view::ContextValidity::Degraded { reason: *reason };
                 self.view_state.stability_score = (self.view_state.stability_score - 0.1).max(0.0);
                 let current_epoch = self.view_state.epoch;
 

@@ -414,11 +414,21 @@ impl MediaIngress for ReconnectingIngress {
         });
         Ok(())
     }
-    fn stop(&mut self) -> Result<(), nv_core::error::MediaError> { Ok(()) }
-    fn pause(&mut self) -> Result<(), nv_core::error::MediaError> { Ok(()) }
-    fn resume(&mut self) -> Result<(), nv_core::error::MediaError> { Ok(()) }
-    fn source_spec(&self) -> &SourceSpec { &self.spec }
-    fn feed_id(&self) -> FeedId { self.feed_id }
+    fn stop(&mut self) -> Result<(), nv_core::error::MediaError> {
+        Ok(())
+    }
+    fn pause(&mut self) -> Result<(), nv_core::error::MediaError> {
+        Ok(())
+    }
+    fn resume(&mut self) -> Result<(), nv_core::error::MediaError> {
+        Ok(())
+    }
+    fn source_spec(&self) -> &SourceSpec {
+        &self.spec
+    }
+    fn feed_id(&self) -> FeedId {
+        self.feed_id
+    }
     fn tick(&mut self) -> nv_media::TickOutcome {
         if !self.sent_frames.load(Ordering::Acquire) {
             return nv_media::TickOutcome {
@@ -530,21 +540,19 @@ fn poisoned_pause_condvar_does_not_panic() {
     assert!(lock.lock().is_err(), "mutex should be poisoned");
 
     // Now pause and resume through FeedHandle — must not panic.
-    let feed_handle = crate::feed::FeedHandle::new(Arc::clone(&shared));
+    let feed_handle = crate::feed_handle::FeedHandle::new(Arc::clone(&shared));
 
     // pause() should succeed (recovers poisoned lock via into_inner()).
-    let pause_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        feed_handle.pause()
-    }));
+    let pause_result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| feed_handle.pause()));
     assert!(
         pause_result.is_ok(),
         "FeedHandle::pause() must not panic on poisoned mutex",
     );
 
     // resume() should also succeed.
-    let resume_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        feed_handle.resume()
-    }));
+    let resume_result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| feed_handle.resume()));
     assert!(
         resume_result.is_ok(),
         "FeedHandle::resume() must not panic on poisoned mutex",

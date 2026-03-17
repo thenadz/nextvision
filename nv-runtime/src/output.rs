@@ -99,7 +99,8 @@ pub struct OutputEnvelope {
 ///
 /// `emit()` is wrapped in `catch_unwind` — a panicking sink emits a
 /// [`HealthEvent::SinkPanic`] and the output is dropped, but the feed
-/// continues.
+/// continues. If a sink blocks during shutdown, a
+/// [`HealthEvent::SinkTimeout`] is emitted and the sink thread is detached.
 ///
 /// `emit()` is deliberately **not** async and **not** fallible:
 ///

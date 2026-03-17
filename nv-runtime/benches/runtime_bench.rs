@@ -39,8 +39,8 @@ fn output_envelope_construction(c: &mut Criterion) {
                     total_latency: nv_core::Duration::from_nanos(0),
                 },
                 metadata: TypedMetadata::new(),
-            frame: None,
-            admission: nv_runtime::AdmissionSummary::default(),
+                frame: None,
+                admission: nv_runtime::AdmissionSummary::default(),
             });
         });
     });
@@ -78,8 +78,8 @@ fn output_arc_clone(c: &mut Criterion) {
             total_latency: nv_core::Duration::from_nanos(0),
         },
         metadata: TypedMetadata::new(),
-            frame: None,
-            admission: nv_runtime::AdmissionSummary::default(),
+        frame: None,
+        admission: nv_runtime::AdmissionSummary::default(),
     });
 
     c.bench_function("shared_output_arc_clone", |b| {
@@ -126,8 +126,8 @@ fn broadcast_fanout(c: &mut Criterion) {
             total_latency: nv_core::Duration::from_nanos(0),
         },
         metadata: TypedMetadata::new(),
-            frame: None,
-            admission: nv_runtime::AdmissionSummary::default(),
+        frame: None,
+        admission: nv_runtime::AdmissionSummary::default(),
     });
 
     c.bench_function("broadcast_send_3_subscribers", |b| {
@@ -156,8 +156,8 @@ fn batch_channel_alloc(c: &mut Criterion) {
 fn batch_metrics_snapshot(c: &mut Criterion) {
     use nv_core::error::StageError;
     use nv_core::id::StageId;
-    use nv_perception::batch::{BatchEntry, BatchProcessor};
     use nv_perception::StageOutput;
+    use nv_perception::batch::{BatchEntry, BatchProcessor};
     use nv_runtime::BatchConfig;
     use std::time::Duration;
 
@@ -175,16 +175,18 @@ fn batch_metrics_snapshot(c: &mut Criterion) {
     }
 
     let runtime = nv_runtime::Runtime::builder().build().unwrap();
-    let handle = runtime.create_batch(
-        Box::new(NoopProcessor),
-        BatchConfig {
-            max_batch_size: 4,
-            max_latency: Duration::from_millis(50),
-            queue_capacity: None,
-            response_timeout: None,
+    let handle = runtime
+        .create_batch(
+            Box::new(NoopProcessor),
+            BatchConfig {
+                max_batch_size: 4,
+                max_latency: Duration::from_millis(50),
+                queue_capacity: None,
+                response_timeout: None,
                 max_in_flight_per_feed: 1,
-        },
-    ).unwrap();
+            },
+        )
+        .unwrap();
 
     // Measure cost of snapshotting atomic metrics — this is called
     // from dashboards and health reporters.

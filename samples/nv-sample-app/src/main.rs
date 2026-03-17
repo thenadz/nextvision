@@ -72,14 +72,10 @@ fn main() {
 fn parse_source(uri: &str, loop_file: bool) -> SourceSpec {
     if uri.starts_with("rtsp://") || uri.starts_with("rtsps://") {
         SourceSpec::rtsp(uri)
+    } else if loop_file {
+        SourceSpec::file_looping(PathBuf::from(uri))
     } else {
-        let mut spec = SourceSpec::file(PathBuf::from(uri));
-        if loop_file {
-            if let SourceSpec::File { loop_, .. } = &mut spec {
-                *loop_ = true;
-            }
-        }
-        spec
+        SourceSpec::file(PathBuf::from(uri))
     }
 }
 
@@ -148,6 +144,46 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    // Build a sink appropriate for the current run mode.
+    let make_sink = |ui_state: &Option<ui::SharedUiState>| -> Box<dyn OutputSink> {
+        if let Some(state) = ui_state {
+            Box::new(UiSink::new(Arc::clone(state)))
+        } else {
+            Box::new(LogSink::new())
+        }
+    };
+
+    /// Complete `FeedConfig` from a partially-built config builder with
+    /// common settings (source, camera mode, output sink, backpressure).
+    ///
+    /// When `include_frames` is true, `FrameInclusion::Always` attaches
+    /// full frame pixels to every output — needed for UI overlay rendering
+    /// but doubles per-frame Arc memory. Pass `false` for headless or
+    /// production pipelines where frame pixel data is not needed downstream.
+    fn build_feed_config(
+        builder: nv_runtime::FeedConfigBuilder,
+        source: SourceSpec,
+        sink: Box<dyn OutputSink>,
+        queue_depth: usize,
+        include_frames: bool,
+    ) -> Result<FeedConfig, Box<dyn std::error::Error>> {
+        let mut builder = builder
+            .source(source)
+            .camera_mode(CameraMode::Fixed)
+            .output_sink(sink)
+            .backpressure(BackpressurePolicy::DropOldest { queue_depth });
+
+        if include_frames {
+            // Carry full pixel data in every OutputEnvelope so the UI
+            // can render detection/track overlays on the video frame.
+            builder = builder.frame_inclusion(FrameInclusion::Always);
+        }
+        // When false, the default FrameInclusion::Never avoids the
+        // per-frame pixel payload — appropriate for headless runs.
+
+        Ok(builder.build()?)
+    }
+
     if args.batch {
         // --- Batch mode -----------------------------------------------
         info!(
@@ -171,29 +207,15 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         for (i, uri) in args.video_uri.iter().enumerate() {
             let source = parse_source(uri, args.loop_file);
-
-            let sink: Box<dyn OutputSink> = if let Some(ref state) = ui_state {
-                Box::new(UiSink::new(Arc::clone(state)))
-            } else {
-                Box::new(LogSink::new())
-            };
+            let sink = make_sink(&ui_state);
 
             let pipeline = FeedPipeline::builder()
-                .batch(batch_hdl.clone())
-                .expect("single batch point")
+                .batch(batch_hdl.clone())?
                 .add_stage(TrackerStage::new(tracker_config(&args)))
                 .build();
 
-            let feed_config = FeedConfig::builder()
-                .source(source)
-                .camera_mode(CameraMode::Fixed)
-                .feed_pipeline(pipeline)
-                .output_sink(sink)
-                .frame_inclusion(FrameInclusion::Always)
-                .backpressure(BackpressurePolicy::DropOldest {
-                    queue_depth: args.queue_depth,
-                })
-                .build()?;
+            let builder = FeedConfig::builder().feed_pipeline(pipeline);
+            let feed_config = build_feed_config(builder, source, sink, args.queue_depth, ui_state.is_some())?;
 
             let feed = runtime.add_feed(feed_config)?;
             let feed_id = feed.id();
@@ -204,26 +226,13 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // --- Per-feed mode (default) ----------------------------------
         for (i, uri) in args.video_uri.iter().enumerate() {
             let source = parse_source(uri, args.loop_file);
+            let sink = make_sink(&ui_state);
 
-            let sink: Box<dyn OutputSink> = if let Some(ref state) = ui_state {
-                Box::new(UiSink::new(Arc::clone(state)))
-            } else {
-                Box::new(LogSink::new())
-            };
-
-            let feed_config = FeedConfig::builder()
-                .source(source)
-                .camera_mode(CameraMode::Fixed)
-                .stages(vec![
-                    Box::new(DetectorStage::new(detector_config(&args))),
-                    Box::new(TrackerStage::new(tracker_config(&args))),
-                ])
-                .output_sink(sink)
-                .frame_inclusion(FrameInclusion::Always)
-                .backpressure(BackpressurePolicy::DropOldest {
-                    queue_depth: args.queue_depth,
-                })
-                .build()?;
+            let builder = FeedConfig::builder().stages(vec![
+                Box::new(DetectorStage::new(detector_config(&args))),
+                Box::new(TrackerStage::new(tracker_config(&args))),
+            ]);
+            let feed_config = build_feed_config(builder, source, sink, args.queue_depth, ui_state.is_some())?;
 
             let feed = runtime.add_feed(feed_config)?;
             let feed_id = feed.id();
@@ -245,8 +254,7 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let stop = Arc::clone(&stop);
             ctrlc::set_handler(move || {
                 stop.store(true, Ordering::Relaxed);
-            })
-            .expect("failed to install Ctrl-C handler");
+            })?;
         }
 
         info!("pipeline running (headless) — press Ctrl-C to stop");

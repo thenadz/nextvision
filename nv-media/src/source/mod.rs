@@ -50,7 +50,7 @@ use nv_core::health::{DecodeOutcome, HealthEvent};
 use nv_core::id::FeedId;
 
 use crate::backend::{EventQueue, GstSession, SessionConfig};
-use crate::decode::{DecodePreference, HwFailureTracker};
+use crate::decode::{DecodePreference, DecodePreferenceExt, HwFailureTracker};
 use crate::ingress::{FrameSink, HealthSink, PtzProvider};
 use crate::pipeline::OutputFormat;
 use crate::reconnect::ReconnectTracker;
@@ -262,18 +262,20 @@ impl MediaSource {
 
         // Consult adaptive fallback cache — may temporarily override
         // selection for PreferHardware after repeated hw failures.
-        let (selection, fallback_reason) =
-            match self.hw_failure_tracker.adjust_selection(self.decode_preference) {
-                Some((adjusted, reason)) => {
-                    tracing::info!(
-                        feed_id = %self.feed_id,
-                        reason = %reason,
-                        "adaptive fallback: overriding decoder selection",
-                    );
-                    (adjusted, Some(reason))
-                }
-                None => (self.decode_preference.to_selection(), None),
-            };
+        let (selection, fallback_reason) = match self
+            .hw_failure_tracker
+            .adjust_selection(self.decode_preference)
+        {
+            Some((adjusted, reason)) => {
+                tracing::info!(
+                    feed_id = %self.feed_id,
+                    reason = %reason,
+                    "adaptive fallback: overriding decoder selection",
+                );
+                (adjusted, Some(reason))
+            }
+            None => (self.decode_preference.to_selection(), None),
+        };
 
         // Persist fallback context so verify_decoder_selection() can
         // include it in the DecodeDecision health event.

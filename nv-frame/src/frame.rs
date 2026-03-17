@@ -667,7 +667,21 @@ impl FrameEnvelope {
                 materialize: Some(f),
                 ..
             } => {
-                let cached = self.inner.host_cache.get_or_init(|| f());
+                let cached = self.inner.host_cache.get_or_init(|| {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f())) {
+                        Ok(result) => result,
+                        Err(payload) => {
+                            let detail = match payload.downcast_ref::<&str>() {
+                                Some(s) => (*s).to_owned(),
+                                None => match payload.downcast_ref::<String>() {
+                                    Some(s) => s.clone(),
+                                    None => "unknown panic in host materializer".to_owned(),
+                                },
+                            };
+                            Err(FrameAccessError::MaterializationFailed { detail })
+                        }
+                    }
+                });
                 match cached {
                     Ok(bytes) => Ok(Cow::Borrowed(bytes.as_ref())),
                     Err(e) => Err(e.clone()),
@@ -1215,7 +1229,6 @@ mod tests {
                     assert!(f.host_data().is_none());
                     assert!(f.require_host_data().is_err());
                 }
-                _ => panic!("unexpected DataAccess variant"),
             }
         }
     }
@@ -1398,6 +1411,38 @@ mod tests {
         assert!(e2.to_string().contains("device busy"));
         // Materializer invoked exactly once; failure is cached.
         assert_eq!(call_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn require_host_data_catches_materializer_panic() {
+        let f = FrameEnvelope::new_device(
+            FeedId::new(15),
+            0,
+            MonotonicTs::ZERO,
+            WallTs::from_micros(0),
+            1,
+            1,
+            PixelFormat::Gray8,
+            1,
+            Arc::new(MockGpuBuffer {
+                device_id: 0,
+                mem_handle: 0,
+            }),
+            Some(Box::new(|| panic!("adapter exploded"))),
+            TypedMetadata::new(),
+        );
+
+        // Panic is caught and surfaced as a FrameAccessError, not propagated.
+        let err = f.require_host_data().unwrap_err();
+        assert!(matches!(
+            err,
+            FrameAccessError::MaterializationFailed { .. }
+        ));
+        assert!(err.to_string().contains("adapter exploded"));
+
+        // Error is cached — second call returns the same error without re-panicking.
+        let err2 = f.require_host_data().unwrap_err();
+        assert!(err2.to_string().contains("adapter exploded"));
     }
 
     #[test]

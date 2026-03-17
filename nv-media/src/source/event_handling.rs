@@ -3,6 +3,7 @@ use std::time::Duration;
 use nv_core::error::MediaError;
 use nv_core::health::{DecodeOutcome, HealthEvent};
 
+use crate::decode::DecodePreferenceExt;
 use crate::event::MediaEvent;
 
 use super::{MediaSource, SourceState};
@@ -97,7 +98,10 @@ impl MediaSource {
                     }
                 }
             }
-            MediaEvent::Error { error, debug: debug_detail } => {
+            MediaEvent::Error {
+                error,
+                debug: debug_detail,
+            } => {
                 tracing::warn!(
                     feed_id = %self.feed_id,
                     error = %error,
@@ -107,15 +111,16 @@ impl MediaSource {
                 // Track hardware failure for adaptive fallback when the
                 // stream never confirmed (liveness watchdog still armed)
                 // and the preference is PreferHardware.
-                if self.liveness_deadline.is_some()
-                    && self.decode_preference.prefers_hardware()
-                {
+                if self.liveness_deadline.is_some() && self.decode_preference.prefers_hardware() {
                     self.hw_failure_tracker.record_failure();
                 }
                 let enriched = self.enrich_error(error);
                 self.disconnect_and_reconnect(enriched)
             }
-            MediaEvent::Warning { message, debug: debug_detail } => {
+            MediaEvent::Warning {
+                message,
+                debug: debug_detail,
+            } => {
                 tracing::warn!(
                     feed_id = %self.feed_id,
                     message = %message,
@@ -195,7 +200,7 @@ impl MediaSource {
         self.emit_health(HealthEvent::DecodeDecision {
             feed_id: self.feed_id,
             outcome,
-            preference: format!("{:?}", self.decode_preference),
+            preference: self.decode_preference,
             fallback_active,
             fallback_reason: self.session_fallback_reason.clone(),
             detail: detail_string,

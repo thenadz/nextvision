@@ -53,7 +53,10 @@ mod tests {
 
     #[test]
     fn stable_is_not_moving() {
-        assert!(!matches!(CameraMotionState::Stable, CameraMotionState::Moving { .. }));
+        assert!(!matches!(
+            CameraMotionState::Stable,
+            CameraMotionState::Moving { .. }
+        ));
     }
 
     #[test]

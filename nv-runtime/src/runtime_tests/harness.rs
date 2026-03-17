@@ -1,8 +1,8 @@
 //! Shared mock infrastructure for runtime integration tests.
 
 use super::super::*;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use nv_core::config::{CameraMode, SourceSpec};
 use nv_frame::PixelFormat;

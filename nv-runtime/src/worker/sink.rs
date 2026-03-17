@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use nv_core::error::RuntimeError;
@@ -118,7 +118,11 @@ impl SinkWorker {
     /// restart or runtime shutdown.
     ///
     /// If the sink thread panicked, returns a [`NullSink`] placeholder.
-    pub(super) fn shutdown(mut self, health_tx: &broadcast::Sender<HealthEvent>, feed_id: FeedId) -> Box<dyn OutputSink> {
+    pub(super) fn shutdown(
+        mut self,
+        health_tx: &broadcast::Sender<HealthEvent>,
+        feed_id: FeedId,
+    ) -> Box<dyn OutputSink> {
         // Drop the sender to signal the sink thread to exit.
         drop(self.tx);
         let Some(handle) = self.thread.take() else {
@@ -154,7 +158,7 @@ impl SinkWorker {
                     timeout_secs = SINK_SHUTDOWN_TIMEOUT.as_secs(),
                     "sink worker thread did not finish within timeout — detaching",
                 );
-                let _ = health_tx.send(HealthEvent::SinkPanic { feed_id });
+                let _ = health_tx.send(HealthEvent::SinkTimeout { feed_id });
                 Box::new(NullSink)
             }
         }
@@ -200,7 +204,11 @@ impl SinkBpThrottle {
         }
     }
 
-    pub(super) fn record_drop(&mut self, health_tx: &broadcast::Sender<HealthEvent>, feed_id: FeedId) {
+    pub(super) fn record_drop(
+        &mut self,
+        health_tx: &broadcast::Sender<HealthEvent>,
+        feed_id: FeedId,
+    ) {
         self.accumulated += 1;
 
         if !self.in_backpressure {

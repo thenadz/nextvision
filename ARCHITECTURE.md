@@ -41,7 +41,7 @@ SourceSpec ─► [nv-media] ─► RawFrame
                  User callback / channel
 ```
 
-Every feed (source) runs as an isolated pipeline. Feeds share nothing except the global runtime handle and metrics registry.
+Every feed (source) runs as an isolated pipeline. Feeds share nothing except the global runtime handle and health/output broadcast channels.
 
 ---
 
@@ -59,25 +59,32 @@ nextvision/
 │       ├── id.rs                 # FeedId, TrackId, DetectionId, StageId — all newtypes
 │       ├── timestamp.rs          # MonotonicTs, WallTs, Duration
 │       ├── geom.rs               # BBox, Point2, Polygon, AffineTransform2D
+│       ├── config.rs             # SourceSpec, CameraMode, ReconnectPolicy, RestartPolicy, etc.
 │       ├── error.rs              # NvError, StageError, MediaError, etc.
 │       ├── metadata.rs           # TypedMetadata bag (type-map pattern)
 │       ├── health.rs             # HealthEvent enum, StopReason
-│       └── metrics.rs            # MetricsRegistry, per-feed counter/histogram helpers
+│       └── metrics.rs            # FeedMetrics, StageMetrics — per-feed metric snapshots
 │
 ├── nv-frame/                     # frame abstraction — zero-copy, ref-counted
 │   └── src/
 │       ├── lib.rs
-│       ├── frame.rs              # FrameEnvelope, PixelData, PixelFormat
-│       ├── pool.rs               # optional buffer pool / slab
+│       ├── frame.rs              # FrameEnvelope, PixelFormat, Residency, DataAccess, HostBytes
 │       └── convert.rs            # pixel format conversion utilities
 │
 ├── nv-media/                     # GStreamer backend — only crate that depends on gstreamer-rs
 │   └── src/
 │       ├── lib.rs
-│       ├── source.rs             # SourceHandle, reconnect logic
+│       ├── ingress.rs            # MediaIngress, FrameSink, HealthSink, PtzProvider, IngressOptions
 │       ├── pipeline.rs           # GStreamer pipeline construction, appsink wiring
 │       ├── decode.rs             # codec handling, HW accel negotiation
-│       └── bridge.rs             # GstSample → FrameEnvelope zero-copy bridge
+│       ├── bridge.rs             # GstSample → FrameEnvelope zero-copy bridge
+│       ├── backend.rs            # GStreamer backend initialization
+│       ├── bus.rs                # GStreamer bus message handling
+│       ├── clock.rs              # timestamp / clock utilities
+│       ├── event.rs              # media events
+│       ├── factory.rs            # pipeline factory
+│       ├── reconnect.rs          # reconnection logic
+│       └── source/               # source management (mod.rs, ingress_impl.rs, polling.rs, event_handling.rs)
 │
 ├── nv-perception/                # stage model, detection/track types, artifacts
 │   └── src/
@@ -86,23 +93,29 @@ nextvision/
 │       ├── detection.rs          # Detection, DetectionSet
 │       ├── track.rs              # Track, TrackObservation, TrackState
 │       ├── artifact.rs           # PerceptionArtifacts — typed map of stage outputs
-│       └── signal.rs             # DerivedSignal — generic named scalar/vector signals
+│       ├── signal.rs             # DerivedSignal — generic named scalar/vector signals
+│       ├── scene.rs              # SceneFeature — frame-level scene descriptors
+│       ├── batch.rs              # BatchProcessor trait, batch-mode helpers
+│       ├── pipeline.rs           # perception pipeline orchestration helpers
+│       └── temporal_access.rs    # TemporalStoreAccess trait for stage contexts
 │
 ├── nv-temporal/                  # temporal state: trajectories, motion, continuity
 │   └── src/
 │       ├── lib.rs
-│       ├── store.rs              # TemporalStore — per-feed, owns tracks + trajectories
+│       ├── store/                # TemporalStore — per-feed, owns tracks + trajectories
+│       │   ├── mod.rs            #   store core, TemporalStoreSnapshot
+│       │   ├── commit.rs         #   commit logic
+│       │   └── snapshot.rs       #   snapshot construction
 │       ├── trajectory.rs         # Trajectory, TrajectorySegment, MotionFeatures
 │       ├── continuity.rs         # ContinuityState, DegradationReason
-│       └── retention.rs          # eviction policy, sliding-window, max-age
+│       └── retention.rs          # RetentionPolicy, eviction/sliding-window/max-age
 │
 ├── nv-view/                      # PTZ/view-state, camera motion, context validity
 │   └── src/
 │       ├── lib.rs
-│       ├── view_state.rs         # ViewState, ViewSnapshot, ViewVersion, ViewStateChange
-│       ├── camera_mode.rs        # CameraMode enum
+│       ├── view_state.rs         # ViewState, ViewSnapshot, ViewVersion
 │       ├── camera_motion.rs      # CameraMotionState, CameraMotionEstimate, MotionSource
-│       ├── ptz.rs                # PtzTelemetry, PtzCommand (optional input)
+│       ├── ptz.rs                # PtzTelemetry, PtzEvent
 │       ├── provider.rs           # ViewStateProvider trait, MotionReport, MotionPollContext
 │       ├── epoch.rs              # EpochPolicy trait, EpochDecision, DefaultEpochPolicy
 │       ├── transition.rs         # TransitionPhase state machine
@@ -113,14 +126,18 @@ nextvision/
 ├── nv-runtime/                   # pipeline orchestration, feed lifecycle, output, concurrency
 │   └── src/
 │       ├── lib.rs
-│       ├── runtime.rs            # Runtime, RuntimeConfig, RuntimeHandle
-│       ├── feed.rs               # FeedPipeline, FeedHandle — per-feed actor
-│       ├── scheduler.rs          # stage executor, thread/task scheduling
+│       ├── runtime.rs            # Runtime, RuntimeBuilder, RuntimeHandle
+│       ├── feed.rs               # FeedConfig, FeedConfigBuilder, FeedHandle
+│       ├── pipeline.rs           # pipeline construction
 │       ├── backpressure.rs       # bounded channel wrappers, drop policy
+│       ├── queue.rs              # queue implementation
 │       ├── shutdown.rs           # graceful shutdown, drain, abort
 │       ├── output.rs             # OutputEnvelope, OutputSink trait
 │       ├── provenance.rs         # Provenance, StageProvenance, ViewProvenance
-│       └── tracing.rs            # span helpers, structured log context
+│       ├── diagnostics.rs        # FeedDiagnostics, RuntimeDiagnostics
+│       ├── batch/                # batch-mode coordination
+│       ├── executor/             # stage executor, frame processing, view management
+│       └── worker/               # per-feed worker threads, ingress adapter, sink
 │
 └── nv-test-util/                 # test harnesses, synthetic frames, mock stages
     └── src/
@@ -135,7 +152,7 @@ nextvision/
 The original design had `nv-output` (3 files: envelope, provenance, sink) and `nv-observe` (3 files: metrics, health, tracing) as separate crates. Both were too thin to justify the crate boundary overhead:
 
 - **`nv-output`** depended on 4 other crates (`nv-core`, `nv-perception`, `nv-temporal`, `nv-view`) and contributed only an aggregation struct (`OutputEnvelope`), a provenance struct, and a 1-method trait (`OutputSink`). These are direct artifacts of the pipeline orchestrator and belong in `nv-runtime`.
-- **`nv-observe`** needed to reference types from `nv-core`, `nv-view`, and `nv-perception` (for `HealthEvent` variants that carry `StageError`, `MediaError`, `ViewEpoch`, etc.). This created dependency pressure that either forced `nv-observe` to depend on half the workspace or forced the `HealthEvent` enum to live elsewhere. `HealthEvent` and `MetricsRegistry` are foundational types — `HealthEvent` goes in `nv-core` (where the error/id types it references already live), metrics helpers go in `nv-core`, and tracing span helpers go in `nv-runtime` (where the feed/stage execution context lives).
+- **`nv-observe`** needed to reference types from `nv-core`, `nv-view`, and `nv-perception` (for `HealthEvent` variants that carry `StageError`, `MediaError`, `ViewEpoch`, etc.). This created dependency pressure that either forced `nv-observe` to depend on half the workspace or forced the `HealthEvent` enum to live elsewhere. `HealthEvent` and metric snapshot types are foundational — `HealthEvent` goes in `nv-core` (where the error/id types it references already live), metric snapshot helpers go in `nv-core`, and tracing span helpers go in `nv-runtime` (where the feed/stage execution context lives).
 
 ### Dependency graph (simplified)
 
@@ -161,7 +178,6 @@ The top-level user-facing API lives in `nv-runtime` and re-exports essential typ
 ```rust
 // Minimal user program (pseudocode)
 let runtime = Runtime::builder()
-    .metrics_registry(registry)
     .build()?;
 
 let feed = runtime.add_feed(
@@ -177,19 +193,22 @@ let feed = runtime.add_feed(
         .epoch_policy(Box::new(DefaultEpochPolicy::default()))
         .output_sink(Box::new(MyOutputSink::new()))
         .backpressure(BackpressurePolicy::DropOldest { queue_depth: 4 })
-        .temporal(TemporalConfig::default())
+        .temporal(RetentionPolicy::default())
         .build()?,   // fails if Observed but no provider, or Fixed with provider
 )?;
 
 // feed is now running; returns FeedHandle
-feed.health_recv();    // → async broadcast::Receiver<HealthEvent>
 feed.metrics();        // → FeedMetrics snapshot
+feed.diagnostics();    // → FeedDiagnostics snapshot
 
 // later
 feed.pause()?;
 feed.resume()?;
 runtime.remove_feed(feed.id())?;
-runtime.shutdown().await?;
+runtime.shutdown()?;
+
+// health events are runtime-scoped:
+let mut health_rx = runtime.health_subscribe();
 ```
 
 ### Design decisions
@@ -303,6 +322,26 @@ pub enum PixelFormat {
     Gray8,
 }
 
+/// Where pixel data physically resides.
+pub enum Residency {
+    /// Pixel data is in CPU-accessible memory.
+    Host,
+    /// Pixel data resides on an accelerator device (GPU, NPU, DMA-buf, etc.).
+    Device,
+}
+
+/// What host-access is available for a frame's pixel data.
+#[non_exhaustive]
+pub enum DataAccess {
+    /// Host-readable bytes are directly available (zero-copy borrow).
+    HostReadable,
+    /// Device-resident, but host materialization is available.
+    /// First call to require_host_data() invokes the materializer and caches the result.
+    MappableToHost,
+    /// Opaque accelerated data; no host view is guaranteed.
+    Opaque,
+}
+
 /// Immutable, ref-counted frame. The hot type on the pipeline.
 /// Clone is cheap (Arc bump). Pixel data is never copied between stages.
 pub struct FrameEnvelope {
@@ -318,27 +357,21 @@ struct FrameInner {
     height: u32,
     format: PixelFormat,
     stride: u32,
-    data: PixelData,            // enum: Borrowed(*const u8 + len), Owned(Vec<u8>)
+    data: PixelData,            // pub(crate) enum: Mapped, Owned, Device
     metadata: TypedMetadata,    // stage-injected per-frame metadata
+    host_cache: OnceLock<Result<HostBytes, FrameAccessError>>,
 }
 ```
 
-`PixelData` uses an inner enum:
+The internal `PixelData` enum has three variants:
 
-```rust
-enum PixelData {
-    /// Zero-copy: pointer into GStreamer-mapped buffer.
-    /// The GstBuffer/GstMapInfo are held alive by an opaque PinGuard stored alongside.
-    Mapped { ptr: *const u8, len: usize, _guard: PinGuard },
-    /// Owned copy — fallback, or for synthetic test frames.
-    Owned(Vec<u8>),
-}
-// SAFETY: Mapped variant is immutable; the guard prevents deallocation.
-unsafe impl Send for PixelData {}
-unsafe impl Sync for PixelData {}
-```
+- **`Mapped`** — zero-copy pointer into a GStreamer-mapped buffer. A `PinGuard` (type-erased `Box<dyn Any + Send + Sync>`) holds the mapping alive.
+- **`Owned`** — owned `Vec<u8>`. Used for synthetic/test frames or when zero-copy is not available.
+- **`Device`** — type-erased accelerated handle (`Arc<dyn Any + Send + Sync>`) for GPU/NPU/DMA-buf data, plus an optional `HostMaterializeFn` for device-to-host fallback.
 
-The `PinGuard` type is `pub(crate)` in `nv-media` and holds the `gst::Buffer` + `gst::MappedBuffer` alive. It is erased to an opaque `Box<dyn Any + Send + Sync>` before crossing into `nv-frame`, so `nv-frame` has no source-level dependency on GStreamer.
+Users interact with the public `Residency` and `DataAccess` enums to determine what access is available, then use `FrameEnvelope::host_data()`, `FrameEnvelope::require_host_data()`, or `FrameEnvelope::accelerated_handle::<T>()` accordingly. The `PixelData` enum itself is `pub(crate)`.
+
+The `PinGuard` type is `pub(crate)` in `nv-frame` and is a type-erased `Box<dyn Any + Send + Sync>`. In the GStreamer bridge, it holds the `gst::Buffer` + `gst::MappedBuffer` alive. It is erased before crossing into `nv-frame`, so `nv-frame` has no source-level dependency on GStreamer.
 
 ### `nv-perception`
 
@@ -1469,14 +1502,16 @@ Restart sequence:
 
 ### Runtime shutdown
 
-`runtime.shutdown()` is async and returns a future:
+`runtime.shutdown()` is synchronous:
 
 1. All feeds are signaled to stop.
 2. Each feed drains its stage pipeline (in-flight frame completes).
 3. Each feed calls `on_stop()` on all stages.
 4. GStreamer pipelines are torn down.
 5. Output sinks receive any remaining buffered outputs.
-6. The future resolves when all feeds have terminated.
+6. The method returns when all feeds have terminated.
+
+`Runtime::shutdown(self)` consumes the runtime. `RuntimeHandle::shutdown(&self)` borrows.
 
 Timeout: `runtime.shutdown_timeout(Duration)` — if feeds haven't stopped within the timeout, they are forcibly aborted.
 
@@ -1488,7 +1523,7 @@ Timeout: `runtime.shutdown_timeout(Duration)` — if feeds haven't stopped withi
 
 ## 14. Observability model
 
-### Metrics (via `metrics` crate facade)
+### Metrics (via `FeedMetrics` snapshots)
 
 Per-feed counters and histograms:
 
@@ -1510,7 +1545,7 @@ nv.feed.source_reconnects{feed_id}        counter
 nv.feed.stage_errors{feed_id,stage}       counter
 ```
 
-The library uses the `metrics` crate (facade pattern). Users plug in their own recorder (Prometheus, StatsD, etc.).
+The library uses `tracing` for structured logging and instrumentation. Per-feed metric snapshots are available via `FeedHandle::metrics()` which returns a `FeedMetrics` struct. Users configure the tracing subscriber externally.
 
 ### Health events
 
@@ -1530,7 +1565,7 @@ pub enum HealthEvent {
 }
 ```
 
-Health events are broadcast via `tokio::sync::broadcast`. Users subscribe through `FeedHandle::health_recv()` or `Runtime::health_recv()` (aggregate).
+Health events are broadcast via `tokio::sync::broadcast`. Users subscribe through `RuntimeHandle::health_subscribe()` (aggregate, runtime-scoped).
 
 ### Tracing
 

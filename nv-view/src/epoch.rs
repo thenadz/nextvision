@@ -141,7 +141,11 @@ impl EpochPolicy for DefaultEpochPolicy {
         }
 
         // Check inferred displacement.
-        if let CameraMotionState::Moving { displacement: Some(disp), .. } = &ctx.motion_state {
+        if let CameraMotionState::Moving {
+            displacement: Some(disp),
+            ..
+        } = &ctx.motion_state
+        {
             if *disp > self.segment_displacement_threshold {
                 if let Some(ref transform) = ctx.current_report.frame_transform {
                     if transform.confidence >= self.compensate_min_confidence {
@@ -172,10 +176,7 @@ mod tests {
     use crate::view_state::{ViewState, ViewVersion};
     use nv_core::MonotonicTs;
 
-    fn stable_ctx<'a>(
-        prev: &'a ViewState,
-        report: &'a MotionReport,
-    ) -> EpochPolicyContext<'a> {
+    fn stable_ctx<'a>(prev: &'a ViewState, report: &'a MotionReport) -> EpochPolicyContext<'a> {
         EpochPolicyContext {
             previous_view: prev,
             current_report: report,
@@ -289,7 +290,10 @@ mod tests {
             ..Default::default()
         };
         let ctx = stable_ctx(&prev, &report);
-        assert!(matches!(policy.decide(&ctx), EpochDecision::Compensate { .. }));
+        assert!(matches!(
+            policy.decide(&ctx),
+            EpochDecision::Compensate { .. }
+        ));
     }
 
     // -- Inferred displacement thresholds --

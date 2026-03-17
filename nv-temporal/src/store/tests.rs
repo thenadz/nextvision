@@ -325,8 +325,14 @@ fn commit_track_respects_concurrent_cap_with_eviction() {
     let new_track = make_track(4);
     assert!(store.commit_track(&new_track, MonotonicTs::from_nanos(4_000_000), epoch));
     assert_eq!(store.track_count(), 3, "cap must hold after commit");
-    assert!(store.get_track(&TrackId::new(1)).is_none(), "oldest Lost evicted");
-    assert!(store.get_track(&TrackId::new(4)).is_some(), "new track admitted");
+    assert!(
+        store.get_track(&TrackId::new(1)).is_none(),
+        "oldest Lost evicted"
+    );
+    assert!(
+        store.get_track(&TrackId::new(4)).is_some(),
+        "new track admitted"
+    );
 }
 
 #[test]
@@ -496,7 +502,11 @@ fn enforce_retention_hard_cap_spares_confirmed_and_tentative() {
 
     // Lost track should be evicted, but Confirmed tracks stay even though > cap.
     assert!(store.get_track(&TrackId::new(10)).is_none());
-    assert_eq!(store.track_count(), 3, "Confirmed tracks cannot be evicted by hard cap");
+    assert_eq!(
+        store.track_count(),
+        3,
+        "Confirmed tracks cannot be evicted by hard cap"
+    );
 }
 
 #[test]
@@ -545,15 +555,20 @@ fn hard_cap_strictly_bounded_under_high_id_churn_no_evictable() {
     // Fill to cap with Confirmed tracks.
     for i in 1..=3u64 {
         let confirmed = make_track_with_state(i, TrackState::Confirmed);
-        let accepted = store.commit_track(&confirmed, MonotonicTs::from_nanos(i * 1_000_000), epoch);
+        let accepted =
+            store.commit_track(&confirmed, MonotonicTs::from_nanos(i * 1_000_000), epoch);
         assert!(accepted, "track {i} should be accepted (under cap)");
     }
 
     // Try to admit new Confirmed tracks beyond cap — should be rejected.
     for i in 100..=105u64 {
         let confirmed = make_track_with_state(i, TrackState::Confirmed);
-        let accepted = store.commit_track(&confirmed, MonotonicTs::from_nanos(i * 1_000_000), epoch);
-        assert!(!accepted, "track {i} should be rejected (at cap, no evictable)");
+        let accepted =
+            store.commit_track(&confirmed, MonotonicTs::from_nanos(i * 1_000_000), epoch);
+        assert!(
+            !accepted,
+            "track {i} should be rejected (at cap, no evictable)"
+        );
     }
 
     assert_eq!(store.track_count(), 3, "count must never exceed cap");
@@ -561,7 +576,10 @@ fn hard_cap_strictly_bounded_under_high_id_churn_no_evictable() {
     // Updates to existing tracks are always accepted.
     let updated = make_track_with_state(1, TrackState::Confirmed);
     let accepted = store.commit_track(&updated, MonotonicTs::from_nanos(200_000_000), epoch);
-    assert!(accepted, "updates to existing tracks must always be accepted");
+    assert!(
+        accepted,
+        "updates to existing tracks must always be accepted"
+    );
     assert_eq!(store.track_count(), 3);
 }
 
@@ -585,11 +603,20 @@ fn admission_allowed_when_evictable_candidate_exists_at_cap() {
     // New track should be admitted (Lost is pre-evicted) at cap.
     let new_track = make_track_with_state(3, TrackState::Confirmed);
     let accepted = store.commit_track(&new_track, MonotonicTs::from_nanos(3_000_000), epoch);
-    assert!(accepted, "new track should be admitted when evictable candidate exists");
+    assert!(
+        accepted,
+        "new track should be admitted when evictable candidate exists"
+    );
     // Pre-eviction removes the Lost victim during commit — count stays at cap.
     assert_eq!(store.track_count(), 2, "strict cap: count stays at max");
-    assert!(store.get_track(&TrackId::new(2)).is_none(), "Lost victim should be pre-evicted");
-    assert!(store.get_track(&TrackId::new(3)).is_some(), "new track should be present");
+    assert!(
+        store.get_track(&TrackId::new(2)).is_none(),
+        "Lost victim should be pre-evicted"
+    );
+    assert!(
+        store.get_track(&TrackId::new(3)).is_some(),
+        "new track should be present"
+    );
 }
 
 #[test]
@@ -637,7 +664,10 @@ fn strict_cap_mixed_states_burst_never_exceeds() {
 
     // Lost (3) + Tentative (4) = 2 evictable victims, so 2 admissions
     // succeed; remaining 8 are rejected (only Confirmed remain).
-    assert_eq!(admitted, 2, "should admit exactly as many as victims available");
+    assert_eq!(
+        admitted, 2,
+        "should admit exactly as many as victims available"
+    );
     assert_eq!(rejected, 8);
     assert_eq!(store.track_count(), cap);
 }
@@ -1199,17 +1229,13 @@ fn apply_compensation_transforms_active_segment_points() {
 
     // All points start at bbox center (0.05, 0.05).
     let id = TrackId::new(1);
-    let before = store.get_track(&id).unwrap().trajectory.segments[0]
-        .points[0]
-        .position;
+    let before = store.get_track(&id).unwrap().trajectory.segments[0].points[0].position;
 
     // Apply a translation of (+0.1, +0.2).
     let t = nv_core::AffineTransform2D::new(1.0, 0.0, 0.1, 0.0, 1.0, 0.2);
     store.apply_compensation(&t, epoch);
 
-    let after = store.get_track(&id).unwrap().trajectory.segments[0]
-        .points[0]
-        .position;
+    let after = store.get_track(&id).unwrap().trajectory.segments[0].points[0].position;
     assert!(
         (after.x - (before.x + 0.1)).abs() < 1e-5,
         "x should be translated"
@@ -1235,17 +1261,13 @@ fn apply_compensation_ignores_wrong_epoch() {
     store.commit_track(&track, MonotonicTs::from_nanos(1_000_000), epoch);
 
     let id = TrackId::new(1);
-    let before = store.get_track(&id).unwrap().trajectory.segments[0]
-        .points[0]
-        .position;
+    let before = store.get_track(&id).unwrap().trajectory.segments[0].points[0].position;
 
     // Apply compensation for a different epoch — should be skipped.
     let t = nv_core::AffineTransform2D::new(1.0, 0.0, 0.5, 0.0, 1.0, 0.5);
     store.apply_compensation(&t, other_epoch);
 
-    let after = store.get_track(&id).unwrap().trajectory.segments[0]
-        .points[0]
-        .position;
+    let after = store.get_track(&id).unwrap().trajectory.segments[0].points[0].position;
     assert!(
         (after.x - before.x).abs() < 1e-6,
         "position should be unchanged for wrong-epoch compensation"
@@ -1265,11 +1287,18 @@ fn apply_compensation_composes_multiple_transforms() {
     store.apply_compensation(&t1, epoch);
     store.apply_compensation(&t2, epoch);
 
-    let seg = &store.get_track(&TrackId::new(1)).unwrap().trajectory.segments[0];
+    let seg = &store
+        .get_track(&TrackId::new(1))
+        .unwrap()
+        .trajectory
+        .segments[0];
     assert_eq!(seg.compensation_count, 2);
     // Cumulative transform should be t1 then t2 = translate by 0.3.
     let comp = seg.compensation.unwrap();
-    assert!((comp.m[2] - 0.3).abs() < 1e-9, "cumulative tx should be ~0.3");
+    assert!(
+        (comp.m[2] - 0.3).abs() < 1e-9,
+        "cumulative tx should be ~0.3"
+    );
 }
 
 // ------------------------------------------------------------------

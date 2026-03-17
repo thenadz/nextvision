@@ -61,20 +61,18 @@ mod view;
 mod tests;
 
 use std::collections::HashSet;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
+use nv_core::TrackId;
 use nv_core::config::CameraMode;
 use nv_core::id::FeedId;
 use nv_core::metrics::StageMetrics;
 use nv_core::timestamp::MonotonicTs;
-use nv_core::TrackId;
 use nv_perception::Stage;
 use nv_temporal::{RetentionPolicy, TemporalStore};
-use nv_view::{
-    ContextValidity, EpochPolicy, ViewSnapshot, ViewState, ViewStateProvider,
-};
+use nv_view::{ContextValidity, EpochPolicy, ViewSnapshot, ViewState, ViewStateProvider};
 
 use crate::batch::BatchHandle;
 use crate::output::FrameInclusion;
@@ -182,9 +180,9 @@ impl PipelineExecutor {
         };
         let view_snapshot = ViewSnapshot::new(view_state.clone());
         let total_stage_count = stages.len() + post_batch_stages.len();
-        let batch_in_flight = batch.as_ref().map(|_| {
-            Arc::new(std::sync::atomic::AtomicUsize::new(0))
-        });
+        let batch_in_flight = batch
+            .as_ref()
+            .map(|_| Arc::new(std::sync::atomic::AtomicUsize::new(0)));
         let now = Instant::now();
         Self {
             feed_id,

@@ -1,23 +1,21 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use nv_core::error::StageError;
 use nv_core::health::HealthEvent;
 use nv_core::id::StageId;
-use nv_perception::batch::BatchProcessor;
 use nv_perception::StageOutput;
+use nv_perception::batch::BatchProcessor;
 use tokio::sync::broadcast;
 
 use super::config::BatchConfig;
 use super::handle::{BatchHandle, BatchHandleInner, PendingEntry};
 use super::metrics::BatchMetricsInner;
 
-/// Maximum time to wait for `on_start()` to complete on the coordinator
-/// thread. If the processor's `on_start` blocks longer than this,
-/// `BatchCoordinator::start()` returns an error and signals shutdown to
-/// the coordinator thread.
-const ON_START_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default time to wait for `on_start()` to complete on the coordinator
+/// thread. Overridden by [`BatchConfig::startup_timeout`] when set.
+const DEFAULT_ON_START_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Maximum time to wait for the coordinator thread to finish during
 /// shutdown. The coordinator checks its shutdown flag every
@@ -94,21 +92,22 @@ impl BatchCoordinator {
         let (startup_tx, startup_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
 
         let shutdown_clone = Arc::clone(&shutdown);
+        let on_start_timeout = config
+            .startup_timeout
+            .unwrap_or(DEFAULT_ON_START_TIMEOUT);
         let thread = std::thread::Builder::new()
             .name(format!("nv-batch-{}", processor_id))
             .spawn(move || {
                 // Panic-safe startup on the coordinator thread.
-                let start_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    processor.on_start()
-                }));
+                let start_result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| processor.on_start()));
                 match start_result {
                     Ok(Ok(())) => {
                         let _ = startup_tx.send(Ok(()));
                     }
                     Ok(Err(e)) => {
-                        let _ = startup_tx.send(Err(
-                            format!("batch processor on_start failed: {e}"),
-                        ));
+                        let _ =
+                            startup_tx.send(Err(format!("batch processor on_start failed: {e}")));
                         return;
                     }
                     Err(_) => {
@@ -119,7 +118,14 @@ impl BatchCoordinator {
                         return;
                     }
                 }
-                coordinator_loop(submit_rx, processor, config, shutdown_clone, metrics, health_tx);
+                coordinator_loop(
+                    submit_rx,
+                    processor,
+                    config,
+                    shutdown_clone,
+                    metrics,
+                    health_tx,
+                );
             })
             .map_err(|e| {
                 NvError::Runtime(RuntimeError::ThreadSpawnFailed {
@@ -128,9 +134,9 @@ impl BatchCoordinator {
             })?;
 
         // Block until on_start completes on the coordinator thread,
-        // bounded by ON_START_TIMEOUT to prevent hanging on a
-        // processor that blocks indefinitely in on_start().
-        match startup_rx.recv_timeout(ON_START_TIMEOUT) {
+        // bounded by the configured startup timeout to prevent hanging
+        // on a processor that blocks indefinitely in on_start().
+        match startup_rx.recv_timeout(on_start_timeout) {
             Ok(Ok(())) => {}
             Ok(Err(detail)) => {
                 let _ = thread.join();
@@ -165,7 +171,7 @@ impl BatchCoordinator {
                 let detail = if detached {
                     tracing::warn!(
                         processor = %processor_id,
-                        timeout_secs = ON_START_TIMEOUT.as_secs(),
+                        timeout_secs = on_start_timeout.as_secs(),
                         "batch processor on_start timed out — coordinator thread detached \
                          (safe Rust cannot force-stop a blocked thread)"
                     );
@@ -173,13 +179,13 @@ impl BatchCoordinator {
                         "batch processor '{}' on_start did not complete within {}s; \
                          coordinator thread detached (cannot force-stop blocked on_start)",
                         processor_id,
-                        ON_START_TIMEOUT.as_secs(),
+                        on_start_timeout.as_secs(),
                     )
                 } else {
                     format!(
                         "batch processor '{}' on_start did not complete within {}s",
                         processor_id,
-                        ON_START_TIMEOUT.as_secs(),
+                        on_start_timeout.as_secs(),
                     )
                 };
 
@@ -264,7 +270,8 @@ fn coordinator_loop(
     health_tx: broadcast::Sender<HealthEvent>,
 ) {
     let mut batch: Vec<PendingEntry> = Vec::with_capacity(config.max_batch_size);
-    let mut entries: Vec<nv_perception::batch::BatchEntry> = Vec::with_capacity(config.max_batch_size);
+    let mut entries: Vec<nv_perception::batch::BatchEntry> =
+        Vec::with_capacity(config.max_batch_size);
     let mut responses: Vec<std::sync::mpsc::SyncSender<Result<StageOutput, StageError>>> =
         Vec::with_capacity(config.max_batch_size);
     let mut in_flight_guards: Vec<Option<Arc<AtomicUsize>>> =
@@ -476,8 +483,7 @@ fn drain_pending(rx: &std::sync::mpsc::Receiver<PendingEntry>) -> u64 {
 /// Best-effort call to `on_stop`. Errors and panics are logged but
 /// do not propagate.
 fn call_on_stop(processor: &mut dyn BatchProcessor) {
-    let result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| processor.on_stop()));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| processor.on_stop()));
     match result {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
@@ -498,10 +504,7 @@ fn call_on_stop(processor: &mut dyn BatchProcessor) {
 
 /// Join the coordinator thread with a bounded timeout, mirroring the
 /// [`bounded_join`](crate::runtime) pattern used for feed workers.
-fn bounded_coordinator_join(
-    thread: std::thread::JoinHandle<()>,
-    processor_id: StageId,
-) {
+fn bounded_coordinator_join(thread: std::thread::JoinHandle<()>, processor_id: StageId) {
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let _ = std::thread::Builder::new()
         .name(format!("nv-join-batch-{processor_id}"))

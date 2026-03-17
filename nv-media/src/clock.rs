@@ -84,7 +84,6 @@ impl PtsTracker {
         self.last_pts_ns = Some(pts_ns);
         result
     }
-
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ use nv_view::ViewEpoch;
 use crate::continuity::SegmentBoundary;
 use crate::trajectory::{Trajectory, TrajectoryPoint};
 
-use super::{TrackHistory, TemporalStore};
+use super::{TemporalStore, TrackHistory};
 
 impl TemporalStore {
     /// Commit a track update from the latest frame.
@@ -36,7 +36,12 @@ impl TemporalStore {
     ///
     /// Returns `true` if the track was committed, `false` if the track
     /// was a new admission rejected due to the hard cap.
-    pub fn commit_track(&mut self, track: &Track, now_ts: MonotonicTs, current_epoch: ViewEpoch) -> bool {
+    pub fn commit_track(
+        &mut self,
+        track: &Track,
+        now_ts: MonotonicTs,
+        current_epoch: ViewEpoch,
+    ) -> bool {
         let track_id = track.id;
         let track_arc = Arc::new(track.clone());
         let max_obs = self.retention.max_observations_per_track;
@@ -57,11 +62,7 @@ impl TemporalStore {
             }
 
             let mut trajectory = Trajectory::new();
-            trajectory.open_segment(
-                current_epoch,
-                SegmentBoundary::TrackCreated,
-                None,
-            );
+            trajectory.open_segment(current_epoch, SegmentBoundary::TrackCreated, None);
             let history = TrackHistory::new(
                 Arc::clone(&track_arc),
                 Arc::new(trajectory),
@@ -98,11 +99,7 @@ impl TemporalStore {
                     from_epoch: old_epoch,
                     to_epoch: current_epoch,
                 };
-                traj.open_segment(
-                    current_epoch,
-                    boundary.clone(),
-                    Some(boundary),
-                );
+                traj.open_segment(current_epoch, boundary.clone(), Some(boundary));
             }
 
             // Append trajectory point from observation bbox center.

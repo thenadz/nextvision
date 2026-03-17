@@ -138,10 +138,13 @@ impl MediaIngress for MediaSource {
             SourceState::Running | SourceState::Paused | SourceState::Idle => {
                 // If liveness watchdog is armed, schedule a tick so the
                 // worker keeps polling instead of waiting indefinitely.
-                let next = self.liveness_deadline.map(|d| {
-                    d.saturating_duration_since(Instant::now())
-                });
-                TickOutcome { status: SourceStatus::Running, next_tick: next }
+                let next = self
+                    .liveness_deadline
+                    .map(|d| d.saturating_duration_since(Instant::now()));
+                TickOutcome {
+                    status: SourceStatus::Running,
+                    next_tick: next,
+                }
             }
             SourceState::Reconnecting => {
                 // Return the remaining backoff as the next-tick hint so

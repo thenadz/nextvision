@@ -47,3 +47,36 @@ pub enum PtzEvent {
         ts: MonotonicTs,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ptz_telemetry_clone_eq() {
+        let t = PtzTelemetry {
+            pan: 45.0,
+            tilt: -10.0,
+            zoom: 0.5,
+            ts: MonotonicTs::from_nanos(1_000_000),
+        };
+        let t2 = t.clone();
+        assert_eq!(t, t2);
+    }
+
+    #[test]
+    fn ptz_event_variants() {
+        let ts = MonotonicTs::from_nanos(100);
+
+        let start = PtzEvent::MoveStart { ts };
+        let stop = PtzEvent::MoveStop { ts };
+        let preset = PtzEvent::PresetRecall { preset_id: 3, ts };
+
+        // Each variant is distinct.
+        assert_ne!(start, stop);
+        assert_ne!(stop, preset.clone());
+
+        // Clone round-trips.
+        assert_eq!(preset.clone(), preset);
+    }
+}

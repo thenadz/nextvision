@@ -10,6 +10,7 @@
 //! - **Errors** — [`NvError`] and its sub-enums
 //! - **Metadata** — [`TypedMetadata`] type-map pattern
 //! - **Health** — [`HealthEvent`], [`StopReason`]
+//! - **Metrics** — [`FeedMetrics`], [`StageMetrics`]
 //! - **Source** — [`SourceSpec`], [`RtspTransport`], [`ReconnectPolicy`]
 //! - **Config** — [`CameraMode`], [`BackoffKind`]
 //!
@@ -31,4 +32,5 @@ pub use geom::*;
 pub use health::*;
 pub use id::*;
 pub use metadata::TypedMetadata;
+pub use metrics::*;
 pub use timestamp::*;

@@ -126,10 +126,7 @@ impl FeedSharedState {
 
     /// The last confirmed decode status, if known.
     pub fn decode_status(&self) -> Option<(nv_core::health::DecodeOutcome, String)> {
-        self.decode_status
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
+        self.decode_status.lock().ok().and_then(|g| g.clone())
     }
 
     /// Request shutdown and wake the worker if it is paused or waiting on

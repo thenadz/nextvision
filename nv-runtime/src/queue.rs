@@ -178,8 +178,10 @@ impl FrameQueue {
                     if now >= dl {
                         return PopResult::Timeout;
                     }
-                    let (guard, result) =
-                        self.not_empty.wait_timeout(inner, dl - now).unwrap_or_else(|e| e.into_inner());
+                    let (guard, result) = self
+                        .not_empty
+                        .wait_timeout(inner, dl - now)
+                        .unwrap_or_else(|e| e.into_inner());
                     inner = guard;
                     if result.timed_out() && inner.buf.is_empty() {
                         if inner.closed || shutdown.load(Ordering::Relaxed) {
@@ -193,7 +195,10 @@ impl FrameQueue {
                     }
                 }
                 None => {
-                    inner = self.not_empty.wait(inner).unwrap_or_else(|e| e.into_inner());
+                    inner = self
+                        .not_empty
+                        .wait(inner)
+                        .unwrap_or_else(|e| e.into_inner());
                 }
             }
         }
@@ -229,7 +234,11 @@ impl FrameQueue {
     /// stale under concurrent push/pop, but is suitable for monitoring
     /// and dashboards.
     pub(crate) fn depth(&self) -> usize {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).buf.len()
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .buf
+            .len()
     }
 
     /// Maximum capacity of the queue.
@@ -254,9 +263,9 @@ impl FrameQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
     use nv_core::{FeedId, MonotonicTs, TypedMetadata, WallTs};
     use nv_frame::PixelFormat;
+    use std::time::Duration;
 
     fn test_frame(seq: u64) -> FrameEnvelope {
         FrameEnvelope::new_owned(
@@ -338,7 +347,10 @@ mod tests {
         q.close();
 
         let result = handle.join().unwrap();
-        assert!(matches!(result, PopResult::Closed), "pop should return Closed after close");
+        assert!(
+            matches!(result, PopResult::Closed),
+            "pop should return Closed after close"
+        );
     }
 
     #[test]
@@ -355,7 +367,10 @@ mod tests {
         q.wake_consumer();
 
         let result = handle.join().unwrap();
-        assert!(matches!(result, PopResult::Closed), "pop should return Closed after shutdown");
+        assert!(
+            matches!(result, PopResult::Closed),
+            "pop should return Closed after shutdown"
+        );
     }
 
     #[test]
@@ -391,7 +406,10 @@ mod tests {
         let shutdown = AtomicBool::new(false);
         let deadline = Instant::now() + Duration::from_millis(10);
         let result = q.pop(&shutdown, Some(deadline));
-        assert!(matches!(result, PopResult::Timeout), "expected Timeout on empty queue with deadline");
+        assert!(
+            matches!(result, PopResult::Timeout),
+            "expected Timeout on empty queue with deadline"
+        );
     }
 
     #[test]

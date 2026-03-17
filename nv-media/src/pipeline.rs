@@ -164,13 +164,13 @@ impl PipelineBuilder {
                 .map_err(|e| MediaError::Unsupported {
                     detail: format!("failed to create v4l2src: {e}"),
                 })?,
-            SourceSpec::Custom {
-                pipeline_fragment,
-            } => gst::parse::bin_from_description(pipeline_fragment, true)
-                .map_err(|e| MediaError::Unsupported {
-                    detail: format!("failed to parse custom pipeline fragment: {e}"),
-                })?
-                .upcast(),
+            SourceSpec::Custom { pipeline_fragment } => {
+                gst::parse::bin_from_description(pipeline_fragment, true)
+                    .map_err(|e| MediaError::Unsupported {
+                        detail: format!("failed to parse custom pipeline fragment: {e}"),
+                    })?
+                    .upcast()
+            }
         };
 
         // --- Decode element(s) ---
@@ -216,7 +216,8 @@ impl PipelineBuilder {
                     use crate::decode::is_hardware_video_decoder;
 
                     // values: &[decodebin, pad, caps, factory]
-                    let factory: gst::ElementFactory = match values.get(3)
+                    let factory: gst::ElementFactory = match values
+                        .get(3)
                         .and_then(|v| v.get::<gst::ElementFactory>().ok())
                     {
                         Some(f) => f,
@@ -234,8 +235,7 @@ impl PipelineBuilder {
                     // Non-video-decoder elements (demuxers, parsers, etc.)
                     // are always allowed through.
                     if !is_hardware_video_decoder(&klass, name.as_str()) {
-                        let is_video_decoder =
-                            klass.contains("Decoder") && klass.contains("Video");
+                        let is_video_decoder = klass.contains("Decoder") && klass.contains("Video");
                         if !is_video_decoder {
                             return Some(0i32.to_value()); // TRY
                         }
@@ -261,7 +261,7 @@ impl PipelineBuilder {
                     Ok(elem) => {
                         // Populate selected decoder directly — no decodebin.
                         if let Some(factory) = elem.factory() {
-                            use crate::decode::{is_hardware_video_decoder, SelectedDecoderInfo};
+                            use crate::decode::{SelectedDecoderInfo, is_hardware_video_decoder};
                             let klass: String =
                                 factory.metadata("klass").unwrap_or_default().into();
                             let is_hw = is_hardware_video_decoder(&klass, name.as_str());
@@ -296,21 +296,17 @@ impl PipelineBuilder {
         if uses_decodebin {
             let slot_clone = std::sync::Arc::clone(&selected_decoder);
             decode_element.connect("element-added", false, move |values| {
-                use crate::decode::{is_hardware_video_decoder, SelectedDecoderInfo};
-                let element: gst::Element = match values.get(1)
-                    .and_then(|v| v.get::<gst::Element>().ok())
-                {
-                    Some(e) => e,
-                    None => {
-                        tracing::warn!(
-                            "element-added: malformed callback payload, ignoring",
-                        );
-                        return None;
-                    }
-                };
+                use crate::decode::{SelectedDecoderInfo, is_hardware_video_decoder};
+                let element: gst::Element =
+                    match values.get(1).and_then(|v| v.get::<gst::Element>().ok()) {
+                        Some(e) => e,
+                        None => {
+                            tracing::warn!("element-added: malformed callback payload, ignoring",);
+                            return None;
+                        }
+                    };
                 if let Some(factory) = element.factory() {
-                    let klass: String =
-                        factory.metadata("klass").unwrap_or_default().into();
+                    let klass: String = factory.metadata("klass").unwrap_or_default().into();
                     if klass.contains("Decoder") && klass.contains("Video") {
                         let name = factory.name().to_string();
                         let is_hw = is_hardware_video_decoder(&klass, &name);

@@ -51,9 +51,9 @@
 //! | `pipeline` | `pub(crate)` | Pipeline builder and configuration |
 
 // -- Public modules --
+pub mod factory;
 pub mod ingress;
 pub mod source;
-pub mod factory;
 
 // -- Internal modules --
 pub(crate) mod backend;
@@ -66,13 +66,15 @@ pub(crate) mod pipeline;
 pub(crate) mod reconnect;
 
 // -- Public re-exports --
+pub use bridge::PtzTelemetry;
+pub use decode::DecodePreference;
+pub use decode::{
+    DecodeCapabilities, DecodeDecisionInfo, DecodeOutcome, discover_decode_capabilities,
+};
+pub use factory::{DefaultMediaFactory, GstMediaIngressFactory};
+pub use ingress::IngressOptions;
 pub use ingress::PtzProvider;
 pub use ingress::SourceStatus;
 pub use ingress::TickOutcome;
-pub use ingress::IngressOptions;
-pub use bridge::PtzTelemetry;
-pub use decode::DecodePreference;
-pub use decode::{DecodeCapabilities, DecodeDecisionInfo, DecodeOutcome, discover_decode_capabilities};
 pub use ingress::{FrameSink, HealthSink, MediaIngress, MediaIngressFactory};
-pub use factory::{DefaultMediaFactory, GstMediaIngressFactory};
 pub use source::MediaSource;

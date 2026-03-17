@@ -1,4 +1,4 @@
-//! Health events, stop reasons, and decode outcome classification.
+//! Health events, stop reasons, and decode outcome/preference classification.
 //!
 //! [`HealthEvent`] is the primary mechanism for observing runtime behavior.
 //! Events are broadcast to subscribers via a channel. They cover source
@@ -6,6 +6,9 @@
 //!
 //! [`DecodeOutcome`] provides a backend-neutral classification of which
 //! decoder class is in effect (hardware, software, or unknown).
+//!
+//! [`DecodePreference`] is the user-facing decode strategy selection
+//! (auto, CPU-only, prefer-hardware, require-hardware).
 
 use crate::error::{MediaError, StageError};
 use crate::id::{FeedId, StageId};
@@ -41,6 +44,58 @@ impl std::fmt::Display for DecodeOutcome {
             Self::Hardware => f.write_str("Hardware"),
             Self::Software => f.write_str("Software"),
             Self::Unknown => f.write_str("Unknown"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Decode preference — user-facing decode strategy
+// ---------------------------------------------------------------------------
+
+/// User-facing decode preference for a feed.
+///
+/// Controls which decoder strategy the media backend uses when constructing
+/// the decode pipeline. The default is [`Auto`](Self::Auto), which preserves
+/// the backend's existing selection heuristic.
+///
+/// This type is backend-neutral — it does not expose GStreamer element names,
+/// GPU memory modes, or inference-framework details.
+///
+/// | Variant | Behavior |
+/// |---|---|
+/// | `Auto` | Backend picks the best available decoder (default). |
+/// | `CpuOnly` | Force software decoding — never use a hardware decoder. |
+/// | `PreferHardware` | Try hardware first; fall back to software silently. |
+/// | `RequireHardware` | Demand hardware decoding; fail-fast if unavailable. |
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum DecodePreference {
+    /// Automatically select the best decoder: prefer hardware, fall back to
+    /// software. This is the current default behavior preserved exactly.
+    #[default]
+    Auto,
+
+    /// Force software decoding. The backend must never attempt a hardware
+    /// decoder. Useful in environments without GPU access or where
+    /// deterministic CPU-only behaviour is required.
+    CpuOnly,
+
+    /// Prefer hardware decoding, but fall back to software silently if no
+    /// hardware decoder is available. No error is raised on fallback.
+    PreferHardware,
+
+    /// Require hardware decoding. If no hardware decoder is available, the
+    /// backend must fail-fast with a [`MediaError`](crate::error::MediaError)
+    /// instead of silently falling back to software.
+    RequireHardware,
+}
+
+impl std::fmt::Display for DecodePreference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => f.write_str("Auto"),
+            Self::CpuOnly => f.write_str("CpuOnly"),
+            Self::PreferHardware => f.write_str("PreferHardware"),
+            Self::RequireHardware => f.write_str("RequireHardware"),
         }
     }
 }
@@ -172,7 +227,7 @@ pub enum HealthEvent {
         /// Hardware, Software, or Unknown.
         outcome: DecodeOutcome,
         /// The user-requested decode preference that was in effect.
-        preference: String,
+        preference: DecodePreference,
         /// Whether the adaptive fallback cache overrode the requested
         /// preference for this session.
         fallback_active: bool,
@@ -189,6 +244,15 @@ pub enum HealthEvent {
     /// The runtime wraps `OutputSink::emit()` in `catch_unwind` to
     /// prevent a misbehaving sink from tearing down the worker thread.
     SinkPanic { feed_id: FeedId },
+
+    /// The per-feed sink worker did not shut down within the timeout.
+    ///
+    /// The sink thread is detached and a placeholder sink is installed.
+    /// This typically means `OutputSink::emit()` is blocked on
+    /// downstream I/O. Distinct from [`SinkPanic`](Self::SinkPanic)
+    /// to allow operators to route hung-sink alerts separately from
+    /// crash alerts.
+    SinkTimeout { feed_id: FeedId },
 
     /// The per-feed sink queue is full — output was dropped.
     ///
@@ -302,4 +366,53 @@ pub enum StopReason {
 
     /// An unrecoverable error occurred.
     Fatal { detail: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_outcome_display() {
+        assert_eq!(DecodeOutcome::Hardware.to_string(), "Hardware");
+        assert_eq!(DecodeOutcome::Software.to_string(), "Software");
+        assert_eq!(DecodeOutcome::Unknown.to_string(), "Unknown");
+    }
+
+    #[test]
+    fn decode_preference_display() {
+        assert_eq!(DecodePreference::Auto.to_string(), "Auto");
+        assert_eq!(DecodePreference::CpuOnly.to_string(), "CpuOnly");
+        assert_eq!(
+            DecodePreference::PreferHardware.to_string(),
+            "PreferHardware"
+        );
+        assert_eq!(
+            DecodePreference::RequireHardware.to_string(),
+            "RequireHardware"
+        );
+    }
+
+    #[test]
+    fn stop_reason_variants() {
+        let user = StopReason::UserRequested;
+        let restart = StopReason::RestartLimitExceeded { restart_count: 3 };
+        let eos = StopReason::EndOfStream;
+        let fatal = StopReason::Fatal {
+            detail: "test".into(),
+        };
+
+        // Ensure Debug formatting doesn't panic.
+        let _ = format!("{user:?}");
+        let _ = format!("{restart:?}");
+        let _ = format!("{eos:?}");
+        let _ = format!("{fatal:?}");
+    }
+
+    #[test]
+    fn health_event_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        // HealthEvent must be broadcastable across threads.
+        assert_send_sync::<HealthEvent>();
+    }
 }

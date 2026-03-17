@@ -45,3 +45,44 @@ pub enum TransformEstimationMethod {
     /// Provided by a user-supplied external system.
     External,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nv_core::AffineTransform2D;
+
+    fn identity_transform() -> GlobalTransformEstimate {
+        GlobalTransformEstimate {
+            transform: AffineTransform2D::IDENTITY,
+            confidence: 1.0,
+            method: TransformEstimationMethod::FeatureMatching,
+            computed_at: ViewVersion::new(1),
+        }
+    }
+
+    #[test]
+    fn identity_has_zero_displacement() {
+        let est = identity_transform();
+        assert!((est.displacement_magnitude() - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn translation_displacement() {
+        let est = GlobalTransformEstimate {
+            // Translation of (0.3, 0.4) → magnitude = 0.5
+            transform: AffineTransform2D {
+                m: [1.0, 0.0, 0.3, 0.0, 1.0, 0.4],
+            },
+            confidence: 0.9,
+            method: TransformEstimationMethod::PtzModel,
+            computed_at: ViewVersion::new(2),
+        };
+        assert!((est.displacement_magnitude() - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn clone_eq() {
+        let est = identity_transform();
+        assert_eq!(est, est.clone());
+    }
+}

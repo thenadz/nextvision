@@ -57,8 +57,13 @@ fn validation_mode_error_rejects_bad_ordering() {
 
     struct DetStage;
     impl Stage for DetStage {
-        fn id(&self) -> StageId { StageId("det") }
-        fn process(&mut self, _: &StageContext<'_>) -> Result<StageOutput, nv_core::error::StageError> {
+        fn id(&self) -> StageId {
+            StageId("det")
+        }
+        fn process(
+            &mut self,
+            _: &StageContext<'_>,
+        ) -> Result<StageOutput, nv_core::error::StageError> {
             Ok(StageOutput::empty())
         }
         fn capabilities(&self) -> Option<StageCapabilities> {
@@ -68,12 +73,21 @@ fn validation_mode_error_rejects_bad_ordering() {
 
     struct TrkStage;
     impl Stage for TrkStage {
-        fn id(&self) -> StageId { StageId("trk") }
-        fn process(&mut self, _: &StageContext<'_>) -> Result<StageOutput, nv_core::error::StageError> {
+        fn id(&self) -> StageId {
+            StageId("trk")
+        }
+        fn process(
+            &mut self,
+            _: &StageContext<'_>,
+        ) -> Result<StageOutput, nv_core::error::StageError> {
             Ok(StageOutput::empty())
         }
         fn capabilities(&self) -> Option<StageCapabilities> {
-            Some(StageCapabilities::new().consumes_detections().produces_tracks())
+            Some(
+                StageCapabilities::new()
+                    .consumes_detections()
+                    .produces_tracks(),
+            )
         }
     }
 
@@ -85,7 +99,10 @@ fn validation_mode_error_rejects_bad_ordering() {
         .output_sink(Box::new(CountingSink::new().0))
         .validation_mode(ValidationMode::Error)
         .build();
-    assert!(result.is_err(), "misordered pipeline must be rejected in Error mode");
+    assert!(
+        result.is_err(),
+        "misordered pipeline must be rejected in Error mode"
+    );
 
     // Correct order: detector then tracker.
     let result = FeedConfig::builder()
@@ -95,7 +112,10 @@ fn validation_mode_error_rejects_bad_ordering() {
         .output_sink(Box::new(CountingSink::new().0))
         .validation_mode(ValidationMode::Error)
         .build();
-    assert!(result.is_ok(), "correctly ordered pipeline must pass in Error mode");
+    assert!(
+        result.is_ok(),
+        "correctly ordered pipeline must pass in Error mode"
+    );
 }
 
 /// `ValidationMode::Off` (default) does not reject a misordered pipeline.
@@ -105,8 +125,13 @@ fn validation_mode_off_allows_bad_ordering() {
 
     struct BadStage;
     impl Stage for BadStage {
-        fn id(&self) -> StageId { StageId("bad") }
-        fn process(&mut self, _: &StageContext<'_>) -> Result<StageOutput, nv_core::error::StageError> {
+        fn id(&self) -> StageId {
+            StageId("bad")
+        }
+        fn process(
+            &mut self,
+            _: &StageContext<'_>,
+        ) -> Result<StageOutput, nv_core::error::StageError> {
             Ok(StageOutput::empty())
         }
         fn capabilities(&self) -> Option<StageCapabilities> {
@@ -134,7 +159,10 @@ fn add_stage_helpers_build_valid_config() {
         .add_boxed_stage(Box::new(NoOpStage::new("b")))
         .output_sink(Box::new(CountingSink::new().0))
         .build();
-    assert!(result.is_ok(), "add_stage helpers must produce valid config");
+    assert!(
+        result.is_ok(),
+        "add_stage helpers must produce valid config"
+    );
 }
 
 /// `add_stage` without any stage call fails (empty stages).
@@ -158,7 +186,9 @@ fn sink_queue_capacity_configurable() {
     let config = FeedConfig::builder()
         .source(SourceSpec::rtsp("rtsp://mock/stream"))
         .camera_mode(CameraMode::Fixed)
-        .stages(vec![Box::new(nv_test_util::mock_stage::NoOpStage::new("noop")) as Box<dyn Stage>])
+        .stages(vec![
+            Box::new(nv_test_util::mock_stage::NoOpStage::new("noop")) as Box<dyn Stage>,
+        ])
         .output_sink(Box::new(sink))
         .sink_queue_capacity(32)
         .build()
@@ -172,7 +202,9 @@ fn sink_queue_capacity_defaults_to_16() {
     let config = FeedConfig::builder()
         .source(SourceSpec::rtsp("rtsp://mock/stream"))
         .camera_mode(CameraMode::Fixed)
-        .stages(vec![Box::new(nv_test_util::mock_stage::NoOpStage::new("noop")) as Box<dyn Stage>])
+        .stages(vec![
+            Box::new(nv_test_util::mock_stage::NoOpStage::new("noop")) as Box<dyn Stage>,
+        ])
         .output_sink(Box::new(sink))
         .build()
         .expect("valid config");
@@ -185,7 +217,9 @@ fn sink_queue_capacity_clamped_to_min_1() {
     let config = FeedConfig::builder()
         .source(SourceSpec::rtsp("rtsp://mock/stream"))
         .camera_mode(CameraMode::Fixed)
-        .stages(vec![Box::new(nv_test_util::mock_stage::NoOpStage::new("noop")) as Box<dyn Stage>])
+        .stages(vec![
+            Box::new(nv_test_util::mock_stage::NoOpStage::new("noop")) as Box<dyn Stage>,
+        ])
         .output_sink(Box::new(sink))
         .sink_queue_capacity(0)
         .build()
@@ -221,7 +255,10 @@ fn feed_config_builder_sets_cpu_only() {
         .decode_preference(nv_media::DecodePreference::CpuOnly)
         .build()
         .expect("valid config");
-    assert_eq!(config.decode_preference, nv_media::DecodePreference::CpuOnly);
+    assert_eq!(
+        config.decode_preference,
+        nv_media::DecodePreference::CpuOnly
+    );
 }
 
 #[test]
@@ -235,5 +272,8 @@ fn feed_config_builder_sets_require_hardware() {
         .decode_preference(nv_media::DecodePreference::RequireHardware)
         .build()
         .expect("valid config");
-    assert_eq!(config.decode_preference, nv_media::DecodePreference::RequireHardware);
+    assert_eq!(
+        config.decode_preference,
+        nv_media::DecodePreference::RequireHardware
+    );
 }

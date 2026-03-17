@@ -73,3 +73,33 @@ pub trait ViewStateProvider: Send + Sync + 'static {
     /// Called once per frame. Return the current motion report.
     fn poll(&self, ctx: &MotionPollContext<'_>) -> MotionReport;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn motion_report_default_is_empty() {
+        let report = MotionReport::default();
+        assert!(report.ptz.is_none());
+        assert!(report.frame_transform.is_none());
+        assert!(report.motion_hint.is_none());
+        assert!(report.ptz_events.is_empty());
+    }
+
+    #[test]
+    fn motion_report_with_ptz() {
+        use crate::ptz::PtzTelemetry;
+        let report = MotionReport {
+            ptz: Some(PtzTelemetry {
+                pan: 90.0,
+                tilt: 0.0,
+                zoom: 0.5,
+                ts: MonotonicTs::from_nanos(100),
+            }),
+            ..Default::default()
+        };
+        assert!(report.ptz.is_some());
+        assert!(report.frame_transform.is_none());
+    }
+}

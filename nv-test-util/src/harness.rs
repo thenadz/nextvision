@@ -122,14 +122,8 @@ mod tests {
     #[test]
     fn harness_runs_detector() {
         let mut harness = StageHarness::new(MockDetectorStage::new("det", 3));
-        let frame = synthetic::solid_gray(
-            FeedId::new(1),
-            0,
-            MonotonicTs::from_nanos(0),
-            16,
-            16,
-            128,
-        );
+        let frame =
+            synthetic::solid_gray(FeedId::new(1), 0, MonotonicTs::from_nanos(0), 16, 16, 128);
         let output = harness
             .process(&frame, &PerceptionArtifacts::empty())
             .unwrap();
@@ -140,14 +134,7 @@ mod tests {
     #[test]
     fn harness_tracks_metrics() {
         let mut harness = StageHarness::new(MockDetectorStage::new("det", 1));
-        let frame = synthetic::solid_gray(
-            FeedId::new(1),
-            0,
-            MonotonicTs::from_nanos(0),
-            4,
-            4,
-            128,
-        );
+        let frame = synthetic::solid_gray(FeedId::new(1), 0, MonotonicTs::from_nanos(0), 4, 4, 128);
         harness
             .process(&frame, &PerceptionArtifacts::empty())
             .unwrap();
@@ -160,16 +147,8 @@ mod tests {
 
     #[test]
     fn harness_counts_errors() {
-        let mut harness =
-            StageHarness::new(crate::mock_stage::FailingStage::new("bad"));
-        let frame = synthetic::solid_gray(
-            FeedId::new(1),
-            0,
-            MonotonicTs::from_nanos(0),
-            4,
-            4,
-            128,
-        );
+        let mut harness = StageHarness::new(crate::mock_stage::FailingStage::new("bad"));
+        let frame = synthetic::solid_gray(FeedId::new(1), 0, MonotonicTs::from_nanos(0), 4, 4, 128);
         let result = harness.process(&frame, &PerceptionArtifacts::empty());
         assert!(result.is_err());
         assert_eq!(harness.metrics().errors, 1);

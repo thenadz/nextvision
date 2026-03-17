@@ -7,7 +7,7 @@ use nv_view::ViewEpoch;
 
 use crate::trajectory::Trajectory;
 
-use super::{TrackHistory, TemporalStore};
+use super::{TemporalStore, TrackHistory};
 
 /// Internal snapshot data.
 #[derive(Clone, Debug)]

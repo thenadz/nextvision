@@ -43,7 +43,12 @@ impl Detection {
     /// .build();
     /// ```
     #[must_use]
-    pub fn builder(id: DetectionId, class_id: u32, confidence: f32, bbox: BBox) -> DetectionBuilder {
+    pub fn builder(
+        id: DetectionId,
+        class_id: u32,
+        confidence: f32,
+        bbox: BBox,
+    ) -> DetectionBuilder {
         DetectionBuilder {
             id,
             class_id,
@@ -143,13 +148,8 @@ mod tests {
 
     #[test]
     fn builder_required_fields_only() {
-        let det = Detection::builder(
-            DetectionId::new(1),
-            0,
-            0.95,
-            BBox::new(0.1, 0.2, 0.3, 0.4),
-        )
-        .build();
+        let det =
+            Detection::builder(DetectionId::new(1), 0, 0.95, BBox::new(0.1, 0.2, 0.3, 0.4)).build();
 
         assert_eq!(det.id, DetectionId::new(1));
         assert_eq!(det.class_id, 0);
@@ -163,15 +163,10 @@ mod tests {
         #[derive(Clone, Debug, PartialEq)]
         struct Extra(u32);
 
-        let det = Detection::builder(
-            DetectionId::new(2),
-            5,
-            0.8,
-            BBox::new(0.0, 0.0, 1.0, 1.0),
-        )
-        .embedding(vec![0.1, 0.2, 0.3])
-        .meta(Extra(42))
-        .build();
+        let det = Detection::builder(DetectionId::new(2), 5, 0.8, BBox::new(0.0, 0.0, 1.0, 1.0))
+            .embedding(vec![0.1, 0.2, 0.3])
+            .meta(Extra(42))
+            .build();
 
         assert_eq!(det.embedding.as_ref().unwrap().len(), 3);
         assert_eq!(det.metadata.get::<Extra>(), Some(&Extra(42)));
@@ -180,10 +175,8 @@ mod tests {
     #[test]
     fn detection_set_from_vec() {
         let dets = vec![
-            Detection::builder(DetectionId::new(1), 0, 0.9, BBox::new(0.0, 0.0, 0.5, 0.5))
-                .build(),
-            Detection::builder(DetectionId::new(2), 1, 0.7, BBox::new(0.5, 0.5, 1.0, 1.0))
-                .build(),
+            Detection::builder(DetectionId::new(1), 0, 0.9, BBox::new(0.0, 0.0, 0.5, 0.5)).build(),
+            Detection::builder(DetectionId::new(2), 1, 0.7, BBox::new(0.5, 0.5, 1.0, 1.0)).build(),
         ];
         let set: DetectionSet = dets.into();
         assert_eq!(set.len(), 2);

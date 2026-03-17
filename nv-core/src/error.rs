@@ -173,3 +173,49 @@ pub enum ConfigError {
     #[error("duplicate batch processor id: {id}")]
     DuplicateBatchProcessorId { id: StageId },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nv_error_from_media_error() {
+        let err: NvError = MediaError::Timeout.into();
+        assert!(matches!(err, NvError::Media(MediaError::Timeout)));
+        assert!(err.to_string().contains("timeout"));
+    }
+
+    #[test]
+    fn nv_error_from_config_error() {
+        let err: NvError = ConfigError::MissingRequired { field: "source" }.into();
+        assert!(matches!(err, NvError::Config(ConfigError::MissingRequired { .. })));
+        assert!(err.to_string().contains("source"));
+    }
+
+    #[test]
+    fn stage_error_includes_stage_id() {
+        let err = StageError::ProcessingFailed {
+            stage_id: StageId("detector"),
+            detail: "NaN output".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("detector"));
+        assert!(msg.contains("NaN output"));
+    }
+
+    #[test]
+    fn runtime_error_display() {
+        let err = RuntimeError::FeedLimitExceeded { max: 64 };
+        assert!(err.to_string().contains("64"));
+    }
+
+    #[test]
+    fn media_error_is_clone() {
+        let err = MediaError::ConnectionFailed {
+            url: "rtsp://cam".into(),
+            detail: "timeout".into(),
+        };
+        let err2 = err.clone();
+        assert_eq!(err.to_string(), err2.to_string());
+    }
+}

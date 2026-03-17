@@ -45,11 +45,13 @@ impl PipelineExecutor {
     /// Call `on_stop()` on each stage (pre-batch then post-batch) — best-effort,
     /// errors and panics are logged.
     pub fn stop_stages(&mut self) {
-        for stage in self.stages.iter_mut().chain(self.post_batch_stages.iter_mut()) {
+        for stage in self
+            .stages
+            .iter_mut()
+            .chain(self.post_batch_stages.iter_mut())
+        {
             let stage_id = stage.id();
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                stage.on_stop()
-            }));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stage.on_stop()));
             match result {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
@@ -108,9 +110,7 @@ fn start_stage_slice(
     stages: &mut [Box<dyn Stage>],
 ) -> Result<(), (usize, StageError)> {
     for (i, stage) in stages.iter_mut().enumerate() {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            stage.on_start()
-        }));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stage.on_start()));
         match result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err((i, e)),
@@ -121,10 +121,13 @@ fn start_stage_slice(
                     stage_id = %stage_id,
                     "stage on_start() panicked"
                 );
-                return Err((i, StageError::ProcessingFailed {
-                    stage_id,
-                    detail: "on_start() panicked".into(),
-                }));
+                return Err((
+                    i,
+                    StageError::ProcessingFailed {
+                        stage_id,
+                        detail: "on_start() panicked".into(),
+                    },
+                ));
             }
         }
     }

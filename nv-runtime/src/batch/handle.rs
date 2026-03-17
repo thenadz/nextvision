@@ -1,11 +1,11 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use nv_core::error::StageError;
 use nv_core::id::StageId;
-use nv_perception::batch::BatchEntry;
 use nv_perception::StageOutput;
+use nv_perception::batch::BatchEntry;
 
 use super::config::BatchConfig;
 use super::metrics::{BatchMetrics, BatchMetricsInner};
@@ -76,7 +76,9 @@ impl BatchHandle {
     /// Snapshot current batch metrics.
     #[must_use]
     pub fn metrics(&self) -> BatchMetrics {
-        self.inner.metrics.snapshot(self.inner.config.max_batch_size as u64)
+        self.inner
+            .metrics
+            .snapshot(self.inner.config.max_batch_size as u64)
     }
 
     /// Record that a feed-side timeout occurred.
@@ -162,7 +164,10 @@ impl BatchHandle {
         // Bounded wait for the response. The coordinator decrements
         // the in-flight guard before sending the result, so by the
         // time we receive the response the counter is already updated.
-        let safety = self.inner.config.response_timeout
+        let safety = self
+            .inner
+            .config
+            .response_timeout
             .unwrap_or(DEFAULT_RESPONSE_TIMEOUT);
         let timeout = self.inner.config.max_latency + safety;
         match response_rx.recv_timeout(timeout) {

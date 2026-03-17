@@ -104,9 +104,12 @@
 //!
 //! ## Startup timeout
 //!
-//! `BatchProcessor::on_start()` is given [`ON_START_TIMEOUT`] (30 s).
-//! If it exceeds that, the coordinator attempts a 2-second bounded join
-//! before returning an error. If the thread is still alive after the
+//! `BatchProcessor::on_start()` is given [`BatchConfig::startup_timeout`]
+//! (default 30 s, configurable). GPU-backed processors such as TensorRT
+//! may need several minutes for first-run engine compilation; set a
+//! longer timeout via [`BatchConfig::with_startup_timeout`].
+//! If it exceeds the timeout, the coordinator attempts a 2-second bounded
+//! join before returning an error. If the thread is still alive after the
 //! grace period it is detached (inherent safe-Rust limitation).
 //!
 //! ## Response timeout

@@ -19,9 +19,8 @@ use crate::provenance::{
 };
 
 use super::{
+    BATCH_IN_FLIGHT_THROTTLE, BATCH_REJECTION_THROTTLE, BATCH_TIMEOUT_THROTTLE, PipelineExecutor,
     instant_to_ts_impl,
-    BATCH_IN_FLIGHT_THROTTLE, BATCH_REJECTION_THROTTLE, BATCH_TIMEOUT_THROTTLE,
-    PipelineExecutor,
 };
 
 impl PipelineExecutor {
@@ -124,7 +123,8 @@ impl PipelineExecutor {
         let mut artifacts = PerceptionArtifacts::empty();
         let pre_batch_count = self.stages.len();
         let post_batch_count = self.post_batch_stages.len();
-        let total_prov_capacity = pre_batch_count + post_batch_count + usize::from(self.batch.is_some());
+        let total_prov_capacity =
+            pre_batch_count + post_batch_count + usize::from(self.batch.is_some());
         let mut stage_provs = Vec::with_capacity(total_prov_capacity);
 
         // Capture clock anchors so we can call the free function inside
@@ -173,10 +173,7 @@ impl PipelineExecutor {
                 output: None,
             };
 
-            let batch_result = batch_handle.submit_and_wait(
-                entry,
-                self.batch_in_flight.as_ref(),
-            );
+            let batch_result = batch_handle.submit_and_wait(entry, self.batch_in_flight.as_ref());
             let t_batch_end = Instant::now();
             let batch_latency = Duration::from_nanos(t_batch_start.elapsed().as_nanos() as u64);
 
@@ -257,10 +254,7 @@ impl PipelineExecutor {
                             // The coordinator already emitted the
                             // authoritative BatchError with the real
                             // batch_size — do NOT emit a duplicate here.
-                            (
-                                categorize_stage_error(e),
-                                None,
-                            )
+                            (categorize_stage_error(e), None)
                         }
                         BatchSubmitError::CoordinatorShutdown => {
                             // Distinguish expected feed/runtime shutdown
@@ -403,7 +397,8 @@ impl PipelineExecutor {
 
         if artifacts.tracks_authoritative {
             self.track_id_buf.clear();
-            self.track_id_buf.extend(artifacts.tracks.iter().map(|t| t.id));
+            self.track_id_buf
+                .extend(artifacts.tracks.iter().map(|t| t.id));
             self.ended_buf.clear();
             self.ended_buf.extend(
                 self.temporal
@@ -527,8 +522,7 @@ fn run_stage_sequence(
             metrics: &metrics[midx],
         };
 
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stage.process(&ctx)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stage.process(&ctx)));
 
         let t_stage_end = Instant::now();
         let stage_latency = Duration::from_nanos(t_stage_start.elapsed().as_nanos() as u64);
@@ -557,10 +551,7 @@ fn run_stage_sequence(
             }
             Err(_panic) => {
                 metrics[midx].errors += 1;
-                health_events.push(HealthEvent::StagePanic {
-                    feed_id,
-                    stage_id,
-                });
+                health_events.push(HealthEvent::StagePanic { feed_id, stage_id });
                 stage_provs.push(StageProvenance {
                     stage_id,
                     start_ts: instant_to_ts_impl(anchor, anchor_ts, t_stage_start),

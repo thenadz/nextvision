@@ -10,9 +10,9 @@
 //! apply confidence thresholding and coordinate remapping.
 
 use crate::letterbox::LetterboxInfo;
+use nv_core::TypedMetadata;
 use nv_core::geom::BBox;
 use nv_core::id::DetectionId;
-use nv_core::TypedMetadata;
 use nv_perception::{Detection, DetectionSet};
 
 /// Columns per detection in the end-to-end output format.
@@ -49,8 +49,7 @@ pub fn decode_end2end_output(
             continue;
         }
 
-        let (nx0, ny0, nx1, ny1) =
-            info.remap_to_normalised(row[0], row[1], row[2], row[3]);
+        let (nx0, ny0, nx1, ny1) = info.remap_to_normalised(row[0], row[1], row[2], row[3]);
 
         detections.push(Detection {
             id: DetectionId::new(det_id_offset + detections.len() as u64),

@@ -118,9 +118,7 @@ impl MediaSource {
             return None;
         }
 
-        let deadline_elapsed = self
-            .reconnect_deadline
-            .is_none_or(|d| Instant::now() >= d);
+        let deadline_elapsed = self.reconnect_deadline.is_none_or(|d| Instant::now() >= d);
         tracing::debug!(
             feed_id = %self.feed_id,
             deadline_elapsed,

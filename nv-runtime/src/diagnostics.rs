@@ -55,7 +55,7 @@ use nv_core::id::{FeedId, StageId};
 use nv_core::metrics::FeedMetrics;
 
 use crate::batch::BatchMetrics;
-use crate::feed::{DecodeStatus, QueueTelemetry};
+use crate::feed_handle::{DecodeStatus, QueueTelemetry};
 
 // ---------------------------------------------------------------------------
 // Per-feed diagnostics

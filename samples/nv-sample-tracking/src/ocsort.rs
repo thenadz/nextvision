@@ -1,9 +1,9 @@
 //! OC-SORT tracker core — manages track state, lifecycle, and frame-by-frame update.
 
-use nv_core::id::TrackId;
 use nv_core::MonotonicTs;
-use nv_perception::{Detection, Track, TrackObservation, TrackState};
 use nv_core::TypedMetadata;
+use nv_core::id::TrackId;
+use nv_perception::{Detection, Track, TrackObservation, TrackState};
 
 use crate::config::TrackerConfig;
 use crate::kalman::KalmanBoxTracker;
@@ -111,7 +111,8 @@ impl OcSortTracker {
         }
 
         // 7. Remove dead tracks and build output.
-        self.tracks.retain(|t| t.kf.time_since_update <= self.config.max_age);
+        self.tracks
+            .retain(|t| t.kf.time_since_update <= self.config.max_age);
 
         // 8. Build output tracks.
         let mut output = Vec::new();
@@ -164,8 +165,8 @@ impl OcSortTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nv_core::{DetectionId, MonotonicTs};
     use nv_core::geom::BBox;
+    use nv_core::{DetectionId, MonotonicTs};
 
     fn det(id: u64, x0: f32, y0: f32, x1: f32, y1: f32, conf: f32) -> Detection {
         Detection {

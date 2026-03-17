@@ -187,10 +187,14 @@ impl std::fmt::Display for BatchMetrics {
             self.items_timed_out,
             self.avg_fill_ratio()
                 .map_or_else(|| "n/a".to_string(), |r| format!("{r:.2}")),
-            self.avg_processing_ns()
-                .map_or_else(|| "n/a".to_string(), |ns| format!("{:.1}ms", ns / 1_000_000.0)),
-            self.avg_formation_ns()
-                .map_or_else(|| "n/a".to_string(), |ns| format!("{:.1}ms", ns / 1_000_000.0)),
+            self.avg_processing_ns().map_or_else(
+                || "n/a".to_string(),
+                |ns| format!("{:.1}ms", ns / 1_000_000.0)
+            ),
+            self.avg_formation_ns().map_or_else(
+                || "n/a".to_string(),
+                |ns| format!("{:.1}ms", ns / 1_000_000.0)
+            ),
             self.consecutive_errors,
         )
     }

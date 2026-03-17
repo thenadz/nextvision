@@ -8,8 +8,8 @@ use nv_core::id::{FeedId, StageId};
 use nv_perception::batch::{BatchEntry, BatchProcessor};
 use nv_perception::{DetectionSet, StageOutput};
 use nv_view::ViewSnapshot;
-use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use tokio::sync::broadcast;
 
 /// A trivial batch processor that sets each output to detections with
@@ -21,7 +21,12 @@ struct CountingProcessor {
 impl CountingProcessor {
     fn new() -> (Self, Arc<AtomicU32>) {
         let calls = Arc::new(AtomicU32::new(0));
-        (Self { calls: Arc::clone(&calls) }, calls)
+        (
+            Self {
+                calls: Arc::clone(&calls),
+            },
+            calls,
+        )
     }
 }
 
@@ -109,7 +114,9 @@ fn full_batch_dispatched_immediately() {
     let start = Instant::now();
     for i in 0..4 {
         let h = handle.clone();
-        handles.push(std::thread::spawn(move || h.submit_and_wait(make_entry(i), None)));
+        handles.push(std::thread::spawn(move || {
+            h.submit_and_wait(make_entry(i), None)
+        }));
     }
 
     for h in handles {
@@ -146,7 +153,9 @@ fn partial_batch_on_timeout() {
     let mut handles = Vec::new();
     for i in 0..3 {
         let h = handle.clone();
-        handles.push(std::thread::spawn(move || h.submit_and_wait(make_entry(i), None)));
+        handles.push(std::thread::spawn(move || {
+            h.submit_and_wait(make_entry(i), None)
+        }));
     }
 
     for h in handles {
@@ -195,7 +204,9 @@ fn processor_error_propagated_to_all_feeds() {
     let mut join_handles = Vec::new();
     for i in 0..3 {
         let h = handle.clone();
-        join_handles.push(std::thread::spawn(move || h.submit_and_wait(make_entry(i), None)));
+        join_handles.push(std::thread::spawn(move || {
+            h.submit_and_wait(make_entry(i), None)
+        }));
     }
 
     for jh in join_handles {
@@ -422,7 +433,10 @@ fn queue_capacity_too_small_rejected() {
         },
         health_tx,
     );
-    assert!(result.is_err(), "queue_capacity < max_batch_size should fail");
+    assert!(
+        result.is_err(),
+        "queue_capacity < max_batch_size should fail"
+    );
 }
 
 #[test]
@@ -472,7 +486,11 @@ fn disconnected_submit_increments_rejected() {
     let m = handle.metrics();
     assert_eq!(m.items_submitted, 1);
     assert_eq!(m.items_rejected, 1);
-    assert_eq!(m.pending_items(), 0, "pending should be 0 after disconnect rejection");
+    assert_eq!(
+        m.pending_items(),
+        0,
+        "pending should be 0 after disconnect rejection"
+    );
 }
 
 #[test]
@@ -512,7 +530,10 @@ fn avg_batch_size_correct() {
         consecutive_errors: 0,
     };
     let avg = m.avg_batch_size().unwrap();
-    assert!((avg - 3.0).abs() < f64::EPSILON, "expected 12/4 = 3.0, got {avg}");
+    assert!(
+        (avg - 3.0).abs() < f64::EPSILON,
+        "expected 12/4 = 3.0, got {avg}"
+    );
 }
 
 #[test]
@@ -531,7 +552,10 @@ fn avg_fill_ratio_correct() {
         consecutive_errors: 0,
     };
     let ratio = m.avg_fill_ratio().unwrap();
-    assert!((ratio - 0.5).abs() < f64::EPSILON, "expected 4/8 = 0.5, got {ratio}");
+    assert!(
+        (ratio - 0.5).abs() < f64::EPSILON,
+        "expected 4/8 = 0.5, got {ratio}"
+    );
 }
 
 #[test]
@@ -550,7 +574,10 @@ fn avg_fill_ratio_full_batches() {
         consecutive_errors: 0,
     };
     let ratio = m.avg_fill_ratio().unwrap();
-    assert!((ratio - 1.0).abs() < f64::EPSILON, "expected 1.0 for full batches, got {ratio}");
+    assert!(
+        (ratio - 1.0).abs() < f64::EPSILON,
+        "expected 1.0 for full batches, got {ratio}"
+    );
 }
 
 #[test]
@@ -680,11 +707,7 @@ fn on_start_failure_returns_error() {
     }
 
     let (health_tx, _) = broadcast::channel(16);
-    let result = BatchCoordinator::start(
-        Box::new(FailStart),
-        BatchConfig::default(),
-        health_tx,
-    );
+    let result = BatchCoordinator::start(Box::new(FailStart), BatchConfig::default(), health_tx);
     assert!(result.is_err(), "on_start failure should propagate");
 }
 
@@ -702,14 +725,12 @@ fn non_detector_output_routed_correctly() {
         }
         fn process(&mut self, items: &mut [BatchEntry]) -> Result<(), StageError> {
             for item in items.iter_mut() {
-                item.output = Some(StageOutput::with_scene_features(vec![
-                    SceneFeature {
-                        name: "weather",
-                        value: SceneFeatureValue::Scalar(0.9),
-                        confidence: Some(0.95),
-                        ts: MonotonicTs::from_nanos(0),
-                    },
-                ]));
+                item.output = Some(StageOutput::with_scene_features(vec![SceneFeature {
+                    name: "weather",
+                    value: SceneFeatureValue::Scalar(0.9),
+                    confidence: Some(0.95),
+                    ts: MonotonicTs::from_nanos(0),
+                }]));
             }
             Ok(())
         }
@@ -761,12 +782,12 @@ fn slow_on_start_completes_successfully() {
     let (health_tx, _) = broadcast::channel(16);
 
     // Release the barrier from a helper thread after 100 ms so
-    // on_start completes well within ON_START_TIMEOUT (30 s).
+    // on_start completes well within the default startup timeout (30 s).
     // This validates that a blocking-but-eventually-completing
     // on_start succeeds and the coordinator cleans up normally.
     //
-    // NOTE: the actual 30 s timeout path cannot be tested in a
-    // fast unit test since ON_START_TIMEOUT is a module constant.
+    // NOTE: the timeout path can be tested by setting a short
+    // startup_timeout in BatchConfig.
     let b = Arc::clone(&barrier);
     let _helper = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(100));
@@ -778,7 +799,10 @@ fn slow_on_start_completes_successfully() {
         BatchConfig::default(),
         health_tx,
     );
-    assert!(result.is_ok(), "slow-but-completing on_start should succeed");
+    assert!(
+        result.is_ok(),
+        "slow-but-completing on_start should succeed"
+    );
     result.unwrap().shutdown();
 }
 
@@ -801,11 +825,7 @@ fn on_start_failure_propagates_error_with_processor_id() {
     }
 
     let (health_tx, _) = broadcast::channel(16);
-    let result = BatchCoordinator::start(
-        Box::new(FailStart),
-        BatchConfig::default(),
-        health_tx,
-    );
+    let result = BatchCoordinator::start(Box::new(FailStart), BatchConfig::default(), health_tx);
     let err = result.unwrap_err();
     let msg = format!("{err}");
     assert!(
@@ -879,7 +899,8 @@ fn custom_response_timeout_applied() {
             max_in_flight_per_feed: 1,
         },
         health_tx,
-    ).unwrap();
+    )
+    .unwrap();
 
     let handle = coord.handle();
     let result = handle.submit_and_wait(make_entry(1), None);
@@ -977,9 +998,11 @@ fn shutdown_drain_unblocks_feeds_before_on_stop() {
     let barrier = Arc::new(Barrier::new(2));
     let (health_tx, _health_rx) = broadcast::channel(64);
     let coord = BatchCoordinator::start(
-        Box::new(SlowStopProcessor { barrier: Arc::clone(&barrier) }),
+        Box::new(SlowStopProcessor {
+            barrier: Arc::clone(&barrier),
+        }),
         BatchConfig {
-            max_batch_size: 100, // very large — will never fill
+            max_batch_size: 100,                  // very large — will never fill
             max_latency: Duration::from_secs(60), // very long — will never fire
             queue_capacity: None,
             // Short response timeout to distinguish from Timeout
@@ -987,16 +1010,15 @@ fn shutdown_drain_unblocks_feeds_before_on_stop() {
             max_in_flight_per_feed: 1,
         },
         health_tx,
-    ).unwrap();
+    )
+    .unwrap();
 
     let handle = coord.handle();
 
     // Submit an item. The batch won't form (max_batch_size=100,
     // max_latency=60s), so the item sits in the queue.
     let h = handle.clone();
-    let feed_thread = std::thread::spawn(move || {
-        h.submit_and_wait(make_entry(1), None)
-    });
+    let feed_thread = std::thread::spawn(move || h.submit_and_wait(make_entry(1), None));
 
     // Give the item time to land in the queue.
     std::thread::sleep(Duration::from_millis(50));
@@ -1023,10 +1045,7 @@ fn shutdown_drain_unblocks_feeds_before_on_stop() {
     // It should have unblocked quickly (well under the 500ms
     // response timeout).
     assert!(
-        matches!(
-            result,
-            Err(BatchSubmitError::CoordinatorShutdown) | Ok(_)
-        ),
+        matches!(result, Err(BatchSubmitError::CoordinatorShutdown) | Ok(_)),
         "expected CoordinatorShutdown or Ok (if batch was processed before drain), got: {result:?}"
     );
     assert!(
@@ -1117,10 +1136,12 @@ fn items_timed_out_metric_incremented() {
 #[test]
 fn config_validate_catches_all_errors() {
     // Valid config.
-    assert!(BatchConfig::new(4, Duration::from_millis(50))
-        .unwrap()
-        .validate()
-        .is_ok());
+    assert!(
+        BatchConfig::new(4, Duration::from_millis(50))
+            .unwrap()
+            .validate()
+            .is_ok()
+    );
 
     // queue_capacity too small.
     let cfg = BatchConfig {
@@ -1270,7 +1291,9 @@ fn submit_and_wait_serializes_per_feed_preventing_starvation() {
     }
 
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let proc = RecordProcessor { seen: Arc::clone(&seen) };
+    let proc = RecordProcessor {
+        seen: Arc::clone(&seen),
+    };
     let (coord, _rx) = start_coordinator(
         Box::new(proc),
         BatchConfig {
@@ -1321,7 +1344,10 @@ fn submit_and_wait_serializes_per_feed_preventing_starvation() {
         num_feeds * frames_per_feed,
         "all items should be processed"
     );
-    assert_eq!(m.items_rejected, 0, "no rejections expected with adequate queue");
+    assert_eq!(
+        m.items_rejected, 0,
+        "no rejections expected with adequate queue"
+    );
 
     coord.shutdown();
 }
@@ -1356,11 +1382,8 @@ fn mixed_rate_feeds_all_make_progress() {
     );
 
     let handle = coord.handle();
-    let success_counts: Arc<[AtomicU32; 3]> = Arc::new([
-        AtomicU32::new(0),
-        AtomicU32::new(0),
-        AtomicU32::new(0),
-    ]);
+    let success_counts: Arc<[AtomicU32; 3]> =
+        Arc::new([AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)]);
 
     // Feed 1: fast (20 frames), Feed 2: medium (10), Feed 3: slow (5).
     let rates = [(1u64, 20u32), (2, 10), (3, 5)];
@@ -1479,7 +1502,9 @@ fn in_flight_cap_prevents_stacking_after_timeout() {
     }
 
     let (coord, _rx) = start_coordinator(
-        Box::new(OnceSlowProcessor { slow: AtomicBool::new(true) }),
+        Box::new(OnceSlowProcessor {
+            slow: AtomicBool::new(true),
+        }),
         BatchConfig {
             max_batch_size: 1,
             max_latency: Duration::from_millis(10),
@@ -1502,7 +1527,8 @@ fn in_flight_cap_prevents_stacking_after_timeout() {
 
     // in_flight should still be 1 (coordinator hasn't processed yet).
     assert_eq!(
-        in_flight.load(Ordering::Acquire), 1,
+        in_flight.load(Ordering::Acquire),
+        1,
         "in_flight should be 1 after timeout"
     );
 
@@ -1515,14 +1541,18 @@ fn in_flight_cap_prevents_stacking_after_timeout() {
 
     // in_flight should still be 1 (InFlightCapReached didn't change it).
     assert_eq!(
-        in_flight.load(Ordering::Acquire), 1,
+        in_flight.load(Ordering::Acquire),
+        1,
         "in_flight should remain 1 after cap rejection"
     );
 
     // Metrics: 2 submitted, 1 rejected (the InFlightCapReached).
     let m = handle.metrics();
     assert_eq!(m.items_submitted, 2, "two submissions total");
-    assert_eq!(m.items_rejected, 1, "InFlightCapReached counts as rejection");
+    assert_eq!(
+        m.items_rejected, 1,
+        "InFlightCapReached counts as rejection"
+    );
     // pending_items should reflect only the one actual in-flight item.
     assert_eq!(m.pending_items(), 1, "only one item genuinely pending");
 
@@ -1531,7 +1561,8 @@ fn in_flight_cap_prevents_stacking_after_timeout() {
 
     // in_flight should now be 0 (coordinator decremented).
     assert_eq!(
-        in_flight.load(Ordering::Acquire), 0,
+        in_flight.load(Ordering::Acquire),
+        0,
         "in_flight should be 0 after coordinator processes"
     );
 
@@ -1569,7 +1600,8 @@ fn in_flight_guard_decremented_on_queue_full() {
     );
     // in_flight should be 0 — incremented then decremented on send failure.
     assert_eq!(
-        in_flight.load(Ordering::Acquire), 0,
+        in_flight.load(Ordering::Acquire),
+        0,
         "in_flight should be 0 after send failure"
     );
 
@@ -1629,8 +1661,10 @@ fn shutdown_drain_clears_in_flight_guards() {
     // All in_flight counters should be 1.
     for (i, counter) in in_flights.iter().enumerate() {
         assert_eq!(
-            counter.load(Ordering::Acquire), 1,
-            "feed {} in_flight should be 1 before shutdown", i + 1
+            counter.load(Ordering::Acquire),
+            1,
+            "feed {} in_flight should be 1 before shutdown",
+            i + 1
         );
     }
 
@@ -1648,8 +1682,10 @@ fn shutdown_drain_clears_in_flight_guards() {
     // - Items 2-4 guards decremented in drain_pending.
     for (i, counter) in in_flights.iter().enumerate() {
         assert_eq!(
-            counter.load(Ordering::Acquire), 0,
-            "feed {} in_flight should be 0 after shutdown drain", i + 1
+            counter.load(Ordering::Acquire),
+            0,
+            "feed {} in_flight should be 0 after shutdown drain",
+            i + 1
         );
     }
 }
@@ -1683,11 +1719,8 @@ fn mixed_rate_feeds_progress_with_in_flight_cap() {
     );
 
     let handle = coord.handle();
-    let success_counts: Arc<[AtomicU32; 3]> = Arc::new([
-        AtomicU32::new(0),
-        AtomicU32::new(0),
-        AtomicU32::new(0),
-    ]);
+    let success_counts: Arc<[AtomicU32; 3]> =
+        Arc::new([AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)]);
 
     // Feed 1: fast (15 frames), Feed 2: medium (10), Feed 3: slow (5).
     let rates = [(1u64, 15u32), (2, 10), (3, 5)];
@@ -1698,7 +1731,9 @@ fn mixed_rate_feeds_progress_with_in_flight_cap() {
         let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         threads.push(std::thread::spawn(move || {
             for _ in 0..count {
-                if h.submit_and_wait(make_entry(feed_id), Some(&in_flight)).is_ok() {
+                if h.submit_and_wait(make_entry(feed_id), Some(&in_flight))
+                    .is_ok()
+                {
                     sc[idx].fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -1729,8 +1764,13 @@ fn in_flight_cap_of_zero_rejected_by_validate() {
         queue_capacity: None,
         response_timeout: None,
         max_in_flight_per_feed: 0,
-    }.validate();
-    assert!(result.is_err(), "max_in_flight_per_feed=0 should be rejected");
+        startup_timeout: None,
+    }
+    .validate();
+    assert!(
+        result.is_err(),
+        "max_in_flight_per_feed=0 should be rejected"
+    );
 }
 
 #[test]

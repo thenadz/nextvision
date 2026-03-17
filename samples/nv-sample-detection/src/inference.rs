@@ -57,12 +57,13 @@ pub(crate) fn with_inference<R>(
             })?;
 
     let output_value = &outputs[0];
-    let (out_shape, output_data) = output_value
-        .try_extract_tensor::<f32>()
-        .map_err(|e| StageError::ProcessingFailed {
-            stage_id,
-            detail: format!("output tensor extraction failed: {e}"),
-        })?;
+    let (out_shape, output_data) =
+        output_value
+            .try_extract_tensor::<f32>()
+            .map_err(|e| StageError::ProcessingFailed {
+                stage_id,
+                detail: format!("output tensor extraction failed: {e}"),
+            })?;
 
     f(out_shape, output_data)
 }
@@ -73,8 +74,10 @@ pub(crate) fn require_session(
     session: &mut Option<Session>,
     stage_id: StageId,
 ) -> Result<&mut Session, StageError> {
-    session.as_mut().ok_or_else(|| StageError::ProcessingFailed {
-        stage_id,
-        detail: "session not initialised (on_start not called)".into(),
-    })
+    session
+        .as_mut()
+        .ok_or_else(|| StageError::ProcessingFailed {
+            stage_id,
+            detail: "session not initialised (on_start not called)".into(),
+        })
 }

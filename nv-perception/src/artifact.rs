@@ -87,3 +87,140 @@ impl PerceptionArtifacts {
         self.stage_artifacts.merge(output.artifacts);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::detection::Detection;
+    use crate::signal::{DerivedSignal, SignalValue};
+    use crate::stage::StageOutput;
+    use crate::track::Track;
+    use nv_core::id::{DetectionId, TrackId};
+    use nv_core::{BBox, MonotonicTs, TypedMetadata};
+
+    fn make_detection(id: u64) -> Detection {
+        Detection::builder(
+            DetectionId::new(id),
+            0,
+            0.9,
+            BBox::new(0.1, 0.2, 0.3, 0.4),
+        )
+        .build()
+    }
+
+    fn make_track(id: u64) -> Track {
+        use crate::track::{TrackObservation, TrackState};
+        let obs = TrackObservation::new(
+            MonotonicTs::from_nanos(0),
+            BBox::new(0.1, 0.2, 0.3, 0.4),
+            0.9,
+            TrackState::Confirmed,
+            None,
+        );
+        Track::new(TrackId::new(id), 0, TrackState::Confirmed, obs)
+    }
+
+    fn make_signal(name: &'static str) -> DerivedSignal {
+        DerivedSignal {
+            name,
+            value: SignalValue::Scalar(1.0),
+            ts: MonotonicTs::from_nanos(0),
+        }
+    }
+
+    #[test]
+    fn merge_empty_output_is_noop() {
+        let mut arts = PerceptionArtifacts::empty();
+        arts.merge(StageOutput::empty());
+
+        assert!(arts.detections.is_empty());
+        assert!(arts.tracks.is_empty());
+        assert!(!arts.tracks_authoritative);
+        assert!(arts.signals.is_empty());
+        assert!(arts.scene_features.is_empty());
+    }
+
+    #[test]
+    fn merge_detections_replace() {
+        let mut arts = PerceptionArtifacts::empty();
+
+        // First stage sets detections.
+        let dets1 = DetectionSet::from(vec![make_detection(1), make_detection(2)]);
+        arts.merge(StageOutput::with_detections(dets1));
+        assert_eq!(arts.detections.len(), 2);
+
+        // Second stage replaces with a single detection.
+        let dets2 = DetectionSet::from(vec![make_detection(3)]);
+        arts.merge(StageOutput::with_detections(dets2));
+        assert_eq!(arts.detections.len(), 1);
+        assert_eq!(arts.detections.detections[0].id, DetectionId::new(3));
+    }
+
+    #[test]
+    fn merge_none_detections_preserves_existing() {
+        let mut arts = PerceptionArtifacts::empty();
+
+        let dets = DetectionSet::from(vec![make_detection(1)]);
+        arts.merge(StageOutput::with_detections(dets));
+        assert_eq!(arts.detections.len(), 1);
+
+        // Merge output with no detections — previous set preserved.
+        arts.merge(StageOutput::empty());
+        assert_eq!(arts.detections.len(), 1);
+    }
+
+    #[test]
+    fn merge_tracks_replace_and_set_authoritative() {
+        let mut arts = PerceptionArtifacts::empty();
+        assert!(!arts.tracks_authoritative);
+
+        let tracks = vec![make_track(1), make_track(2)];
+        arts.merge(StageOutput::with_tracks(tracks));
+        assert_eq!(arts.tracks.len(), 2);
+        assert!(arts.tracks_authoritative);
+
+        // Replace with fewer tracks.
+        let tracks2 = vec![make_track(3)];
+        arts.merge(StageOutput::with_tracks(tracks2));
+        assert_eq!(arts.tracks.len(), 1);
+        assert_eq!(arts.tracks[0].id, TrackId::new(3));
+    }
+
+    #[test]
+    fn merge_signals_append() {
+        let mut arts = PerceptionArtifacts::empty();
+
+        arts.merge(StageOutput::with_signal(make_signal("sig_a")));
+        assert_eq!(arts.signals.len(), 1);
+
+        arts.merge(StageOutput::with_signal(make_signal("sig_b")));
+        assert_eq!(arts.signals.len(), 2);
+        assert_eq!(arts.signals[0].name, "sig_a");
+        assert_eq!(arts.signals[1].name, "sig_b");
+    }
+
+    #[test]
+    fn merge_stage_artifacts_last_writer_wins() {
+        #[derive(Clone, Debug, PartialEq)]
+        struct MyData(u32);
+
+        let mut arts = PerceptionArtifacts::empty();
+
+        let mut meta1 = TypedMetadata::new();
+        meta1.insert(MyData(1));
+        arts.merge(StageOutput {
+            artifacts: meta1,
+            ..StageOutput::default()
+        });
+        assert_eq!(arts.stage_artifacts.get::<MyData>(), Some(&MyData(1)));
+
+        // Second merge overwrites.
+        let mut meta2 = TypedMetadata::new();
+        meta2.insert(MyData(42));
+        arts.merge(StageOutput {
+            artifacts: meta2,
+            ..StageOutput::default()
+        });
+        assert_eq!(arts.stage_artifacts.get::<MyData>(), Some(&MyData(42)));
+    }
+}

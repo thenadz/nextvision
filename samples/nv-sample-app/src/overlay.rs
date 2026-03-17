@@ -9,19 +9,86 @@ use nv_perception::Track;
 
 /// COCO class names (80 classes) indexed by `class_id`.
 const COCO_NAMES: [&str; 80] = [
-    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
-    "truck", "boat", "traffic light", "fire hydrant", "stop sign",
-    "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep",
-    "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
-    "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard",
-    "sports ball", "kite", "baseball bat", "baseball glove", "skateboard",
-    "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork",
-    "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
-    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
-    "couch", "potted plant", "bed", "dining table", "toilet", "tv",
-    "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave",
-    "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
-    "scissors", "teddy bear", "hair drier", "toothbrush",
+    "person",
+    "bicycle",
+    "car",
+    "motorcycle",
+    "airplane",
+    "bus",
+    "train",
+    "truck",
+    "boat",
+    "traffic light",
+    "fire hydrant",
+    "stop sign",
+    "parking meter",
+    "bench",
+    "bird",
+    "cat",
+    "dog",
+    "horse",
+    "sheep",
+    "cow",
+    "elephant",
+    "bear",
+    "zebra",
+    "giraffe",
+    "backpack",
+    "umbrella",
+    "handbag",
+    "tie",
+    "suitcase",
+    "frisbee",
+    "skis",
+    "snowboard",
+    "sports ball",
+    "kite",
+    "baseball bat",
+    "baseball glove",
+    "skateboard",
+    "surfboard",
+    "tennis racket",
+    "bottle",
+    "wine glass",
+    "cup",
+    "fork",
+    "knife",
+    "spoon",
+    "bowl",
+    "banana",
+    "apple",
+    "sandwich",
+    "orange",
+    "broccoli",
+    "carrot",
+    "hot dog",
+    "pizza",
+    "donut",
+    "cake",
+    "chair",
+    "couch",
+    "potted plant",
+    "bed",
+    "dining table",
+    "toilet",
+    "tv",
+    "laptop",
+    "mouse",
+    "remote",
+    "keyboard",
+    "cell phone",
+    "microwave",
+    "oven",
+    "toaster",
+    "sink",
+    "refrigerator",
+    "book",
+    "clock",
+    "vase",
+    "scissors",
+    "teddy bear",
+    "hair drier",
+    "toothbrush",
 ];
 
 /// Look up the COCO class name for the given `class_id`.
@@ -32,16 +99,16 @@ pub fn coco_class_name(class_id: u32) -> &'static str {
 
 /// Track-ID → colour mapping. Cycles through distinct colours.
 const TRACK_COLOURS: &[[u8; 3]] = &[
-    [255, 0, 0],     // red
-    [0, 255, 0],     // green
-    [0, 128, 255],   // blue
-    [255, 255, 0],   // yellow
-    [255, 0, 255],   // magenta
-    [0, 255, 255],   // cyan
-    [255, 128, 0],   // orange
-    [128, 255, 0],   // chartreuse
-    [0, 255, 128],   // spring green
-    [128, 0, 255],   // violet
+    [255, 0, 0],   // red
+    [0, 255, 0],   // green
+    [0, 128, 255], // blue
+    [255, 255, 0], // yellow
+    [255, 0, 255], // magenta
+    [0, 255, 255], // cyan
+    [255, 128, 0], // orange
+    [128, 255, 0], // chartreuse
+    [0, 255, 128], // spring green
+    [128, 0, 255], // violet
 ];
 
 fn colour_for_track(track_id: u64) -> [u8; 3] {

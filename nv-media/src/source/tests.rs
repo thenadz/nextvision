@@ -1,7 +1,7 @@
 //! Tests for [`MediaSource`] lifecycle, event handling, and health emission.
 
 use super::*;
-use crate::decode::{DecodePreference, HwFailureTracker, SelectedDecoderInfo};
+use crate::decode::{DecodePreference, DecodePreferenceExt, HwFailureTracker, SelectedDecoderInfo};
 use crate::event::MediaEvent;
 use crate::factory::GstMediaIngressFactory;
 use crate::ingress::{IngressOptions, MediaIngress, MediaIngressFactory};
@@ -351,7 +351,12 @@ fn health_emits_connected_on_stream_started() {
     src.handle_event(MediaEvent::StreamStarted);
     let events = health.drain();
     // Phase 2A: StreamStarted now emits DecodeDecision + SourceConnected.
-    assert_eq!(events.len(), 2, "expected DecodeDecision + SourceConnected; got: {:?}", events);
+    assert_eq!(
+        events.len(),
+        2,
+        "expected DecodeDecision + SourceConnected; got: {:?}",
+        events
+    );
     assert!(matches!(events[0], HealthEvent::DecodeDecision { .. }));
     assert!(matches!(events[1], HealthEvent::SourceConnected { .. }));
 }
@@ -419,7 +424,12 @@ fn health_emits_no_feed_stopped_on_file_eos() {
     src.handle_event(MediaEvent::Eos);
     let events = health.drain();
     // Source no longer emits FeedStopped — worker is the canonical owner.
-    assert_eq!(events.len(), 0, "source must not emit FeedStopped; events: {:?}", events);
+    assert_eq!(
+        events.len(),
+        0,
+        "source must not emit FeedStopped; events: {:?}",
+        events
+    );
     assert_eq!(src.source_state(), SourceState::Stopped);
 }
 
@@ -574,7 +584,12 @@ fn factory_default_is_equivalent_to_new() {
 /// start() on a stopped source returns Err and stays Stopped.
 #[test]
 fn start_rejects_stopped_source() {
-    let mut src = MediaSource::new(FeedId::new(1), test_spec(), test_reconnect(), DecodePreference::Auto);
+    let mut src = MediaSource::new(
+        FeedId::new(1),
+        test_spec(),
+        test_reconnect(),
+        DecodePreference::Auto,
+    );
     src.state = SourceState::Stopped;
     let (sink, _, _, _) = CountingSink::new();
     let result = src.start(Box::new(sink));
@@ -588,7 +603,12 @@ fn start_rejects_stopped_source() {
 #[cfg(not(feature = "gst-backend"))]
 #[test]
 fn start_initial_connection_failure_stays_idle() {
-    let mut src = MediaSource::new(FeedId::new(1), test_spec(), test_reconnect(), DecodePreference::Auto);
+    let mut src = MediaSource::new(
+        FeedId::new(1),
+        test_spec(),
+        test_reconnect(),
+        DecodePreference::Auto,
+    );
     let (sink, _, _, _) = CountingSink::new();
     let result = src.start(Box::new(sink));
     assert!(
@@ -610,7 +630,12 @@ fn start_initial_connection_failure_stays_idle() {
 #[test]
 fn sink_receives_typed_error_variant() {
     let capturing = CapturingSink::new();
-    let mut src = MediaSource::new(FeedId::new(1), test_spec(), test_reconnect(), DecodePreference::Auto);
+    let mut src = MediaSource::new(
+        FeedId::new(1),
+        test_spec(),
+        test_reconnect(),
+        DecodePreference::Auto,
+    );
     src.sink = Some(capturing.clone() as Arc<dyn FrameSink>);
     src.create_session_stub();
     src.state = SourceState::Running;
@@ -643,7 +668,12 @@ fn sink_receives_typed_error_variant() {
 #[test]
 fn sink_receives_timeout_variant() {
     let capturing = CapturingSink::new();
-    let mut src = MediaSource::new(FeedId::new(1), test_spec(), test_reconnect(), DecodePreference::Auto);
+    let mut src = MediaSource::new(
+        FeedId::new(1),
+        test_spec(),
+        test_reconnect(),
+        DecodePreference::Auto,
+    );
     src.sink = Some(capturing.clone() as Arc<dyn FrameSink>);
     src.create_session_stub();
     src.state = SourceState::Running;
@@ -673,11 +703,15 @@ fn no_duplicate_source_connected_emission() {
     src.handle_event(MediaEvent::StreamStarted);
     let events = health.drain();
     assert!(
-        events.iter().any(|e| matches!(e, HealthEvent::DecodeDecision { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, HealthEvent::DecodeDecision { .. })),
         "first StreamStarted should emit DecodeDecision",
     );
     assert!(
-        events.iter().any(|e| matches!(e, HealthEvent::SourceConnected { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, HealthEvent::SourceConnected { .. })),
         "first StreamStarted should emit SourceConnected",
     );
     assert!(src.decoder_verified(), "decoder should be verified");
@@ -811,8 +845,7 @@ fn stream_started_clears_liveness() {
 /// When liveness expires, tick() forces a reconnect cycle.
 #[test]
 fn liveness_expired_forces_reconnect() {
-    let (mut src, _, errors, _) =
-        started_source(test_spec(), limited_reconnect(5));
+    let (mut src, _, errors, _) = started_source(test_spec(), limited_reconnect(5));
     // Set liveness deadline in the past so it fires immediately.
     src.set_liveness_deadline(Some(Instant::now() - Duration::from_millis(1)));
     assert_eq!(src.source_state(), SourceState::Running);
@@ -889,7 +922,11 @@ fn attempt_counter_accumulates_without_stream_started() {
 
     // StreamStarted resets the counter.
     src.handle_event(MediaEvent::StreamStarted);
-    assert_eq!(src.current_attempt(), 0, "StreamStarted should reset attempts");
+    assert_eq!(
+        src.current_attempt(),
+        0,
+        "StreamStarted should reset attempts"
+    );
 }
 
 // ===========================================================================
@@ -941,7 +978,10 @@ fn require_hardware_fails_fast_without_gst_backend() {
     );
     let (sink, _, _, _) = CountingSink::new();
     let result = src.start(Box::new(sink));
-    assert!(result.is_err(), "RequireHardware must fail without gst-backend");
+    assert!(
+        result.is_err(),
+        "RequireHardware must fail without gst-backend"
+    );
     match result.unwrap_err() {
         MediaError::Unsupported { detail } => {
             assert!(
@@ -991,8 +1031,8 @@ fn auto_preference_preserves_existing_behavior() {
 #[cfg(feature = "gst-backend")]
 #[test]
 fn force_hardware_pipeline_builds_successfully() {
-    use crate::pipeline::PipelineBuilder;
     use crate::decode::DecoderSelection;
+    use crate::pipeline::PipelineBuilder;
     use nv_core::config::SourceSpec;
 
     // Use a fake file path — we only need to verify element creation
@@ -1020,8 +1060,8 @@ fn force_hardware_pipeline_builds_successfully() {
 #[cfg(feature = "gst-backend")]
 #[test]
 fn force_software_pipeline_builds_successfully() {
-    use crate::pipeline::PipelineBuilder;
     use crate::decode::DecoderSelection;
+    use crate::pipeline::PipelineBuilder;
     use nv_core::config::SourceSpec;
 
     let spec = SourceSpec::File {
@@ -1056,12 +1096,16 @@ fn stream_started_emits_decode_decision() {
 
     let events = health.drain();
     assert!(
-        events.iter().any(|e| matches!(e, HealthEvent::DecodeDecision { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, HealthEvent::DecodeDecision { .. })),
         "StreamStarted should emit DecodeDecision; got: {:?}",
         events,
     );
     assert!(
-        events.iter().any(|e| matches!(e, HealthEvent::SourceConnected { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, HealthEvent::SourceConnected { .. })),
         "SourceConnected should still be emitted after DecodeDecision",
     );
 }
@@ -1106,7 +1150,9 @@ fn decode_decision_hardware_when_hw_decoder_selected() {
 
     let events = health.drain();
     let decision = events.iter().find_map(|e| match e {
-        HealthEvent::DecodeDecision { outcome, detail, .. } => Some((outcome, detail)),
+        HealthEvent::DecodeDecision {
+            outcome, detail, ..
+        } => Some((outcome, detail)),
         _ => None,
     });
     let (outcome, detail) = decision.expect("should emit DecodeDecision");
@@ -1178,7 +1224,9 @@ fn require_hardware_rejects_software_decoder_post_selection() {
     // Health should show SourceDisconnected (the error) + SourceReconnecting.
     let events = health.drain();
     assert!(
-        events.iter().any(|e| matches!(e, HealthEvent::SourceDisconnected { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, HealthEvent::SourceDisconnected { .. })),
         "should emit SourceDisconnected on post-selection failure; events: {:?}",
         events,
     );
@@ -1207,10 +1255,18 @@ fn require_hardware_accepts_hardware_decoder() {
     assert_eq!(src.source_state(), SourceState::Running);
 
     let events = health.drain();
-    assert!(events.iter().any(|e| matches!(e, HealthEvent::DecodeDecision {
-        outcome: DecodeOutcome::Hardware, ..
-    })));
-    assert!(events.iter().any(|e| matches!(e, HealthEvent::SourceConnected { .. })));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        HealthEvent::DecodeDecision {
+            outcome: DecodeOutcome::Hardware,
+            ..
+        }
+    )));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HealthEvent::SourceConnected { .. }))
+    );
 }
 
 // ===========================================================================
@@ -1242,7 +1298,9 @@ fn prefer_hardware_errors_record_hw_failures() {
     src.set_liveness_deadline(Some(Instant::now() + Duration::from_secs(10)));
 
     src.handle_event(MediaEvent::Error {
-        error: MediaError::DecodeFailed { detail: "fail 1".into() },
+        error: MediaError::DecodeFailed {
+            detail: "fail 1".into(),
+        },
         debug: None,
     });
     assert_eq!(src.hw_failure_tracker().consecutive_failures(), 1);
@@ -1261,7 +1319,9 @@ fn auto_preference_does_not_record_hw_failures() {
     src.set_liveness_deadline(Some(Instant::now() + Duration::from_secs(10)));
 
     src.handle_event(MediaEvent::Error {
-        error: MediaError::DecodeFailed { detail: "fail".into() },
+        error: MediaError::DecodeFailed {
+            detail: "fail".into(),
+        },
         debug: None,
     });
     assert_eq!(
@@ -1289,7 +1349,9 @@ fn three_failures_activate_fallback() {
         // Arm liveness so the error path triggers hw recording.
         src.set_liveness_deadline(Some(Instant::now() + Duration::from_secs(10)));
         src.handle_event(MediaEvent::Error {
-            error: MediaError::DecodeFailed { detail: "hw fail".into() },
+            error: MediaError::DecodeFailed {
+                detail: "hw fail".into(),
+            },
             debug: None,
         });
     }
@@ -1358,7 +1420,12 @@ fn stream_started_resets_hw_failure_tracker() {
 #[test]
 fn start_does_not_emit_source_connected() {
     let health = RecordingHealthSink::new();
-    let mut src = MediaSource::new(FeedId::new(1), test_spec(), test_reconnect(), DecodePreference::Auto);
+    let mut src = MediaSource::new(
+        FeedId::new(1),
+        test_spec(),
+        test_reconnect(),
+        DecodePreference::Auto,
+    );
     src.set_health_sink(health.clone() as Arc<dyn HealthSink>);
     let (sink, _, _, _) = CountingSink::new();
     src.sink = Some(Arc::new(sink));
@@ -1367,7 +1434,9 @@ fn start_does_not_emit_source_connected() {
 
     let events = health.drain();
     assert!(
-        !events.iter().any(|e| matches!(e, HealthEvent::SourceConnected { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, HealthEvent::SourceConnected { .. })),
         "start path must NOT emit SourceConnected; got: {:?}",
         events,
     );
@@ -1385,15 +1454,22 @@ fn initial_start_stream_started_runs_verification() {
 
     src.handle_event(MediaEvent::StreamStarted);
 
-    assert!(src.decoder_verified(), "should be verified after StreamStarted");
+    assert!(
+        src.decoder_verified(),
+        "should be verified after StreamStarted"
+    );
     let events = health.drain();
     assert!(
-        events.iter().any(|e| matches!(e, HealthEvent::DecodeDecision { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, HealthEvent::DecodeDecision { .. })),
         "initial start StreamStarted must emit DecodeDecision; got: {:?}",
         events,
     );
     assert!(
-        events.iter().any(|e| matches!(e, HealthEvent::SourceConnected { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, HealthEvent::SourceConnected { .. })),
         "initial start StreamStarted must emit SourceConnected; got: {:?}",
         events,
     );
@@ -1407,7 +1483,9 @@ fn reconnect_path_runs_verification() {
 
     // Simulate error → reconnect → session stub recreated → StreamStarted.
     src.handle_event(MediaEvent::Error {
-        error: MediaError::DecodeFailed { detail: "fail".into() },
+        error: MediaError::DecodeFailed {
+            detail: "fail".into(),
+        },
         debug: None,
     });
     health.drain();
@@ -1421,7 +1499,9 @@ fn reconnect_path_runs_verification() {
     assert!(src.decoder_verified());
     let events = health.drain();
     assert!(
-        events.iter().any(|e| matches!(e, HealthEvent::DecodeDecision { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, HealthEvent::DecodeDecision { .. })),
         "reconnect StreamStarted must emit DecodeDecision; got: {:?}",
         events,
     );
@@ -1447,11 +1527,13 @@ fn decoder_verified_resets_on_new_session() {
     assert!(src.decoder_verified());
     let events = health.drain();
     // Should have events from both StreamStarted calls.
-    let decode_decisions: Vec<_> = events.iter()
+    let decode_decisions: Vec<_> = events
+        .iter()
         .filter(|e| matches!(e, HealthEvent::DecodeDecision { .. }))
         .collect();
     assert_eq!(
-        decode_decisions.len(), 2,
+        decode_decisions.len(),
+        2,
         "should emit DecodeDecision for each session; got: {:?}",
         events,
     );
@@ -1477,7 +1559,10 @@ fn require_hardware_rejects_unknown_decoder_post_selection() {
 
     let delay = src.handle_event(MediaEvent::StreamStarted);
 
-    assert!(delay.is_some(), "should trigger reconnect on Unknown decoder");
+    assert!(
+        delay.is_some(),
+        "should trigger reconnect on Unknown decoder"
+    );
     assert_eq!(
         src.source_state(),
         SourceState::Reconnecting,
@@ -1489,7 +1574,9 @@ fn require_hardware_rejects_unknown_decoder_post_selection() {
     );
     let events = health.drain();
     assert!(
-        events.iter().any(|e| matches!(e, HealthEvent::SourceDisconnected { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, HealthEvent::SourceDisconnected { .. })),
         "should emit SourceDisconnected on Unknown decoder failure; events: {:?}",
         events,
     );
@@ -1519,13 +1606,18 @@ fn decode_decision_includes_preference_and_fallback() {
             fallback_active,
             fallback_reason,
             ..
-        } => Some((preference.clone(), *fallback_active, fallback_reason.clone())),
+        } => Some((
+            *preference,
+            *fallback_active,
+            fallback_reason.clone(),
+        )),
         _ => None,
     });
     let (pref, fb_active, fb_reason) = decision.expect("should emit DecodeDecision");
-    assert!(
-        pref.contains("PreferHardware"),
-        "preference should be PreferHardware; got: {}",
+    assert_eq!(
+        pref,
+        DecodePreference::PreferHardware,
+        "preference should be PreferHardware; got: {:?}",
         pref,
     );
     assert!(!fb_active, "no fallback should be active on first attempt");
@@ -1547,7 +1639,10 @@ fn adaptive_fallback_changes_effective_selection() {
     let result = tracker_fresh.adjust_selection(DecodePreference::PreferHardware);
     assert!(result.is_none(), "fresh tracker should not adjust");
     assert!(
-        matches!(DecodePreference::PreferHardware.to_selection(), DecoderSelection::ForceHardware),
+        matches!(
+            DecodePreference::PreferHardware.to_selection(),
+            DecoderSelection::ForceHardware
+        ),
         "PreferHardware base mapping should be ForceHardware",
     );
 
@@ -1615,17 +1710,21 @@ fn require_hardware_verification_failure_preserves_reconnect_attempts() {
 /// the reconnect attempt counter again.
 #[test]
 fn duplicate_stream_started_does_not_reset_attempts() {
-    let (mut src, _, _, _, _health) = started_source_with_preference(
-        test_spec(),
-        limited_reconnect(5),
-        DecodePreference::Auto,
-    );
+    let (mut src, _, _, _, _health) =
+        started_source_with_preference(test_spec(), limited_reconnect(5), DecodePreference::Auto);
     src.state = SourceState::Reconnecting;
 
     // First StreamStarted — verifies and resets attempts.
     src.handle_event(MediaEvent::StreamStarted);
-    assert!(src.decoder_verified, "should be verified after first StreamStarted");
-    assert_eq!(src.reconnect.current_attempt(), 0, "should reset after successful verification");
+    assert!(
+        src.decoder_verified,
+        "should be verified after first StreamStarted"
+    );
+    assert_eq!(
+        src.reconnect.current_attempt(),
+        0,
+        "should reset after successful verification"
+    );
 
     // Simulate some reconnect attempts accumulating after the initial connect.
     src.reconnect.record_attempt();

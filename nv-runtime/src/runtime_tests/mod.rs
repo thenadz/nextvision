@@ -2,10 +2,10 @@
 //! output subscription, backpressure, pause/resume, provenance, and
 //! sentinel-based lag detection.
 
+mod config;
+mod diagnostics;
+mod feed;
 mod harness;
 mod lifecycle;
 mod output;
-mod feed;
 mod sink;
-mod config;
-mod diagnostics;

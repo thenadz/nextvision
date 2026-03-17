@@ -11,8 +11,8 @@ use std::time::Instant;
 use eframe::egui;
 use nv_core::id::FeedId;
 use nv_runtime::{
-    BatchHandle, BatchMetrics, FeedHandle, OutputEnvelope, OutputSink, QueueTelemetry,
-    RuntimeHandle,
+    BatchHandle, BatchMetrics, FeedHandle, OutputEnvelope, OutputSink,
+    QueueTelemetry, RuntimeHandle,
 };
 use tracing::info;
 
@@ -323,7 +323,8 @@ impl eframe::App for NvApp {
             .iter()
             .map(|h| (h.id(), h.decode_status()))
             .collect();
-        let batch_metrics: Option<BatchMetrics> = self.batch_handle.as_ref().map(|b| b.metrics());
+        let batch_metrics: Option<BatchMetrics> =
+            self.batch_handle.as_ref().map(|b| b.metrics());
         let runtime_uptime = self.runtime_handle.uptime();
 
         // ------- Telemetry top panel -------
@@ -570,12 +571,23 @@ impl eframe::App for NvApp {
 }
 
 impl NvApp {
-    fn draw_feed_panel(&mut self, ui: &mut egui::Ui, feed_id: FeedId, stale_secs: f32) {
+    fn draw_feed_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        feed_id: FeedId,
+        stale_secs: f32,
+    ) {
         let available = ui.available_size();
         let snapshot = self.last_frames.get(&feed_id);
 
         if let Some(snap) = snapshot {
-            let frame = snap.output.frame.as_ref().expect("snapshot has frame");
+            let Some(frame) = snap.output.frame.as_ref() else {
+                // No pixel data (FrameInclusion::Never or not yet available).
+                ui.centered_and_justified(|ui| {
+                    ui.label("No frame data");
+                });
+                return;
+            };
             let rgb = match frame.require_host_data() {
                 Ok(cow) => cow,
                 Err(_) => return,
@@ -586,16 +598,21 @@ impl NvApp {
 
             // Upload / update texture.
             let rgba = rgb_to_rgba(&rgb, width, height, stride);
-            let image =
-                egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [width as usize, height as usize],
+                &rgba,
+            );
 
-            let tex = self.textures.entry(feed_id).or_insert_with(|| {
-                ui.ctx().load_texture(
-                    format!("feed-{}", feed_id),
-                    image.clone(),
-                    egui::TextureOptions::LINEAR,
-                )
-            });
+            let tex = self
+                .textures
+                .entry(feed_id)
+                .or_insert_with(|| {
+                    ui.ctx().load_texture(
+                        format!("feed-{}", feed_id),
+                        image.clone(),
+                        egui::TextureOptions::LINEAR,
+                    )
+                });
             tex.set(image, egui::TextureOptions::LINEAR);
 
             // Compute scaled size maintaining aspect ratio.
@@ -634,11 +651,7 @@ impl NvApp {
                 );
 
                 // Detection type + track ID label.
-                let label = format!(
-                    "{} (T{})",
-                    crate::overlay::coco_class_name(t.class_id),
-                    t.id.as_u64()
-                );
+                let label = format!("{} (T{})", crate::overlay::coco_class_name(t.class_id), t.id.as_u64());
                 ui.painter().text(
                     egui::pos2(x0, y0 - 2.0),
                     egui::Align2::LEFT_BOTTOM,
@@ -690,8 +703,10 @@ impl NvApp {
                 egui::FontId::proportional(12.0),
                 egui::Color32::WHITE,
             );
-            let label_rect =
-                egui::Rect::from_min_size(label_pos, galley.size() + egui::vec2(6.0, 2.0));
+            let label_rect = egui::Rect::from_min_size(
+                label_pos,
+                galley.size() + egui::vec2(6.0, 2.0),
+            );
             ui.painter().rect_filled(
                 label_rect,
                 3.0,
@@ -706,9 +721,9 @@ impl NvApp {
             );
         } else {
             // No frame ever received — show placeholder.
-            let (rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
-            ui.painter()
-                .rect_filled(rect, 0.0, egui::Color32::from_gray(30));
+            let (rect, _) =
+                ui.allocate_exact_size(available, egui::Sense::hover());
+            ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(30));
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -793,12 +808,7 @@ pub fn run_ui(
         "NextVision",
         options,
         Box::new(move |_cc| {
-            Ok(Box::new(NvApp::new(
-                state,
-                feed_handles,
-                batch_handle,
-                runtime_handle,
-            )))
+            Ok(Box::new(NvApp::new(state, feed_handles, batch_handle, runtime_handle)))
         }),
     )
 }

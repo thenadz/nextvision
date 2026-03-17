@@ -26,7 +26,7 @@
 //! - **[`RuntimeBuilder`]** — builder for configuring and constructing a `Runtime`.
 //! - **[`RuntimeHandle`]** — cloneable control handle (add/remove feeds, subscribe, shutdown).
 //! - **[`FeedConfig`]** / **[`FeedConfigBuilder`]** — per-feed configuration.
-//! - **[`FeedHandle`]** — handle to a running feed (health, metrics, pause/resume).
+//! - **[`FeedHandle`]** — handle to a running feed (metrics, diagnostics, queue telemetry, pause/resume).
 //! - **[`QueueTelemetry`]** — source/sink queue depth and capacity snapshot.
 //! - **[`OutputEnvelope`]** — structured, provenanced output for each processed frame.
 //! - **[`OutputSink`]** — user-implementable trait for receiving outputs.
@@ -117,6 +117,7 @@
 //!         queue_capacity: None,
 //!         response_timeout: None,
 //!         max_in_flight_per_feed: 1,
+//!         startup_timeout: None,
 //!     },
 //! )?;
 //!
@@ -142,6 +143,7 @@ pub mod batch;
 pub mod diagnostics;
 pub(crate) mod executor;
 pub mod feed;
+pub mod feed_handle;
 pub mod output;
 pub mod pipeline;
 pub mod provenance;
@@ -154,7 +156,8 @@ pub(crate) mod worker;
 pub use backpressure::BackpressurePolicy;
 pub use batch::{BatchConfig, BatchHandle, BatchMetrics};
 pub use diagnostics::{BatchDiagnostics, FeedDiagnostics, OutputLagStatus, RuntimeDiagnostics, ViewDiagnostics, ViewStatus};
-pub use feed::{DecodeStatus, FeedConfig, FeedConfigBuilder, FeedHandle, QueueTelemetry};
+pub use feed::{FeedConfig, FeedConfigBuilder};
+pub use feed_handle::{DecodeStatus, FeedHandle, QueueTelemetry};
 pub use output::{AdmissionSummary, FrameInclusion, OutputEnvelope, OutputSink, SharedOutput};
 pub use pipeline::{FeedPipeline, FeedPipelineBuilder, PipelineError};
 pub use provenance::{

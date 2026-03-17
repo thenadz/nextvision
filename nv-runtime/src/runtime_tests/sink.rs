@@ -1,5 +1,5 @@
-//! Sink-related tests: slow sink, blocking sink shutdown, and
-//! sink backpressure throttling.
+//! Sink-related tests: slow sink, blocking sink shutdown, sink timeout
+//! health events, and sink backpressure throttling.
 
 use super::super::*;
 use std::sync::Arc;
@@ -117,6 +117,64 @@ fn bounded_shutdown_when_sink_blocks() {
 }
 
 // ---------------------------------------------------------------------------
+// SinkTimeout health event
+// ---------------------------------------------------------------------------
+
+/// Verify `HealthEvent::SinkTimeout` (not `SinkPanic`) is emitted when
+/// the sink thread does not finish within the shutdown timeout.
+#[test]
+fn blocking_sink_emits_sink_timeout_event() {
+    let count = Arc::new(AtomicU64::new(0));
+    let sink = BlockingSink {
+        count: Arc::clone(&count),
+    };
+
+    let runtime = Runtime::builder()
+        .ingress_factory(Box::new(MockFactory::new(20)))
+        .health_capacity(256)
+        .build()
+        .unwrap();
+
+    let mut health_rx = runtime.health_subscribe();
+
+    let _handle = runtime
+        .add_feed(build_config(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+        ))
+        .unwrap();
+
+    // Let frames flow so the sink thread picks up at least one and blocks.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    runtime.shutdown().unwrap();
+
+    // Drain the health channel and look for SinkTimeout.
+    let mut saw_timeout = false;
+    let mut saw_panic = false;
+    loop {
+        match health_rx.try_recv() {
+            Ok(HealthEvent::SinkTimeout { .. }) => saw_timeout = true,
+            Ok(HealthEvent::SinkPanic { .. }) => saw_panic = true,
+            Ok(_) => {}
+            Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                tracing::warn!("health subscriber lagged by {n}");
+            }
+            Err(_) => break,
+        }
+    }
+
+    assert!(
+        saw_timeout,
+        "should emit SinkTimeout when the sink thread is blocked during shutdown"
+    );
+    assert!(
+        !saw_panic,
+        "a blocked (not panicked) sink should emit SinkTimeout, not SinkPanic"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // SinkBackpressure throttling
 // ---------------------------------------------------------------------------
 
@@ -173,7 +231,9 @@ fn sink_backpressure_throttling() {
     let mut total_dropped_reported = 0u64;
     loop {
         match health_rx.try_recv() {
-            Ok(HealthEvent::SinkBackpressure { outputs_dropped, .. }) => {
+            Ok(HealthEvent::SinkBackpressure {
+                outputs_dropped, ..
+            }) => {
                 bp_events += 1;
                 total_dropped_reported += outputs_dropped;
             }
@@ -183,7 +243,10 @@ fn sink_backpressure_throttling() {
         }
     }
 
-    assert!(bp_events > 0, "should see at least one SinkBackpressure event");
+    assert!(
+        bp_events > 0,
+        "should see at least one SinkBackpressure event"
+    );
     assert!(
         bp_events < frame_count / 2,
         "throttling should coalesce SinkBackpressure events: got {bp_events} for {frame_count} frames"

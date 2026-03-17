@@ -55,7 +55,10 @@ fn terminal_stop_emits_exactly_one_feed_stopped() {
     let mut stop_reasons = Vec::new();
     loop {
         match health_rx.try_recv() {
-            Ok(HealthEvent::FeedStopped { feed_id: fid, ref reason }) if fid == feed_id => {
+            Ok(HealthEvent::FeedStopped {
+                feed_id: fid,
+                ref reason,
+            }) if fid == feed_id => {
                 feed_stopped_count += 1;
                 stop_reasons.push(format!("{reason:?}"));
             }
@@ -90,7 +93,10 @@ fn runtime_uptime_monotonic() {
 
     let handle = runtime.handle();
     let t3 = handle.uptime();
-    assert!(t3 >= t2, "handle uptime should be >= previous runtime uptime");
+    assert!(
+        t3 >= t2,
+        "handle uptime should be >= previous runtime uptime"
+    );
 
     runtime.shutdown().unwrap();
 }
@@ -147,8 +153,14 @@ fn queue_telemetry_reports_capacity() {
     // Give the feed time to start.
     std::thread::sleep(std::time::Duration::from_millis(50));
     let qt = feed.queue_telemetry();
-    assert_eq!(qt.source_capacity, 8, "source capacity should match configured backpressure");
-    assert_eq!(qt.sink_capacity, 12, "sink capacity should match configured value");
+    assert_eq!(
+        qt.source_capacity, 8,
+        "source capacity should match configured backpressure"
+    );
+    assert_eq!(
+        qt.sink_capacity, 12,
+        "sink capacity should match configured value"
+    );
     assert!(qt.source_depth <= qt.source_capacity);
     assert!(qt.sink_depth <= qt.sink_capacity);
 
@@ -170,7 +182,10 @@ fn queue_telemetry_after_shutdown_is_zero() {
     wait_for_stop(&feed, std::time::Duration::from_secs(5));
 
     let qt = feed.queue_telemetry();
-    assert_eq!(qt.source_depth, 0, "source depth should be 0 after feed stopped");
+    assert_eq!(
+        qt.source_depth, 0,
+        "source depth should be 0 after feed stopped"
+    );
 
     runtime.shutdown().unwrap();
 }
@@ -190,23 +205,31 @@ impl MediaIngress for TickHintNoFrameIngress {
     fn start(&mut self, _sink: Box<dyn FrameSink>) -> Result<(), nv_core::error::MediaError> {
         Ok(())
     }
-    fn stop(&mut self) -> Result<(), nv_core::error::MediaError> { Ok(()) }
-    fn pause(&mut self) -> Result<(), nv_core::error::MediaError> { Ok(()) }
-    fn resume(&mut self) -> Result<(), nv_core::error::MediaError> { Ok(()) }
+    fn stop(&mut self) -> Result<(), nv_core::error::MediaError> {
+        Ok(())
+    }
+    fn pause(&mut self) -> Result<(), nv_core::error::MediaError> {
+        Ok(())
+    }
+    fn resume(&mut self) -> Result<(), nv_core::error::MediaError> {
+        Ok(())
+    }
 
     fn tick(&mut self) -> nv_media::ingress::TickOutcome {
         let n = self.ticks.fetch_add(1, Ordering::Relaxed);
         if n >= 3 {
             nv_media::ingress::TickOutcome::stopped()
         } else {
-            nv_media::ingress::TickOutcome::reconnecting(
-                std::time::Duration::from_millis(10),
-            )
+            nv_media::ingress::TickOutcome::reconnecting(std::time::Duration::from_millis(10))
         }
     }
 
-    fn source_spec(&self) -> &SourceSpec { &self.spec }
-    fn feed_id(&self) -> FeedId { self.feed_id }
+    fn source_spec(&self) -> &SourceSpec {
+        &self.spec
+    }
+    fn feed_id(&self) -> FeedId {
+        self.feed_id
+    }
 }
 
 struct TickHintNoFrameFactory;
@@ -419,6 +442,7 @@ fn runtime_diagnostics_includes_batch_coordinators() {
                 queue_capacity: None,
                 response_timeout: None,
                 max_in_flight_per_feed: 1,
+            startup_timeout: None,
             },
         )
         .unwrap();
@@ -456,10 +480,7 @@ fn runtime_diagnostics_includes_batch_coordinators() {
         .iter()
         .find(|f| f.feed_id == feed_handle.id())
         .expect("feed should be in diagnostics");
-    assert_eq!(
-        feed_diag.batch_processor_id,
-        Some(StageId("test_batch"))
-    );
+    assert_eq!(feed_diag.batch_processor_id, Some(StageId("test_batch")));
 
     runtime.shutdown().unwrap();
 }
@@ -489,9 +510,12 @@ fn create_batch_rejects_duplicate_processor_id() {
         queue_capacity: None,
         response_timeout: None,
         max_in_flight_per_feed: 1,
+            startup_timeout: None,
     };
 
-    let _h1 = runtime.create_batch(Box::new(DupProc), cfg.clone()).unwrap();
+    let _h1 = runtime
+        .create_batch(Box::new(DupProc), cfg.clone())
+        .unwrap();
     let result = runtime.create_batch(Box::new(DupProc), cfg);
     let err = result.err().expect("second create_batch should fail");
     match &err {
@@ -530,6 +554,7 @@ fn create_batch_concurrent_duplicate_id_exactly_one_wins() {
         queue_capacity: None,
         response_timeout: None,
         max_in_flight_per_feed: 1,
+            startup_timeout: None,
     };
 
     const THREADS: usize = 8;
@@ -549,17 +574,24 @@ fn create_batch_concurrent_duplicate_id_exactly_one_wins() {
 
     let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
     let ok_count = results.iter().filter(|r| r.is_ok()).count();
-    let dup_count = results.iter().filter(|r| {
-        matches!(
-            r,
-            Err(NvError::Config(
-                nv_core::error::ConfigError::DuplicateBatchProcessorId { .. }
-            ))
-        )
-    }).count();
+    let dup_count = results
+        .iter()
+        .filter(|r| {
+            matches!(
+                r,
+                Err(NvError::Config(
+                    nv_core::error::ConfigError::DuplicateBatchProcessorId { .. }
+                ))
+            )
+        })
+        .count();
 
     assert_eq!(ok_count, 1, "exactly one caller should succeed");
-    assert_eq!(dup_count, THREADS - 1, "all others should get DuplicateBatchProcessorId");
+    assert_eq!(
+        dup_count,
+        THREADS - 1,
+        "all others should get DuplicateBatchProcessorId"
+    );
 
     Arc::try_unwrap(runtime)
         .ok()
@@ -716,11 +748,7 @@ fn create_batch_during_shutdown_returns_shutdown_error() {
             let mut entered = self.gate.entered.lock().unwrap();
             *entered = true;
             self.gate.release.notify_all();
-            let _guard = self
-                .gate
-                .release
-                .wait_while(entered, |e| *e)
-                .unwrap();
+            let _guard = self.gate.release.wait_while(entered, |e| *e).unwrap();
             Ok(())
         }
         fn process(&mut self, items: &mut [BatchEntry]) -> Result<(), StageError> {
@@ -744,24 +772,19 @@ fn create_batch_during_shutdown_returns_shutdown_error() {
         queue_capacity: None,
         response_timeout: None,
         max_in_flight_per_feed: 1,
+            startup_timeout: None,
     };
 
     let gate_clone = Arc::clone(&gate);
     let handle_clone = handle.clone();
     let batch_thread = std::thread::spawn(move || {
-        handle_clone.create_batch(
-            Box::new(SlowStartProc { gate: gate_clone }),
-            cfg,
-        )
+        handle_clone.create_batch(Box::new(SlowStartProc { gate: gate_clone }), cfg)
     });
 
     // Wait for on_start to be entered on the coordinator thread.
     {
         let entered = gate.entered.lock().unwrap();
-        let _guard = gate
-            .release
-            .wait_while(entered, |e| !*e)
-            .unwrap();
+        let _guard = gate.release.wait_while(entered, |e| !*e).unwrap();
     }
 
     handle.shutdown().ok();
@@ -779,9 +802,7 @@ fn create_batch_during_shutdown_returns_shutdown_error() {
         Err(NvError::Runtime(RuntimeError::ShutdownInProgress)) => {
             // Expected.
         }
-        Err(e) => panic!(
-            "expected ShutdownInProgress after concurrent shutdown, got error: {e}"
-        ),
+        Err(e) => panic!("expected ShutdownInProgress after concurrent shutdown, got error: {e}"),
         Ok(_) => panic!(
             "expected ShutdownInProgress after concurrent shutdown, but create_batch succeeded"
         ),

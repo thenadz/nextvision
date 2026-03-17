@@ -38,60 +38,8 @@ use std::time::{Duration, Instant};
 // Re-export DecodeOutcome from nv-core so downstream can use it via nv-media.
 pub use nv_core::health::DecodeOutcome;
 
-// ---------------------------------------------------------------------------
-// Public API — backend-neutral decode preference
-// ---------------------------------------------------------------------------
-
-/// User-facing decode preference for a feed.
-///
-/// Controls which decoder strategy the media backend uses when constructing
-/// the decode pipeline. The default is [`Auto`](Self::Auto), which preserves
-/// the backend's existing selection heuristic.
-///
-/// This type is backend-neutral — it does not expose GStreamer element names,
-/// GPU memory modes, or inference-framework details.
-///
-/// # Variants
-///
-/// | Variant | Behavior |
-/// |---|---|
-/// | `Auto` | Backend picks the best available decoder (default). |
-/// | `CpuOnly` | Force software decoding — never use a hardware decoder. |
-/// | `PreferHardware` | Try hardware first; fall back to software silently. |
-/// | `RequireHardware` | Demand hardware decoding; fail-fast if unavailable. |
-///
-/// # Examples
-///
-/// ```
-/// use nv_media::DecodePreference;
-///
-/// // Default is Auto.
-/// assert_eq!(DecodePreference::default(), DecodePreference::Auto);
-///
-/// // Force CPU-only decoding in headless CI environments.
-/// let pref = DecodePreference::CpuOnly;
-/// ```
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum DecodePreference {
-    /// Automatically select the best decoder: prefer hardware, fall back to
-    /// software. This is the current default behavior preserved exactly.
-    #[default]
-    Auto,
-
-    /// Force software decoding. The backend must never attempt a hardware
-    /// decoder. Useful in environments without GPU access or where
-    /// deterministic CPU-only behaviour is required.
-    CpuOnly,
-
-    /// Prefer hardware decoding, but fall back to software silently if no
-    /// hardware decoder is available. No error is raised on fallback.
-    PreferHardware,
-
-    /// Require hardware decoding. If no hardware decoder is available, the
-    /// backend must fail-fast with a [`MediaError`](nv_core::error::MediaError)
-    /// instead of silently falling back to software.
-    RequireHardware,
-}
+// Re-export DecodePreference from nv-core (canonical definition).
+pub use nv_core::health::DecodePreference;
 
 // ---------------------------------------------------------------------------
 // Internal — GStreamer decoder selection
@@ -125,7 +73,12 @@ pub(crate) enum DecoderSelection {
 // Mapping: DecodePreference → DecoderSelection
 // ---------------------------------------------------------------------------
 
-impl DecodePreference {
+/// Extension methods mapping [`DecodePreference`] to media-internal types.
+///
+/// `DecodePreference` is defined in `nv-core` (backend-neutral). This trait
+/// adds the backend-specific mapping to [`DecoderSelection`] that only
+/// `nv-media` needs.
+pub(crate) trait DecodePreferenceExt {
     /// Map a user-facing preference to the internal decoder selection.
     ///
     /// - `Auto` → `Auto` (decodebin default ranking).
@@ -135,7 +88,19 @@ impl DecodePreference {
     ///   failures).
     /// - `RequireHardware` → `ForceHardware` (rejects software video
     ///   decoders at the `autoplug-select` level).
-    pub(crate) fn to_selection(self) -> DecoderSelection {
+    fn to_selection(self) -> DecoderSelection;
+
+    /// Returns `true` if this preference demands hardware decode (fail-fast
+    /// when unavailable).
+    fn requires_hardware(self) -> bool;
+
+    /// Returns `true` if this preference favours hardware but accepts
+    /// software as a fallback.
+    fn prefers_hardware(self) -> bool;
+}
+
+impl DecodePreferenceExt for DecodePreference {
+    fn to_selection(self) -> DecoderSelection {
         match self {
             Self::Auto => DecoderSelection::Auto,
             Self::CpuOnly => DecoderSelection::ForceSoftware,
@@ -143,15 +108,11 @@ impl DecodePreference {
         }
     }
 
-    /// Returns `true` if this preference demands hardware decode (fail-fast
-    /// when unavailable).
-    pub(crate) fn requires_hardware(self) -> bool {
+    fn requires_hardware(self) -> bool {
         matches!(self, Self::RequireHardware)
     }
 
-    /// Returns `true` if this preference favours hardware but accepts
-    /// software as a fallback.
-    pub(crate) fn prefers_hardware(self) -> bool {
+    fn prefers_hardware(self) -> bool {
         matches!(self, Self::PreferHardware)
     }
 }
