@@ -85,6 +85,7 @@ fn detector_config(args: &Cli) -> DetectorConfig {
         model_path: args.model.clone(),
         input_size: args.input_size,
         confidence_threshold: args.conf_threshold,
+        gpu: args.gpu,
         ..Default::default()
     }
 }
@@ -98,6 +99,10 @@ fn tracker_config(args: &Cli) -> TrackerConfig {
         ..Default::default()
     }
 }
+
+/// CUDA JIT compilation on first run can take 30+ seconds.
+/// Allow a generous timeout for the initial inference.
+const GPU_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Lightweight output sink that periodically logs detection/track summaries.
 ///
@@ -131,8 +136,8 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::builder().build()?;
     let runtime_handle = runtime.handle();
 
-    // Hold feed handles so feeds aren't dropped.
-    let mut _feeds = Vec::new();
+    // Feed handles — kept alive and passed to the UI.
+    let feeds;
 
     // Optional batch handle (only in batch mode).
     let mut batch_handle: Option<nv_runtime::BatchHandle> = None;
@@ -166,12 +171,26 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
         sink: Box<dyn OutputSink>,
         queue_depth: usize,
         include_frames: bool,
+        decode: nv_runtime::DecodePreference,
     ) -> Result<FeedConfig, Box<dyn std::error::Error>> {
         let mut builder = builder
             .source(source)
             .camera_mode(CameraMode::Fixed)
             .output_sink(sink)
+            .decode_preference(decode)
             .backpressure(BackpressurePolicy::DropOldest { queue_depth });
+
+        // On Jetson, hardware decoders (nvv4l2decoder) output
+        // video/x-raw(memory:NVMM) — GPU-mapped buffers that the
+        // standard videoconvert cannot accept. Insert nvvidconv to
+        // copy NVMM → system memory when detected.
+        builder = builder.post_decode_hook(std::sync::Arc::new(|info| {
+            if info.memory_type.as_deref() == Some("NVMM") {
+                Some("nvvidconv".into())
+            } else {
+                None
+            }
+        }));
 
         if include_frames {
             // Carry full pixel data in every OutputEnvelope so the UI
@@ -184,6 +203,32 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Ok(builder.build()?)
     }
 
+    /// Register feeds from the URI list, returning handles.  The
+    /// `make_builder` closure produces a mode-specific `FeedConfigBuilder`
+    /// (batch-pipeline vs. per-feed stages) for each feed.
+    fn register_feeds(
+        runtime: &Runtime,
+        args: &Cli,
+        ui_state: &Option<ui::SharedUiState>,
+        make_sink: &dyn Fn(&Option<ui::SharedUiState>) -> Box<dyn OutputSink>,
+        make_builder: &dyn Fn() -> Result<nv_runtime::FeedConfigBuilder, Box<dyn std::error::Error>>,
+    ) -> Result<Vec<nv_runtime::FeedHandle>, Box<dyn std::error::Error>> {
+        let mut feeds = Vec::with_capacity(args.video_uri.len());
+        for (i, uri) in args.video_uri.iter().enumerate() {
+            let source = parse_source(uri, args.loop_file);
+            let sink = make_sink(ui_state);
+            let builder = make_builder()?;
+            let feed_config = build_feed_config(
+                builder, source, sink, args.queue_depth,
+                ui_state.is_some(), args.decode,
+            )?;
+            let feed = runtime.add_feed(feed_config)?;
+            info!(feed_index = i, feed_id = %feed.id(), uri, "feed started");
+            feeds.push(feed);
+        }
+        Ok(feeds)
+    }
+
     if args.batch {
         // --- Batch mode -----------------------------------------------
         info!(
@@ -193,58 +238,46 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
             "batch mode enabled"
         );
 
+        let gpu_timeout = if args.gpu { Some(GPU_STARTUP_TIMEOUT) } else { None };
+
         let batch_hdl = runtime.create_batch(
             Box::new(DetectorBatchProcessor::new(detector_config(&args))),
             BatchConfig {
                 max_batch_size: args.batch_size,
                 max_latency: Duration::from_millis(args.batch_latency_ms),
                 queue_capacity: None,
-                response_timeout: None,
+                response_timeout: gpu_timeout,
                 max_in_flight_per_feed: 1,
+                startup_timeout: gpu_timeout,
             },
         )?;
         batch_handle = Some(batch_hdl.clone());
 
-        for (i, uri) in args.video_uri.iter().enumerate() {
-            let source = parse_source(uri, args.loop_file);
-            let sink = make_sink(&ui_state);
-
+        let trk_cfg = tracker_config(&args);
+        feeds = register_feeds(&runtime, &args, &ui_state, &make_sink, &|| {
             let pipeline = FeedPipeline::builder()
                 .batch(batch_hdl.clone())?
-                .add_stage(TrackerStage::new(tracker_config(&args)))
+                .add_stage(TrackerStage::new(trk_cfg.clone()))
                 .build();
-
-            let builder = FeedConfig::builder().feed_pipeline(pipeline);
-            let feed_config = build_feed_config(builder, source, sink, args.queue_depth, ui_state.is_some())?;
-
-            let feed = runtime.add_feed(feed_config)?;
-            let feed_id = feed.id();
-            info!(feed_index = i, %feed_id, uri, "feed started");
-            _feeds.push(feed);
-        }
+            Ok(FeedConfig::builder().feed_pipeline(pipeline))
+        })?;
     } else {
         // --- Per-feed mode (default) ----------------------------------
-        for (i, uri) in args.video_uri.iter().enumerate() {
-            let source = parse_source(uri, args.loop_file);
-            let sink = make_sink(&ui_state);
-
-            let builder = FeedConfig::builder().stages(vec![
-                Box::new(DetectorStage::new(detector_config(&args))),
-                Box::new(TrackerStage::new(tracker_config(&args))),
-            ]);
-            let feed_config = build_feed_config(builder, source, sink, args.queue_depth, ui_state.is_some())?;
-
-            let feed = runtime.add_feed(feed_config)?;
-            let feed_id = feed.id();
-            info!(feed_index = i, %feed_id, uri, "feed started");
-            _feeds.push(feed);
-        }
+        let det_cfg = detector_config(&args);
+        let trk_cfg = tracker_config(&args);
+        feeds = register_feeds(&runtime, &args, &ui_state, &make_sink, &|| {
+            Ok(FeedConfig::builder().stages(vec![
+                Box::new(DetectorStage::new(det_cfg.clone())),
+                Box::new(TrackerStage::new(trk_cfg.clone())),
+            ]))
+        })?;
     }
 
     if let Some(state) = ui_state {
         // UI mode: egui window blocks the main thread.
+        let inference_label = if args.gpu { "GPU (CUDA)" } else { "CPU" }.to_string();
         info!("launching UI — close window to stop");
-        ui::run_ui(state, _feeds, batch_handle, runtime_handle)
+        ui::run_ui(state, feeds, batch_handle, runtime_handle, inference_label)
             .map_err(|e| format!("UI error: {e}"))?;
         info!("UI closed, shutting down");
     } else {

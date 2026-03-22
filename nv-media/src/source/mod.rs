@@ -51,6 +51,7 @@ use nv_core::id::FeedId;
 
 use crate::backend::{EventQueue, GstSession, SessionConfig};
 use crate::decode::{DecodePreference, DecodePreferenceExt, HwFailureTracker};
+use crate::hook::PostDecodeHook;
 use crate::ingress::{FrameSink, HealthSink, PtzProvider};
 use crate::pipeline::OutputFormat;
 use crate::reconnect::ReconnectTracker;
@@ -143,6 +144,8 @@ pub struct MediaSource {
     /// Fallback reason captured during session creation (if the adaptive
     /// fallback cache overrode the decode preference).
     pub(super) session_fallback_reason: Option<String>,
+    /// Optional post-decode hook — passed through to the pipeline builder.
+    pub(super) post_decode_hook: Option<PostDecodeHook>,
 }
 
 impl MediaSource {
@@ -172,6 +175,7 @@ impl MediaSource {
             last_decode_status: None,
             decoder_verified: false,
             session_fallback_reason: None,
+            post_decode_hook: None,
         }
     }
 
@@ -190,6 +194,16 @@ impl MediaSource {
     /// Must be called before [`start()`](crate::ingress::MediaIngress::start).
     pub fn set_ptz_provider(&mut self, provider: Arc<dyn PtzProvider>) {
         self.ptz_provider = Some(provider);
+    }
+
+    /// Attach a post-decode hook.
+    ///
+    /// The hook is invoked once per session when the decoded stream's caps
+    /// are known, and can inject a pipeline element between the decoder and
+    /// the color-space converter.
+    /// Must be called before [`start()`](crate::ingress::MediaIngress::start).
+    pub fn set_post_decode_hook(&mut self, hook: PostDecodeHook) {
+        self.post_decode_hook = Some(hook);
     }
 
     /// Emit a health event if a health sink is attached.
@@ -298,6 +312,7 @@ impl MediaSource {
             decoder: selection,
             output_format: OutputFormat::default(),
             ptz_provider: self.ptz_provider.clone(),
+            post_decode_hook: self.post_decode_hook.clone(),
         };
         let sink = self
             .sink
@@ -330,6 +345,7 @@ impl MediaSource {
             decoder: self.decode_preference.to_selection(),
             output_format: OutputFormat::default(),
             ptz_provider: None,
+            post_decode_hook: None,
         };
         self.session = Some(GstSession::start_stub(config));
         self.decoder_verified = false;

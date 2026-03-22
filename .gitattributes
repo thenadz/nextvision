@@ -1,2 +1,2 @@
 samples/models/*.onnx filter=lfs diff=lfs merge=lfs -text
-samples/models/*.onnx.data filter=lfs diff=lfs merge=lfs -text
+samples/models/*.pt filter=lfs diff=lfs merge=lfs -text

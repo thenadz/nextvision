@@ -172,5 +172,8 @@ pub use nv_perception::{ValidationMode, ValidationWarning};
 // Re-export decode types from nv-media for convenience.
 pub use nv_media::{DecodePreference, DecodeCapabilities, discover_decode_capabilities};
 
+// Re-export post-decode hook types from nv-media for convenience.
+pub use nv_media::{DecodedStreamInfo, PostDecodeHook};
+
 // Re-export health types from nv-core for convenience.
 pub use nv_core::health::{DecodeOutcome, HealthEvent};

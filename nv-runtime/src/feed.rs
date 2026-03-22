@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use nv_core::config::{CameraMode, ReconnectPolicy, SourceSpec};
 use nv_core::error::{ConfigError, NvError};
+use nv_media::PostDecodeHook;
 use nv_media::PtzProvider;
 use nv_media::DecodePreference;
 use nv_perception::{Stage, StagePipeline, ValidationMode, validate_pipeline_phased};
@@ -36,6 +37,7 @@ pub struct FeedConfig {
     pub(crate) frame_inclusion: FrameInclusion,
     pub(crate) sink_queue_capacity: usize,
     pub(crate) decode_preference: DecodePreference,
+    pub(crate) post_decode_hook: Option<PostDecodeHook>,
 }
 
 /// Builder for [`FeedConfig`].
@@ -69,6 +71,7 @@ pub struct FeedConfigBuilder {
     validation_mode: ValidationMode,
     sink_queue_capacity: usize,
     decode_preference: DecodePreference,
+    post_decode_hook: Option<PostDecodeHook>,
 }
 
 impl FeedConfig {
@@ -92,6 +95,7 @@ impl FeedConfig {
             validation_mode: ValidationMode::default(),
             sink_queue_capacity: 16,
             decode_preference: DecodePreference::default(),
+            post_decode_hook: None,
         }
     }
 }
@@ -249,6 +253,16 @@ impl FeedConfigBuilder {
         self
     }
 
+    /// Set a post-decode hook that can inject a pipeline element between
+    /// the decoder and the color-space converter.
+    ///
+    /// See [`PostDecodeHook`] for details and usage examples.
+    #[must_use]
+    pub fn post_decode_hook(mut self, hook: PostDecodeHook) -> Self {
+        self.post_decode_hook = Some(hook);
+        self
+    }
+
     /// Append a single stage to the pipeline.
     ///
     /// Convenience alternative to [`stages()`](Self::stages) when
@@ -379,6 +393,7 @@ impl FeedConfigBuilder {
             frame_inclusion: self.frame_inclusion,
             sink_queue_capacity: self.sink_queue_capacity.max(1),
             decode_preference: self.decode_preference,
+            post_decode_hook: self.post_decode_hook,
         })
     }
 }

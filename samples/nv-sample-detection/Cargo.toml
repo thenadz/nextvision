@@ -12,8 +12,15 @@ nv-frame.workspace = true
 nv-perception.workspace = true
 nv-view.workspace = true
 
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-native"] }
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std"] }
 tracing.workspace = true
+
+[features]
+default = ["download-ort"]
+download-ort = ["ort/download-binaries", "ort/copy-dylibs", "ort/tls-native", "ort/api-24"]
+system-ort = ["ort/load-dynamic", "ort/api-18"]
+link-ort = ["ort/api-18"]
+gpu = ["ort/cuda"]
 
 [dev-dependencies]
 nv-test-util.workspace = true

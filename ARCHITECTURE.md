@@ -524,7 +524,7 @@ pub enum SignalValue {
 
 ### Principle
 
-`nv-media` is the **only** crate that links against `gstreamer-rs`. It exposes:
+`nv-media` is the **only** crate that links against `gstreamer-rs`. The runtime is backward-compatible with GStreamer >= 1.16 (e.g. Jetson / Ubuntu 20.04) and avoids APIs introduced in later versions. It exposes:
 
 - `MediaSource` — internal type that owns the GStreamer pipeline.
 - `bridge::to_frame_envelope(sample: &gst::Sample) -> Result<FrameEnvelope, MediaError>` — the single crossing point.

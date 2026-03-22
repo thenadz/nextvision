@@ -484,6 +484,7 @@ fn factory_creates_source() {
         reconnect: test_reconnect(),
         ptz_provider: None,
         decode_preference: DecodePreference::Auto,
+            post_decode_hook: None,
     });
     let source = result.unwrap();
     assert_eq!(source.feed_id(), FeedId::new(42));
@@ -500,6 +501,7 @@ fn factory_wires_health_sink() {
             reconnect: test_reconnect(),
             ptz_provider: None,
             decode_preference: DecodePreference::Auto,
+            post_decode_hook: None,
         })
         .unwrap();
 
@@ -545,6 +547,7 @@ fn factory_wires_ptz_provider() {
             reconnect: test_reconnect(),
             ptz_provider: Some(ptz),
             decode_preference: DecodePreference::Auto,
+            post_decode_hook: None,
         })
         .unwrap();
 
@@ -562,6 +565,7 @@ fn factory_default_is_equivalent_to_new() {
             reconnect: test_reconnect(),
             ptz_provider: None,
             decode_preference: DecodePreference::Auto,
+            post_decode_hook: None,
         })
         .unwrap();
     let s2 = f2
@@ -571,6 +575,7 @@ fn factory_default_is_equivalent_to_new() {
             reconnect: test_reconnect(),
             ptz_provider: None,
             decode_preference: DecodePreference::Auto,
+            post_decode_hook: None,
         })
         .unwrap();
     assert_eq!(s1.feed_id(), FeedId::new(1));
@@ -888,7 +893,10 @@ fn liveness_armed_returns_next_tick() {
     );
 }
 
-/// Tick without liveness returns None next_tick (indefinite wait).
+/// Once the stream has started (liveness cleared), tick() returns no
+/// next_tick — the worker relies on the bus sync handler to wake it
+/// on any lifecycle-relevant GStreamer message (Error, Warning, Eos,
+/// StreamStart) rather than polling.
 #[test]
 fn no_liveness_returns_no_next_tick() {
     let (mut src, _, _, _) = started_source(test_spec(), test_reconnect());
@@ -896,7 +904,7 @@ fn no_liveness_returns_no_next_tick() {
     let outcome = src.tick();
     assert!(
         outcome.next_tick.is_none(),
-        "no liveness should produce no next_tick hint"
+        "running source with no liveness should return no next_tick (event-driven waking)"
     );
 }
 /// Attempt counter must accumulate across repeated errors without
@@ -944,6 +952,7 @@ fn factory_creates_source_with_cpu_only() {
             reconnect: test_reconnect(),
             ptz_provider: None,
             decode_preference: DecodePreference::CpuOnly,
+            post_decode_hook: None,
         })
         .unwrap();
     assert_eq!(source.feed_id(), FeedId::new(99));
@@ -960,6 +969,7 @@ fn factory_creates_source_with_prefer_hardware() {
             reconnect: test_reconnect(),
             ptz_provider: None,
             decode_preference: DecodePreference::PreferHardware,
+            post_decode_hook: None,
         })
         .unwrap();
     assert_eq!(source.feed_id(), FeedId::new(100));

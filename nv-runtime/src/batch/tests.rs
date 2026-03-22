@@ -83,6 +83,7 @@ fn single_item_dispatched_on_timeout() {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -106,6 +107,7 @@ fn full_batch_dispatched_immediately() {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -145,6 +147,7 @@ fn partial_batch_on_timeout() {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -197,6 +200,7 @@ fn processor_error_propagated_to_all_feeds() {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -247,6 +251,7 @@ fn processor_panic_propagated_to_all_feeds() {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -271,6 +276,7 @@ fn metrics_track_submissions_and_rejections() {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -299,6 +305,7 @@ fn shutdown_while_waiting() {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -338,6 +345,7 @@ fn coordinator_rejects_zero_batch_size() {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
         health_tx,
     );
@@ -356,6 +364,7 @@ fn coordinator_rejects_zero_latency() {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
         health_tx,
     );
@@ -391,6 +400,7 @@ fn multi_feed_results_routed_correctly() {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -430,6 +440,7 @@ fn queue_capacity_too_small_rejected() {
             queue_capacity: Some(4), // less than max_batch_size=8
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
         health_tx,
     );
@@ -450,6 +461,7 @@ fn explicit_queue_capacity_accepted() {
             queue_capacity: Some(32),
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
     let handle = coord.handle();
@@ -468,6 +480,7 @@ fn disconnected_submit_increments_rejected() {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -612,6 +625,7 @@ fn configured_max_batch_size_in_metrics() {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
     let m = coord.handle().metrics();
@@ -662,6 +676,7 @@ fn signal_shutdown_unblocks_coordinator() {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -744,6 +759,7 @@ fn non_detector_output_routed_correctly() {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -861,6 +877,7 @@ fn response_timeout_zero_rejected() {
             queue_capacity: None,
             response_timeout: Some(Duration::ZERO),
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
         health_tx,
     );
@@ -897,6 +914,7 @@ fn custom_response_timeout_applied() {
             // the 3s processing completes.
             response_timeout: Some(Duration::from_millis(200)),
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
         health_tx,
     )
@@ -935,6 +953,7 @@ fn batch_error_throttle_coalesces_events() {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -1008,6 +1027,7 @@ fn shutdown_drain_unblocks_feeds_before_on_stop() {
             // Short response timeout to distinguish from Timeout
             response_timeout: Some(Duration::from_millis(500)),
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
         health_tx,
     )
@@ -1086,6 +1106,7 @@ fn consecutive_errors_tracks_and_resets() {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -1119,6 +1140,7 @@ fn items_timed_out_metric_incremented() {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -1244,6 +1266,7 @@ fn shutdown_processes_last_batch_before_drain() {
             queue_capacity: None,
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -1303,6 +1326,7 @@ fn submit_and_wait_serializes_per_feed_preventing_starvation() {
             queue_capacity: Some(4),
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -1378,6 +1402,7 @@ fn mixed_rate_feeds_all_make_progress() {
             queue_capacity: Some(8),
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -1454,6 +1479,7 @@ fn single_inflight_per_feed_under_contention() {
             queue_capacity: Some(8),
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -1512,6 +1538,7 @@ fn in_flight_cap_prevents_stacking_after_timeout() {
             // Very short timeout so feed times out quickly.
             response_timeout: Some(Duration::from_millis(50)),
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -1584,6 +1611,7 @@ fn in_flight_guard_decremented_on_queue_full() {
             queue_capacity: Some(100),
             response_timeout: None,
             max_in_flight_per_feed: 2,
+            startup_timeout: None,
         },
     );
 
@@ -1636,6 +1664,7 @@ fn shutdown_drain_clears_in_flight_guards() {
             queue_capacity: Some(10),
             response_timeout: Some(Duration::from_millis(50)),
             max_in_flight_per_feed: 4,
+            startup_timeout: None,
         },
     );
 
@@ -1715,6 +1744,7 @@ fn mixed_rate_feeds_progress_with_in_flight_cap() {
             queue_capacity: Some(8),
             response_timeout: None,
             max_in_flight_per_feed: 1,
+            startup_timeout: None,
         },
     );
 
@@ -1799,6 +1829,7 @@ fn in_flight_cap_higher_than_one_allows_stacking() {
             response_timeout: Some(Duration::from_millis(50)),
             // Allow up to 3 in-flight items per feed.
             max_in_flight_per_feed: 3,
+            startup_timeout: None,
         },
     );
 
@@ -1827,6 +1858,118 @@ fn in_flight_cap_higher_than_one_allows_stacking() {
     assert_eq!(m.items_submitted, 4);
     assert_eq!(m.items_rejected, 1, "cap rejection counted");
     assert_eq!(m.pending_items(), 3, "3 items genuinely in-flight");
+
+    coord.shutdown();
+}
+
+/// Reproducer for the Jetson stuck-batch issue: when the first
+/// `process()` call takes longer than `max_latency + response_timeout`,
+/// the feed thread times out and subsequent submissions are rejected by
+/// InFlightCapReached because the in-flight counter is never decremented.
+///
+/// This simulates TRT engine re-profiling on the first inference call
+/// which can block for tens of seconds.
+#[test]
+fn slow_first_process_causes_in_flight_cascade() {
+    use std::sync::atomic::AtomicBool;
+
+    struct SlowFirstProcessor {
+        first_call: AtomicBool,
+    }
+
+    impl BatchProcessor for SlowFirstProcessor {
+        fn id(&self) -> StageId {
+            StageId("slow-first")
+        }
+        fn process(&mut self, items: &mut [BatchEntry]) -> Result<(), StageError> {
+            if self
+                .first_call
+                .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                // Simulate TRT engine rebuild: sleep longer than response_timeout.
+                std::thread::sleep(Duration::from_millis(1500));
+            }
+            for item in items.iter_mut() {
+                item.output = Some(StageOutput::with_detections(DetectionSet::empty()));
+            }
+            Ok(())
+        }
+    }
+
+    let processor = SlowFirstProcessor {
+        first_call: AtomicBool::new(true),
+    };
+
+    // Tight timeouts so the test runs quickly:
+    //   max_latency=50ms, response_timeout=200ms → total wait = 250ms.
+    //   The processor sleeps 1500ms on first call → guaranteed timeout.
+    let config = BatchConfig {
+        max_batch_size: 4,
+        max_latency: Duration::from_millis(50),
+        response_timeout: Some(Duration::from_millis(200)),
+        max_in_flight_per_feed: 1,
+        startup_timeout: None,
+        ..BatchConfig::default()
+    };
+
+    let (coord, _rx) = start_coordinator(Box::new(processor), config);
+    let handle = coord.handle();
+    let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    // First submission: will reach coordinator but process() blocks.
+    // Feed thread times out after 250ms.
+    let r1 = handle.submit_and_wait(make_entry(1), Some(&in_flight));
+    assert!(
+        matches!(r1, Err(BatchSubmitError::Timeout)),
+        "first submit should time out, got: {r1:?}"
+    );
+
+    // In-flight counter is still 1 — coordinator hasn't decremented.
+    assert_eq!(
+        in_flight.load(Ordering::Relaxed),
+        1,
+        "in-flight should still be 1 after timeout"
+    );
+
+    // Second submission: immediately rejected by InFlightCapReached.
+    let r2 = handle.submit_and_wait(make_entry(1), Some(&in_flight));
+    assert!(
+        matches!(r2, Err(BatchSubmitError::InFlightCapReached)),
+        "second submit should hit in-flight cap, got: {r2:?}"
+    );
+
+    // Third submission: same.
+    let r3 = handle.submit_and_wait(make_entry(1), Some(&in_flight));
+    assert!(
+        matches!(r3, Err(BatchSubmitError::InFlightCapReached)),
+        "third submit should hit in-flight cap, got: {r3:?}"
+    );
+
+    let m = handle.metrics();
+    assert_eq!(m.batches_dispatched, 0, "no batch should have completed yet");
+    assert_eq!(m.items_processed, 0, "no items processed yet");
+    assert!(m.items_rejected >= 2, "at least 2 rejected by cap");
+    assert_eq!(m.pending_items(), 1, "first item still pending");
+
+    // Wait for the slow process() to finish.
+    std::thread::sleep(Duration::from_millis(1500));
+
+    // Now the coordinator should have completed the batch and
+    // decremented in-flight.
+    assert_eq!(
+        in_flight.load(Ordering::Relaxed),
+        0,
+        "in-flight should be 0 after slow process completes"
+    );
+
+    let m2 = handle.metrics();
+    assert_eq!(m2.batches_dispatched, 1, "batch should have completed");
+    assert_eq!(m2.items_processed, 1, "one item processed");
+
+    // Subsequent submissions should now succeed.
+    let r4 = handle.submit_and_wait(make_entry(1), Some(&in_flight));
+    assert!(r4.is_ok(), "submit after recovery should succeed, got: {r4:?}");
 
     coord.shutdown();
 }

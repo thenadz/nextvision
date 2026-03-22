@@ -63,6 +63,9 @@ impl MediaIngressFactory for GstMediaIngressFactory {
         if let Some(ptz) = options.ptz_provider {
             source.set_ptz_provider(ptz);
         }
+        if let Some(hook) = options.post_decode_hook {
+            source.set_post_decode_hook(hook);
+        }
         Ok(Box::new(source))
     }
 }

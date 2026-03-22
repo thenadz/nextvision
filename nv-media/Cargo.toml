@@ -20,4 +20,5 @@ gstreamer-video = { version = "0.25", optional = true, package = "gstreamer-vide
 [features]
 default = ["gst-backend"]
 ## Enable the GStreamer backend. Requires GStreamer development libraries at build time.
+## Runtime compatible with GStreamer >= 1.16 (e.g. Jetson / Ubuntu 20.04).
 gst-backend = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]

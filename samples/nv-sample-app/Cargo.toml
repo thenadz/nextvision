@@ -21,9 +21,17 @@ clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
 eframe = "0.31"
 egui = "0.31"
+hostname = "0.4"
 minifb = "0.27"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = ["nv-sample-detection/download-ort"]
+system-ort = ["nv-sample-detection/system-ort"]
+link-ort = ["nv-sample-detection/link-ort"]
+gpu = ["nv-sample-detection/gpu"]
+jetson = ["link-ort", "gpu"]
 
 [dev-dependencies]
 nv-test-util.workspace = true

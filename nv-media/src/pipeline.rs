@@ -29,6 +29,7 @@ use nv_core::error::MediaError;
 use nv_frame::PixelFormat;
 
 use crate::decode::{DecoderSelection, SelectedDecoderSlot};
+use crate::hook::PostDecodeHook;
 
 /// Target pixel format for the appsink output.
 ///
@@ -77,6 +78,8 @@ pub(crate) struct PipelineBuilder {
     output_format: OutputFormat,
     /// Latency hint in milliseconds for live sources (jitter buffer).
     latency_ms: u32,
+    /// Optional post-decode hook for injecting elements.
+    post_decode_hook: Option<PostDecodeHook>,
 }
 
 /// Default latency hint for RTSP jitter buffers.
@@ -99,6 +102,7 @@ impl PipelineBuilder {
             decoder: DecoderSelection::default(),
             output_format: OutputFormat::default(),
             latency_ms: DEFAULT_LATENCY_MS,
+            post_decode_hook: None,
         }
     }
 
@@ -111,6 +115,12 @@ impl PipelineBuilder {
     /// Set the target output format.
     pub fn output_format(mut self, format: OutputFormat) -> Self {
         self.output_format = format;
+        self
+    }
+
+    /// Set the post-decode hook.
+    pub fn post_decode_hook(mut self, hook: Option<PostDecodeHook>) -> Self {
+        self.post_decode_hook = hook;
         self
     }
 
@@ -132,6 +142,30 @@ impl PipelineBuilder {
         use gstreamer as gst;
         use gstreamer::prelude::*;
         use gstreamer_app as gst_app;
+
+        // GstAutoplugSelectResult is a C GEnum registered by decodebin.
+        // gstreamer-rs doesn't expose it as a Rust type. We construct the
+        // properly-typed glib::Value manually so that the glib signal
+        // marshaller accepts it (glib-rs >= 0.22 validates return types).
+        //
+        //   GST_AUTOPLUG_SELECT_TRY    = 0
+        //   GST_AUTOPLUG_SELECT_EXPOSE = 1
+        //   GST_AUTOPLUG_SELECT_SKIP   = 2
+        fn autoplug_select_result(discriminant: i32) -> gst::glib::Value {
+            use gst::glib::translate::ToGlibPtrMut;
+            let gtype = gst::glib::Type::from_name("GstAutoplugSelectResult")
+                .expect("GstAutoplugSelectResult GType must be registered (is decodebin loaded?)");
+            unsafe {
+                let mut value = gst::glib::Value::from_type(gtype);
+                gst::glib::gobject_ffi::g_value_set_enum(
+                    value.to_glib_none_mut().0,
+                    discriminant,
+                );
+                value
+            }
+        }
+        const AUTOPLUG_TRY: i32 = 0;
+        const AUTOPLUG_SKIP: i32 = 2;
 
         let pipeline = gst::Pipeline::new();
 
@@ -192,11 +226,38 @@ impl PipelineBuilder {
             }
             DecoderSelection::ForceSoftware => {
                 let db = gst::ElementFactory::make("decodebin")
-                    .property("force-sw-decoders", true)
                     .build()
                     .map_err(|e| MediaError::Unsupported {
                         detail: format!("failed to create decodebin (force-sw): {e}"),
                     })?;
+                // Reject hardware video decoders via autoplug-select so
+                // decodebin only considers software decoders. This avoids
+                // relying on the `force-sw-decoders` property which requires
+                // GStreamer >= 1.18 (Jetson ships 1.16).
+                db.connect("autoplug-select", false, |values| {
+                    use crate::decode::is_hardware_video_decoder;
+
+                    let factory: gst::ElementFactory = match values
+                        .get(3)
+                        .and_then(|v| v.get::<gst::ElementFactory>().ok())
+                    {
+                        Some(f) => f,
+                        None => return Some(autoplug_select_result(AUTOPLUG_TRY)),
+                    };
+                    let klass: String = factory.metadata("klass").unwrap_or_default().into();
+                    let name = factory.name();
+
+                    if is_hardware_video_decoder(&klass, name.as_str()) {
+                        tracing::debug!(
+                            element = %name,
+                            klass = %klass,
+                            "autoplug-select: skipping hardware video decoder \
+                             (ForceSoftware mode)",
+                        );
+                        return Some(autoplug_select_result(AUTOPLUG_SKIP));
+                    }
+                    Some(autoplug_select_result(AUTOPLUG_TRY))
+                });
                 (db, true)
             }
             DecoderSelection::ForceHardware => {
@@ -226,7 +287,7 @@ impl PipelineBuilder {
                                 "autoplug-select: malformed callback payload, \
                                  allowing element (safe default)",
                             );
-                            return Some(0i32.to_value()); // TRY (safe default)
+                            return Some(autoplug_select_result(AUTOPLUG_TRY));
                         }
                     };
                     let klass: String = factory.metadata("klass").unwrap_or_default().into();
@@ -237,7 +298,7 @@ impl PipelineBuilder {
                     if !is_hardware_video_decoder(&klass, name.as_str()) {
                         let is_video_decoder = klass.contains("Decoder") && klass.contains("Video");
                         if !is_video_decoder {
-                            return Some(0i32.to_value()); // TRY
+                            return Some(autoplug_select_result(AUTOPLUG_TRY));
                         }
                         tracing::debug!(
                             element = %name,
@@ -245,14 +306,14 @@ impl PipelineBuilder {
                             "autoplug-select: skipping software video decoder \
                              (ForceHardware mode)",
                         );
-                        return Some(2i32.to_value()); // SKIP
+                        return Some(autoplug_select_result(AUTOPLUG_SKIP));
                     }
                     tracing::debug!(
                         element = %name,
                         klass = %klass,
                         "autoplug-select: accepting hardware video decoder",
                     );
-                    Some(0i32.to_value()) // TRY
+                    Some(autoplug_select_result(AUTOPLUG_TRY))
                 });
                 (db, true)
             }
@@ -370,15 +431,101 @@ impl PipelineBuilder {
                 })?;
 
             // Dynamic pad: decodebin → videoconvert (when video pad appears)
+            //
+            // When a post-decode hook is provided, it is consulted to decide
+            // whether an additional element should be inserted between the
+            // decoder output pad and videoconvert. This supports platforms
+            // where the hardware decoder outputs memory types that the
+            // standard videoconvert cannot accept (e.g., NVMM on Jetson).
             let vc_weak = videoconvert.downgrade();
+            let pipeline_weak = pipeline.downgrade();
+            let hook = self.post_decode_hook.clone();
             decode_element.connect_pad_added(move |_element, pad| {
                 let Some(vc) = vc_weak.upgrade() else { return };
                 let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
                 if let Some(structure) = caps.structure(0) {
                     if structure.name().starts_with("video/") {
-                        if let Some(sink_pad) = vc.static_pad("sink") {
+                        // Determine the link target: either videoconvert
+                        // directly, or a hook-injected bridge element.
+                        let target = if let Some(ref hook) = hook {
+                            // Use the GStreamer caps features API to extract
+                            // the memory type (e.g., "NVMM") instead of
+                            // parsing the caps string representation.
+                            let memory_type = caps.features(0).and_then(|features| {
+                                (0..features.size()).find_map(|i| {
+                                    features
+                                        .nth(i)
+                                        .and_then(|f| {
+                                            f.as_str()
+                                                .strip_prefix("memory:")
+                                                .map(String::from)
+                                        })
+                                })
+                            });
+                            let format = structure
+                                .get::<&str>("format")
+                                .ok()
+                                .map(String::from);
+                            let info = crate::hook::DecodedStreamInfo {
+                                media_type: structure.name().to_string(),
+                                memory_type,
+                                format,
+                            };
+                            match hook(&info) {
+                                Some(element_name) => {
+                                    if let Some(pipeline) = pipeline_weak.upgrade() {
+                                        match gst::ElementFactory::make(element_name.as_str()).build() {
+                                            Ok(bridge) => {
+                                                if pipeline.add(&bridge).is_ok() {
+                                                    if bridge.sync_state_with_parent().is_ok()
+                                                        && bridge.link(&vc).is_ok()
+                                                    {
+                                                        tracing::info!(
+                                                            element = %element_name,
+                                                            "post-decode hook: inserted bridge element"
+                                                        );
+                                                        bridge
+                                                    } else {
+                                                        tracing::warn!(
+                                                            element = %element_name,
+                                                            "post-decode hook: bridge link/sync failed, \
+                                                             falling back to direct link"
+                                                        );
+                                                        let _ = pipeline.remove(&bridge);
+                                                        vc
+                                                    }
+                                                } else {
+                                                    vc
+                                                }
+                                            }
+                                            Err(_) => {
+                                                tracing::warn!(
+                                                    element = %element_name,
+                                                    "post-decode hook: element not available"
+                                                );
+                                                vc
+                                            }
+                                        }
+                                    } else {
+                                        vc
+                                    }
+                                }
+                                None => vc,
+                            }
+                        } else {
+                            vc
+                        };
+                        if let Some(sink_pad) = target.static_pad("sink") {
                             if !sink_pad.is_linked() {
-                                let _ = pad.link(&sink_pad);
+                                if let Err(e) = pad.link(&sink_pad) {
+                                    tracing::error!(
+                                        pad = %pad.name(),
+                                        target = %target.name(),
+                                        error = %e,
+                                        "failed to link decoder pad to downstream element — \
+                                         pipeline will not produce frames",
+                                    );
+                                }
                             }
                         }
                     }
@@ -392,7 +539,14 @@ impl PipelineBuilder {
                     let Some(db) = db_weak.upgrade() else { return };
                     if let Some(sink_pad) = db.static_pad("sink") {
                         if !sink_pad.is_linked() {
-                            let _ = pad.link(&sink_pad);
+                            if let Err(e) = pad.link(&sink_pad) {
+                                tracing::error!(
+                                    pad = %pad.name(),
+                                    error = %e,
+                                    "failed to link rtspsrc pad to decodebin — \
+                                     pipeline will not produce frames",
+                                );
+                            }
                         }
                     }
                 });
@@ -408,7 +562,14 @@ impl PipelineBuilder {
                     };
                     if let Some(sink_pad) = dec.static_pad("sink") {
                         if !sink_pad.is_linked() {
-                            let _ = pad.link(&sink_pad);
+                            if let Err(e) = pad.link(&sink_pad) {
+                                tracing::error!(
+                                    pad = %pad.name(),
+                                    error = %e,
+                                    "failed to link rtspsrc pad to decoder — \
+                                     pipeline will not produce frames",
+                                );
+                            }
                         }
                     }
                 });
@@ -576,5 +737,72 @@ mod tests {
         assert_eq!(b.output_format, OutputFormat::Bgr);
         assert_eq!(b.latency_ms, 500);
         assert!(matches!(b.decoder, DecoderSelection::ForceSoftware));
+    }
+
+    #[test]
+    fn builder_stores_post_decode_hook() {
+        let hook: PostDecodeHook = std::sync::Arc::new(|_info| None);
+        let b = PipelineBuilder::new(SourceSpec::file("/tmp/test.mp4"))
+            .post_decode_hook(Some(hook));
+        assert!(b.post_decode_hook.is_some());
+    }
+
+    #[test]
+    fn builder_post_decode_hook_defaults_to_none() {
+        let b = PipelineBuilder::new(SourceSpec::file("/tmp/test.mp4"));
+        assert!(b.post_decode_hook.is_none());
+    }
+
+    #[test]
+    fn hook_returns_bridge_for_nvmm() {
+        use crate::hook::DecodedStreamInfo;
+
+        let hook: PostDecodeHook = std::sync::Arc::new(|info| {
+            if info.memory_type.as_deref() == Some("NVMM") {
+                Some("nvvidconv".into())
+            } else {
+                None
+            }
+        });
+
+        let nvmm_info = DecodedStreamInfo {
+            media_type: "video/x-raw".into(),
+            memory_type: Some("NVMM".into()),
+            format: Some("NV12".into()),
+        };
+        assert_eq!(hook(&nvmm_info), Some("nvvidconv".into()));
+
+        let system_info = DecodedStreamInfo {
+            media_type: "video/x-raw".into(),
+            memory_type: None,
+            format: Some("I420".into()),
+        };
+        assert_eq!(hook(&system_info), None);
+    }
+
+    #[test]
+    fn hook_receives_all_fields() {
+        use crate::hook::DecodedStreamInfo;
+        use std::sync::{Arc, Mutex};
+
+        let captured = Arc::new(Mutex::new(None));
+        let captured_clone = Arc::clone(&captured);
+
+        let hook: PostDecodeHook = std::sync::Arc::new(move |info| {
+            *captured_clone.lock().unwrap() = Some(info.clone());
+            None
+        });
+
+        let info = DecodedStreamInfo {
+            media_type: "video/x-raw".into(),
+            memory_type: Some("NVMM".into()),
+            format: Some("NV12".into()),
+        };
+        let _ = hook(&info);
+
+        let got = captured.lock().unwrap().clone().expect("hook should be called");
+        assert_eq!(got.media_type, "video/x-raw");
+        assert_eq!(got.memory_type.as_deref(), Some("NVMM"));
+        assert_eq!(got.format.as_deref(), Some("NV12"));
     }
 }

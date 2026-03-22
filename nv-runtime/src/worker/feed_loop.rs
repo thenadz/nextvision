@@ -93,6 +93,7 @@ pub(crate) fn spawn_feed_worker(
                 had_external_subscribers: false,
                 sink_queue_capacity: config.sink_queue_capacity,
                 decode_preference: config.decode_preference,
+                post_decode_hook: config.post_decode_hook,
             };
             worker.run();
         })
@@ -131,6 +132,8 @@ struct FeedWorker {
     sink_queue_capacity: usize,
     /// Decode preference — plumbed through to the media ingress factory.
     decode_preference: nv_media::DecodePreference,
+    /// Optional post-decode hook — plumbed through to the media ingress.
+    post_decode_hook: Option<nv_media::PostDecodeHook>,
 }
 
 /// Drop guard that ensures `FeedSharedState::alive` is set to `false`
@@ -203,6 +206,9 @@ impl FeedWorker {
             .with_decode_preference(self.decode_preference);
             if let Some(ref ptz) = self.ptz_provider {
                 options = options.with_ptz_provider(Arc::clone(ptz));
+            }
+            if let Some(ref hook) = self.post_decode_hook {
+                options = options.with_post_decode_hook(Arc::clone(hook));
             }
             let source = self.factory.create(options);
 

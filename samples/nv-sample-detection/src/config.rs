@@ -15,6 +15,12 @@ pub struct DetectorConfig {
     /// Not stored on detections — provided for downstream consumers
     /// that want human-readable labels.
     pub class_names: Vec<String>,
+    /// Run inference on GPU via the CUDA execution provider.
+    ///
+    /// When enabled, the session is configured with the CUDA EP.
+    /// Falls back to CPU if CUDA is unavailable.
+    /// Requires the `gpu` crate feature.
+    pub gpu: bool,
 }
 
 impl Default for DetectorConfig {
@@ -24,6 +30,7 @@ impl Default for DetectorConfig {
             input_size: 640,
             confidence_threshold: 0.25,
             class_names: Vec::new(),
+            gpu: false,
         }
     }
 }

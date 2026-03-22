@@ -40,7 +40,7 @@ nv-temporal = { path = "nv-temporal" }
 nv-view = { path = "nv-view" }
 nv-runtime = { path = "nv-runtime" }
 nv-test-util = { path = "nv-test-util" }
-nv-sample-detection = { path = "samples/nv-sample-detection" }
+nv-sample-detection = { path = "samples/nv-sample-detection", default-features = false }
 nv-sample-tracking = { path = "samples/nv-sample-tracking" }
 
 # External

@@ -30,7 +30,9 @@
 //!
 //! ## Feature flags
 //!
-//! - **`gst-backend`** — Enables the real GStreamer backend. Without this feature,
+//! - **`gst-backend`** — Enables the real GStreamer backend. Compatible with
+//!   GStreamer >= 1.16 at runtime (avoids APIs introduced in later versions).
+//!   Without this feature,
 //!   [`MediaSource::start()`](source::MediaSource) returns
 //!   `MediaError::Unsupported`. All types, traits, and state-machine logic
 //!   compile without it, which allows development, testing, and downstream
@@ -52,6 +54,7 @@
 
 // -- Public modules --
 pub mod factory;
+pub mod hook;
 pub mod ingress;
 pub mod source;
 
@@ -78,3 +81,6 @@ pub use ingress::SourceStatus;
 pub use ingress::TickOutcome;
 pub use ingress::{FrameSink, HealthSink, MediaIngress, MediaIngressFactory};
 pub use source::MediaSource;
+
+// Post-decode hook types (platform-specific pipeline element injection).
+pub use hook::{DecodedStreamInfo, PostDecodeHook};

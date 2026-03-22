@@ -19,6 +19,7 @@ use nv_frame::FrameEnvelope;
 
 use crate::bridge::PtzTelemetry;
 use crate::decode::DecodePreference;
+use crate::hook::PostDecodeHook;
 
 /// Reported lifecycle state of a media source after a [`tick()`](MediaIngress::tick).
 ///
@@ -295,6 +296,9 @@ pub struct IngressOptions {
     pub ptz_provider: Option<Arc<dyn PtzProvider>>,
     /// Decode preference — controls hardware vs. software decode selection.
     pub decode_preference: DecodePreference,
+    /// Optional post-decode hook — can inject a pipeline element between
+    /// the decoder and the color-space converter.
+    pub post_decode_hook: Option<PostDecodeHook>,
 }
 
 impl IngressOptions {
@@ -311,6 +315,7 @@ impl IngressOptions {
             reconnect,
             ptz_provider: None,
             decode_preference: DecodePreference::default(),
+            post_decode_hook: None,
         }
     }
 
@@ -325,6 +330,13 @@ impl IngressOptions {
     #[must_use]
     pub fn with_decode_preference(mut self, pref: DecodePreference) -> Self {
         self.decode_preference = pref;
+        self
+    }
+
+    /// Attach a post-decode hook.
+    #[must_use]
+    pub fn with_post_decode_hook(mut self, hook: PostDecodeHook) -> Self {
+        self.post_decode_hook = Some(hook);
         self
     }
 }

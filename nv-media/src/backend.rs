@@ -41,6 +41,7 @@ use crate::bus::BusMessage;
 use crate::clock::PtsTracker;
 use crate::decode::{DecoderSelection, SelectedDecoderInfo, SelectedDecoderSlot};
 use crate::event::MediaEvent;
+use crate::hook::PostDecodeHook;
 use crate::ingress::{FrameSink, PtzProvider};
 use crate::pipeline::{OutputFormat, PipelineBuilder};
 
@@ -60,6 +61,8 @@ pub(crate) struct SessionConfig {
     pub output_format: OutputFormat,
     /// Optional PTZ telemetry provider — queried per frame.
     pub ptz_provider: Option<Arc<dyn PtzProvider>>,
+    /// Optional post-decode hook — can inject a pipeline element.
+    pub post_decode_hook: Option<PostDecodeHook>,
 }
 
 impl std::fmt::Debug for SessionConfig {
@@ -70,6 +73,7 @@ impl std::fmt::Debug for SessionConfig {
             .field("decoder", &self.decoder)
             .field("output_format", &self.output_format)
             .field("ptz_provider", &self.ptz_provider.as_ref().map(|_| ".."))
+            .field("post_decode_hook", &self.post_decode_hook.as_ref().map(|_| ".."))
             .finish()
     }
 }
@@ -160,6 +164,7 @@ impl GstSession {
         let built = PipelineBuilder::new(config.spec.clone())
             .decoder(config.decoder.clone())
             .output_format(config.output_format)
+            .post_decode_hook(config.post_decode_hook.clone())
             .build()?;
 
         let feed_id = config.feed_id;
@@ -250,10 +255,15 @@ impl GstSession {
                 .build(),
         );
 
-        // Install a bus sync handler so actionable messages (Error, EOS)
+        // Install a bus sync handler so lifecycle-relevant messages
         // immediately wake the consumer thread. The sync handler runs on
-        // the thread that posted the message \u2014 wake_consumer() is safe
+        // the thread that posted the message — wake_consumer() is safe
         // from any thread (condvar notify + atomic flag).
+        //
+        // Waking on Warning (not just Error/Eos) is important: GStreamer's
+        // rtspsrc posts warnings for timeout conditions that may precede
+        // or replace a formal Error.  Without this, an RTSP source timeout
+        // could leave the worker blocked in an indefinite queue.pop().
         //
         // Messages are kept on the bus (BusSyncReply::Pass) for
         // poll_bus() to process through the normal source FSM path.
@@ -261,7 +271,10 @@ impl GstSession {
         built.bus.set_sync_handler(move |_bus, msg| {
             use gstreamer::MessageView;
             match msg.view() {
-                MessageView::Error(_) | MessageView::Eos(_) => {
+                MessageView::Error(_)
+                | MessageView::Warning(_)
+                | MessageView::Eos(_)
+                | MessageView::StreamStart(_) => {
                     if let Some(s) = sink_bus.upgrade() {
                         s.wake();
                     }
@@ -556,6 +569,7 @@ mod tests {
             decoder: DecoderSelection::Auto,
             output_format: OutputFormat::default(),
             ptz_provider: None,
+            post_decode_hook: None,
         }
     }
 

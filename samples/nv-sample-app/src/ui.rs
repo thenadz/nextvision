@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use eframe::egui;
 use nv_core::id::FeedId;
+use nv_core::timestamp::WallTs;
 use nv_runtime::{
     BatchHandle, BatchMetrics, FeedHandle, OutputEnvelope, OutputSink,
     QueueTelemetry, RuntimeHandle,
@@ -60,6 +61,10 @@ struct FeedTelemetry {
     last_track_count: usize,
     last_pipeline_latency_us: u64,
     last_stage_latencies: Vec<(String, u64)>,
+    /// Wall-clock microseconds (Unix epoch) when the frame crossed the
+    /// GStreamer→NextVision bridge.  The UI recomputes frame age at
+    /// paint time as `WallTs::now() - this` for maximum freshness.
+    last_bridge_wall_us: i64,
 }
 
 /// Shared state between all sinks and the UI thread.
@@ -167,6 +172,7 @@ impl OutputSink for UiSink {
         let detection_count = output.detections.len();
         let track_count = output.tracks.len();
         let pipeline_latency_us = output.provenance.total_latency.as_nanos() / 1000;
+        let bridge_wall_us = output.wall_ts.as_micros();
         let stage_latencies: Vec<(String, u64)> = output
             .provenance
             .stages
@@ -193,12 +199,14 @@ impl OutputSink for UiSink {
                     last_track_count: 0,
                     last_pipeline_latency_us: 0,
                     last_stage_latencies: Vec::new(),
+                    last_bridge_wall_us: 0,
                 });
                 t.frame_count = count;
                 t.fps_ema = fps;
                 t.last_detection_count = detection_count;
                 t.last_track_count = track_count;
                 t.last_pipeline_latency_us = pipeline_latency_us;
+                t.last_bridge_wall_us = bridge_wall_us;
                 t.last_stage_latencies = stage_latencies;
             }
         }
@@ -277,6 +285,8 @@ pub struct NvApp {
     batch_handle: Option<BatchHandle>,
     /// Runtime handle for runtime-level telemetry.
     runtime_handle: RuntimeHandle,
+    /// Human-readable inference backend label (e.g., "GPU (CUDA)" or "CPU").
+    inference_label: String,
 }
 
 impl NvApp {
@@ -285,6 +295,7 @@ impl NvApp {
         feed_handles: Vec<FeedHandle>,
         batch_handle: Option<BatchHandle>,
         runtime_handle: RuntimeHandle,
+        inference_label: String,
     ) -> Self {
         Self {
             state,
@@ -294,6 +305,7 @@ impl NvApp {
             feed_handles,
             batch_handle,
             runtime_handle,
+            inference_label,
         }
     }
 }
@@ -329,17 +341,20 @@ impl eframe::App for NvApp {
 
         // ------- Telemetry top panel -------
         egui::TopBottomPanel::top("telemetry").show(ctx, |ui| {
+            // Row 1: header + per-feed metrics (single horizontal line).
             ui.horizontal(|ui| {
-                ui.heading("NextVision");
-                ui.separator();
-                ui.label(format!(
-                    "{} feed(s)  up {}",
-                    feed_count,
-                    format_uptime(runtime_uptime)
-                ));
+                ui.label(egui::RichText::new("NextVision").strong().size(13.0));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}f  up {}",
+                        feed_count,
+                        format_uptime(runtime_uptime)
+                    ))
+                    .size(10.0)
+                    .color(egui::Color32::GRAY),
+                );
                 ui.separator();
 
-                // Per-feed telemetry compact display.
                 for fid in feed_order.iter() {
                     if let Some(t) = state.telemetry.get(fid) {
                         let qt = queue_snapshots
@@ -350,173 +365,163 @@ impl eframe::App for NvApp {
                             .iter()
                             .find(|(id, _)| id == fid)
                             .map(|(_, d)| *d);
-                        ui.group(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label(
-                                    egui::RichText::new(format!("{}", fid))
-                                        .strong()
-                                        .size(11.0),
-                                );
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(format!("{:.1} fps", t.fps_ema))
-                                            .size(11.0)
-                                            .color(fps_colour(t.fps_ema)),
-                                    ).on_hover_text("Frames per second (exponential moving average)");
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "{}d {}t",
-                                            t.last_detection_count, t.last_track_count
-                                        ))
-                                        .size(11.0),
-                                    ).on_hover_text("Detections and active tracks in the last frame");
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "{:.1}ms",
-                                            t.last_pipeline_latency_us as f64 / 1000.0
-                                        ))
-                                        .size(11.0)
-                                        .color(latency_colour(t.last_pipeline_latency_us)),
-                                    ).on_hover_text("End-to-end pipeline latency for the last frame");
-                                    if let Some(qt) = qt {
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "src_q:{}/{}",
-                                                qt.source_depth, qt.source_capacity
-                                            ))
-                                            .size(11.0)
-                                            .color(queue_colour(qt.source_depth, qt.source_capacity)),
-                                        ).on_hover_text("Source queue: frames buffered from media ingest (depth/capacity)");
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "sink_q:{}/{}",
-                                                qt.sink_depth, qt.sink_capacity
-                                            ))
-                                            .size(11.0)
-                                            .color(queue_colour(qt.sink_depth, qt.sink_capacity)),
-                                        ).on_hover_text("Sink queue: processed frames waiting for output delivery (depth/capacity)");
-                                    }
-                                    if let Some(d) = uptime {
-                                        ui.label(
-                                            egui::RichText::new(format!("up:{}", format_uptime(d)))
-                                                .size(9.0)
-                                                .color(egui::Color32::GRAY),
-                                        ).on_hover_text("Feed uptime since start");
-                                    }
-                                    // Decode method.
-                                    let ds = decode_statuses
-                                        .iter()
-                                        .find(|(id, _)| id == fid)
-                                        .and_then(|(_, s)| s.as_ref());
-                                    if let Some(status) = ds {
-                                        let (label, colour) = match status.outcome {
-                                            nv_runtime::DecodeOutcome::Hardware => {
-                                                (format!("HW:{}", status.detail), egui::Color32::from_rgb(100, 220, 100))
-                                            }
-                                            nv_runtime::DecodeOutcome::Software => {
-                                                (format!("SW:{}", status.detail), egui::Color32::from_rgb(220, 200, 80))
-                                            }
-                                            nv_runtime::DecodeOutcome::Unknown => {
-                                                ("decode:?".to_string(), egui::Color32::GRAY)
-                                            }
-                                        };
-                                        ui.label(
-                                            egui::RichText::new(label)
-                                                .size(9.0)
-                                                .color(colour),
-                                        ).on_hover_text("Decode method selected by the media backend");
-                                    }
-                                });
-                                // Stage breakdown.
-                                if !t.last_stage_latencies.is_empty() {
-                                    ui.horizontal(|ui| {
-                                        for (name, us) in &t.last_stage_latencies {
-                                            ui.label(
-                                                egui::RichText::new(format!(
-                                                    "{}: {:.1}ms",
-                                                    name,
-                                                    *us as f64 / 1000.0
-                                                ))
-                                                .size(9.0)
-                                                .color(egui::Color32::GRAY),
-                                            ).on_hover_text(format!("Latency of stage '{}' for the last frame", name));
-                                        }
-                                    });
+
+                        ui.label(
+                            egui::RichText::new(format!("{}", fid))
+                                .strong()
+                                .size(10.0),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("{:.1}fps", t.fps_ema))
+                                .size(10.0)
+                                .color(fps_colour(t.fps_ema)),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}det {}trk",
+                                t.last_detection_count, t.last_track_count
+                            ))
+                            .size(10.0),
+                        );
+                        let age_us = WallTs::now()
+                            .as_micros()
+                            .saturating_sub(t.last_bridge_wall_us);
+                        ui.label(
+                            egui::RichText::new(format!("behind:{}", format_delay(age_us)))
+                                .size(10.0)
+                                .strong()
+                                .color(delay_colour(age_us)),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "pipe:{:.0}ms",
+                                t.last_pipeline_latency_us as f64 / 1000.0
+                            ))
+                            .size(10.0)
+                            .color(latency_colour(t.last_pipeline_latency_us)),
+                        );
+                        if let Some(qt) = qt {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "in:{}/{} out:{}/{}",
+                                    qt.source_depth, qt.source_capacity,
+                                    qt.sink_depth, qt.sink_capacity
+                                ))
+                                .size(10.0)
+                                .color(queue_colour(
+                                    qt.source_depth.max(qt.sink_depth),
+                                    qt.source_capacity.max(qt.sink_capacity),
+                                )),
+                            );
+                        }
+                        if let Some(d) = uptime {
+                            ui.label(
+                                egui::RichText::new(format!("up:{}", format_uptime(d)))
+                                    .size(9.0)
+                                    .color(egui::Color32::DARK_GRAY),
+                            );
+                        }
+                        let ds = decode_statuses
+                            .iter()
+                            .find(|(id, _)| id == fid)
+                            .and_then(|(_, s)| s.as_ref());
+                        if let Some(status) = ds {
+                            let (label, colour) = match status.outcome {
+                                nv_runtime::DecodeOutcome::Hardware => {
+                                    (format!("HW({})", status.detail), egui::Color32::from_rgb(100, 220, 100))
                                 }
-                            });
-                        });
+                                nv_runtime::DecodeOutcome::Software => {
+                                    (format!("SW({})", status.detail), egui::Color32::from_rgb(220, 200, 80))
+                                }
+                                nv_runtime::DecodeOutcome::Unknown => {
+                                    ("?".to_string(), egui::Color32::GRAY)
+                                }
+                            };
+                            ui.label(egui::RichText::new(label).size(9.0).color(colour));
+                        }
+                        ui.separator();
                     }
                 }
 
-                // Batch utilization panel (only when batched mode is active).
+                // Batch metrics (inline).
                 if let Some(ref bm) = batch_metrics {
-                    ui.separator();
-                    ui.group(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label(egui::RichText::new("Batch").strong().size(11.0));
-                            let fill_text = match bm.avg_fill_ratio() {
-                                Some(r) => format!("{:.0}% fill", r * 100.0),
-                                None => "—".to_string(),
-                            };
-                            let avg_text = match bm.avg_batch_size() {
-                                Some(a) => format!("{:.1}/{}", a, bm.configured_max_batch_size),
-                                None => "—".to_string(),
-                            };
-                            ui.label(egui::RichText::new(avg_text).size(11.0))
-                                .on_hover_text("Average batch size / configured maximum");
-                            ui.label(
-                                egui::RichText::new(fill_text)
-                                    .size(11.0)
-                                    .color(batch_fill_colour(bm.avg_fill_ratio())),
-                            ).on_hover_text("Average batch fill ratio (actual / max)");
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{}b {}p {}r pend:{}",
-                                    bm.batches_dispatched,
-                                    bm.items_processed,
-                                    bm.items_rejected,
-                                    bm.pending_items()
-                                ))
+                    let fill_pct = bm
+                        .avg_fill_ratio()
+                        .map(|r| format!("{:.0}%", r * 100.0))
+                        .unwrap_or_else(|| "—".to_string());
+                    let avg_batch = bm
+                        .avg_batch_size()
+                        .map(|a| format!("{:.1}/{}", a, bm.configured_max_batch_size))
+                        .unwrap_or_else(|| "—".to_string());
+                    ui.label(
+                        egui::RichText::new(format!("Batch:{} {}", avg_batch, fill_pct))
+                            .size(10.0)
+                            .color(batch_fill_colour(bm.avg_fill_ratio())),
+                    ).on_hover_text("Batch fill: avg frames / max, utilization %");
+                    if let Some(ns) = bm.avg_processing_ns() {
+                        ui.label(
+                            egui::RichText::new(format!("{:.0}ms", ns / 1_000_000.0))
                                 .size(9.0)
                                 .color(egui::Color32::GRAY),
-                            ).on_hover_text("b=batches dispatched, p=items processed, r=items rejected, pend=items pending");
-                        });
-                    });
+                        ).on_hover_text("Average batch inference time");
+                    }
+                    ui.separator();
                 }
 
-                // Drops summary.
-                ui.separator();
-                ui.group(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(egui::RichText::new("Drops").strong().size(11.0));
-                        let total_drops: u64 = self
-                            .feed_handles
-                            .iter()
-                            .map(|h| h.metrics().frames_dropped)
-                            .sum();
-                        let colour = if total_drops == 0 {
-                            egui::Color32::GREEN
-                        } else {
-                            egui::Color32::YELLOW
-                        };
-                        ui.label(
-                            egui::RichText::new(format!("{}", total_drops))
-                                .size(11.0)
-                                .color(colour),
-                        ).on_hover_text("Total frames dropped across all feeds due to backpressure");
-                    });
-                });
+                // Drops (inline).
+                let total_drops: u64 = self
+                    .feed_handles
+                    .iter()
+                    .map(|h| h.metrics().frames_dropped)
+                    .sum();
+                let drop_colour = if total_drops == 0 {
+                    egui::Color32::GREEN
+                } else {
+                    egui::Color32::YELLOW
+                };
+                ui.label(
+                    egui::RichText::new(format!("drop:{}", total_drops))
+                        .size(10.0)
+                        .color(drop_colour),
+                ).on_hover_text("Total frames dropped across all feeds");
             });
+
+            // Row 2: stage latencies (only if available, small text).
+            let has_stages = feed_order.iter().any(|fid| {
+                state
+                    .telemetry
+                    .get(fid)
+                    .map(|t| !t.last_stage_latencies.is_empty())
+                    .unwrap_or(false)
+            });
+            if has_stages {
+                ui.horizontal(|ui| {
+                    for fid in feed_order.iter() {
+                        if let Some(t) = state.telemetry.get(fid) {
+                            for (name, us) in &t.last_stage_latencies {
+                                let display_name = if name.contains("detector") {
+                                    format!("{} [{}]", name, self.inference_label)
+                                } else {
+                                    name.clone()
+                                };
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{}: {:.1}ms",
+                                        display_name,
+                                        *us as f64 / 1000.0
+                                    ))
+                                    .size(9.0)
+                                    .color(egui::Color32::GRAY),
+                                );
+                            }
+                            ui.separator();
+                        }
+                    }
+                });
+            }
         });
 
         // ------- Video panels in central area -------
-
-        // Compute grid dimensions: ceil(sqrt(n)) columns.
-        let cols = if feed_count == 0 {
-            1
-        } else {
-            (feed_count as f64).sqrt().ceil() as usize
-        };
 
         // Move any new snapshots from shared state into our persisted last_frames.
         drop(state);
@@ -534,38 +539,67 @@ impl eframe::App for NvApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let available = ui.available_size();
-            let rows = feed_count.div_ceil(cols);
-            let panel_w = available.x / cols as f32;
-            let panel_h = available.y / rows.max(1) as f32;
 
-            egui::Grid::new("video_grid")
-                .num_columns(cols)
-                .spacing([2.0, 2.0])
-                .show(ui, |ui| {
-                    // Pre-compute stale durations to avoid borrow issues.
-                    let stale: Vec<(FeedId, f32)> = feed_order
-                        .iter()
-                        .map(|fid| {
-                            let s = self
-                                .last_frame_times
-                                .get(fid)
-                                .map(|t| now.duration_since(*t).as_secs_f32())
-                                .unwrap_or(f32::MAX);
-                            (*fid, s)
-                        })
-                        .collect();
+            // Determine columns: each feed cell must be at least 400px
+            // wide.  Feeds wrap to fewer columns (using vertical space
+            // via scrolling) rather than shrinking below this threshold.
+            let min_cell_w = 400.0_f32;
+            let cols = if feed_count == 0 {
+                1
+            } else {
+                let max_cols = (available.x / min_cell_w).floor() as usize;
+                max_cols.clamp(1, feed_count)
+            };
+            let rows = feed_count.div_ceil(cols).max(1);
+            let cell_w = available.x / cols as f32;
 
-                    for (i, (fid, stale_secs)) in stale.iter().enumerate() {
-                        // Each cell is a fixed-size group.
-                        ui.allocate_ui(egui::vec2(panel_w - 4.0, panel_h - 4.0), |ui| {
-                            self.draw_feed_panel(ui, *fid, *stale_secs);
-                        });
+            // Cell height: base on 16:9 video aspect ratio.  If the
+            // window is tall enough, expand up to a square cell so
+            // videos fill space without a giant void below them.
+            let aspect_h = cell_w * 9.0 / 16.0;
+            let natural_h = available.y / rows as f32;
+            let cell_h = natural_h.clamp(aspect_h, cell_w);
+            let needs_scroll = cell_h * rows as f32 > available.y + 1.0;
 
-                        if (i + 1) % cols == 0 {
-                            ui.end_row();
+            let mut build_grid = |ui: &mut egui::Ui| {
+                // Pre-compute stale durations to avoid borrow issues.
+                let stale: Vec<(FeedId, f32)> = feed_order
+                    .iter()
+                    .map(|fid| {
+                        let s = self
+                            .last_frame_times
+                            .get(fid)
+                            .map(|t| now.duration_since(*t).as_secs_f32())
+                            .unwrap_or(f32::MAX);
+                        (*fid, s)
+                    })
+                    .collect();
+
+                egui::Grid::new("video_grid")
+                    .num_columns(cols)
+                    .spacing([2.0, 2.0])
+                    .show(ui, |ui| {
+                        for (i, (fid, stale_secs)) in stale.iter().enumerate() {
+                            ui.allocate_ui(
+                                egui::vec2(cell_w - 4.0, cell_h - 4.0),
+                                |ui| {
+                                    self.draw_feed_panel(ui, *fid, *stale_secs);
+                                },
+                            );
+                            if (i + 1) % cols == 0 {
+                                ui.end_row();
+                            }
                         }
-                    }
-                });
+                    });
+            };
+
+            if needs_scroll {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| build_grid(ui));
+            } else {
+                build_grid(ui);
+            }
         });
     }
 }
@@ -618,9 +652,9 @@ impl NvApp {
             // Compute scaled size maintaining aspect ratio.
             let img_w = width as f32;
             let img_h = height as f32;
-            let scale = (available.x / img_w).min(available.y / img_h);
-            let disp_w = img_w * scale;
-            let disp_h = img_h * scale;
+            let scale = (available.x / img_w).min(available.y / img_h).max(0.0);
+            let disp_w = (img_w * scale).max(1.0);
+            let disp_h = (img_h * scale).max(1.0);
 
             // Draw the video frame.
             let (rect, _response) =
@@ -661,9 +695,40 @@ impl NvApp {
                 );
             }
 
+            // Frame age overlay — top-right of video, always visible.
+            let age_us = WallTs::now().as_micros()
+                .saturating_sub(snap.output.wall_ts.as_micros());
+            let delay_text = format!("behind: {}", format_delay(age_us));
+            let delay_galley = ui.painter().layout_no_wrap(
+                delay_text.clone(),
+                egui::FontId::proportional(13.0),
+                egui::Color32::WHITE,
+            );
+            let delay_pos = egui::pos2(
+                rect.max.x - delay_galley.size().x - 8.0,
+                rect.min.y + 4.0,
+            );
+            let delay_bg = egui::Rect::from_min_size(
+                delay_pos - egui::vec2(3.0, 1.0),
+                delay_galley.size() + egui::vec2(6.0, 2.0),
+            );
+            let dc = delay_colour(age_us);
+            ui.painter().rect_filled(
+                delay_bg,
+                3.0,
+                egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+            );
+            ui.painter().text(
+                delay_pos,
+                egui::Align2::LEFT_TOP,
+                &delay_text,
+                egui::FontId::proportional(13.0),
+                dc,
+            );
+
             // Detection count + seq overlay in bottom-left.
             let info_text = format!(
-                "seq:{} det:{} trk:{} lat:{:.1}ms",
+                "seq:{} det:{} trk:{} pipeline:{:.1}ms",
                 snap.output.frame_seq,
                 snap.output.detections.len(),
                 snap.output.tracks.len(),
@@ -782,6 +847,47 @@ fn batch_fill_colour(ratio: Option<f64>) -> egui::Color32 {
     }
 }
 
+/// Colour for the "behind real-time" delay indicator.
+///
+/// Green  : < 500 ms  — effectively live
+/// Yellow : 500 ms – 2 s — noticeable delay
+/// Orange : 2 s – 5 s — falling behind
+/// Red    : > 5 s — significantly lagging
+fn delay_colour(age_us: i64) -> egui::Color32 {
+    match age_us {
+        ..500_000 => egui::Color32::GREEN,
+        ..2_000_000 => egui::Color32::YELLOW,
+        ..5_000_000 => egui::Color32::from_rgb(255, 165, 0),
+        _ => egui::Color32::RED,
+    }
+}
+
+/// Human-readable delay formatting.
+///
+/// Adapts units to magnitude:
+/// - < 1 s  → "234ms"
+/// - < 60 s → "3.2s"
+/// - ≥ 60 s → "2m 15s"
+fn format_delay(age_us: i64) -> String {
+    if age_us < 0 {
+        // Clock skew — frame appears to be from the future.
+        return "<0ms".to_string();
+    }
+    let ms = age_us as f64 / 1000.0;
+    if ms < 1000.0 {
+        format!("{:.0}ms", ms)
+    } else {
+        let secs = ms / 1000.0;
+        if secs < 60.0 {
+            format!("{:.1}s", secs)
+        } else {
+            let m = secs as u64 / 60;
+            let s = secs as u64 % 60;
+            format!("{}m {:02}s", m, s)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Launch function
 // ---------------------------------------------------------------------------
@@ -796,10 +902,20 @@ pub fn run_ui(
     feed_handles: Vec<FeedHandle>,
     batch_handle: Option<BatchHandle>,
     runtime_handle: RuntimeHandle,
+    inference_label: String,
 ) -> Result<(), eframe::Error> {
+    let hostname = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_default();
+    let title = if hostname.is_empty() {
+        "NextVision — Detection + Tracking".to_string()
+    } else {
+        format!("NextVision — Detection + Tracking@{hostname}")
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("NextVision — Detection + Tracking")
+            .with_title(&title)
             .with_inner_size([1280.0, 800.0]),
         ..Default::default()
     };
@@ -808,7 +924,7 @@ pub fn run_ui(
         "NextVision",
         options,
         Box::new(move |_cc| {
-            Ok(Box::new(NvApp::new(state, feed_handles, batch_handle, runtime_handle)))
+            Ok(Box::new(NvApp::new(state, feed_handles, batch_handle, runtime_handle, inference_label)))
         }),
     )
 }

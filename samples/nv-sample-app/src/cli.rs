@@ -60,4 +60,29 @@ pub struct Cli {
     /// instead of the multi-panel UI.
     #[arg(long, default_value_t = false)]
     pub headless: bool,
+
+    /// Run detection on GPU via the CUDA execution provider.
+    /// Requires the `gpu` feature on nv-sample-detection.
+    #[arg(long, default_value_t = false)]
+    pub gpu: bool,
+
+    /// Video decoder preference: auto, software, prefer-hw, require-hw.
+    ///
+    /// Use "software" to force CPU decoding — bypasses hardware decoder
+    /// and NVMM memory, which avoids EGL/nvbufsurftransform issues in
+    /// containers without full GPU display access.
+    #[arg(long, default_value = "auto", value_parser = parse_decode_preference)]
+    pub decode: nv_runtime::DecodePreference,
+}
+
+fn parse_decode_preference(s: &str) -> Result<nv_runtime::DecodePreference, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "auto" => Ok(nv_runtime::DecodePreference::Auto),
+        "software" | "sw" | "cpu" => Ok(nv_runtime::DecodePreference::CpuOnly),
+        "prefer-hw" | "prefer_hw" => Ok(nv_runtime::DecodePreference::PreferHardware),
+        "require-hw" | "require_hw" => Ok(nv_runtime::DecodePreference::RequireHardware),
+        _ => Err(format!(
+            "unknown decode preference '{s}'; expected: auto, software, prefer-hw, require-hw"
+        )),
+    }
 }
