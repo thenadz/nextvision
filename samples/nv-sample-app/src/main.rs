@@ -41,6 +41,7 @@ use std::time::Duration;
 use clap::Parser;
 use tracing::{error, info};
 
+use nv_metrics::MetricsExporter;
 use nv_sample_tracking::{TrackerConfig, TrackerStage};
 use nv_sample_detection::{DetectorBatchProcessor, DetectorConfig, DetectorStage};
 use nv_core::{CameraMode, SourceSpec};
@@ -135,6 +136,18 @@ impl OutputSink for LogSink {
 fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::builder().build()?;
     let runtime_handle = runtime.handle();
+
+    // Metrics: spin up a tokio runtime for the OTel background exporter.
+    // Only active when --otlp-endpoint is provided.
+    let _tokio_rt = tokio::runtime::Runtime::new()?;
+    let _tokio_guard = _tokio_rt.enter();
+    let _metrics = args.otlp_endpoint.as_ref().map(|endpoint| {
+        MetricsExporter::builder()
+            .runtime_handle(runtime_handle.clone())
+            .otlp_endpoint(endpoint)
+            .service_name("nv-sample-app")
+            .build()
+    }).transpose()?;
 
     // Feed handles — kept alive and passed to the UI.
     let feeds;

@@ -8,6 +8,7 @@ members = [
     "nv-temporal",
     "nv-view",
     "nv-runtime",
+    "nv-metrics",
     "nv-test-util",
     "samples/nv-sample-detection",
     "samples/nv-sample-tracking",
@@ -21,6 +22,7 @@ default-members = [
     "nv-temporal",
     "nv-view",
     "nv-runtime",
+    "nv-metrics",
     "nv-test-util",
 ]
 
@@ -44,6 +46,7 @@ nv-temporal = { path = "nv-temporal" }
 nv-view = { path = "nv-view" }
 nv-runtime = { path = "nv-runtime" }
 nv-test-util = { path = "nv-test-util" }
+nv-metrics = { path = "nv-metrics" }
 nv-sample-detection = { path = "samples/nv-sample-detection", default-features = false }
 nv-sample-tracking = { path = "samples/nv-sample-tracking" }
 

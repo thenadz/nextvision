@@ -1,0 +1,30 @@
+[package]
+name = "nv-metrics"
+description = "Optional OpenTelemetry metrics exporter for the NextVision runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
+readme = "../README.md"
+
+[dependencies]
+nv-runtime = { workspace = true }
+opentelemetry = { version = "0.31", features = ["metrics"] }
+opentelemetry_sdk = { version = "0.31", features = ["metrics", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.31", features = ["metrics", "grpc-tonic"], optional = true }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+default = ["otlp-grpc"]
+otlp-grpc = ["dep:opentelemetry-otlp"]
+
+[dev-dependencies]
+nv-core = { workspace = true }
+opentelemetry_sdk = { version = "0.31", features = ["metrics", "testing"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

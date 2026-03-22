@@ -66,6 +66,12 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub gpu: bool,
 
+    /// OTLP gRPC endpoint for OpenTelemetry metrics export.
+    /// When set, runtime diagnostics are exported as standard OTel metrics.
+    /// Example: --otlp-endpoint http://localhost:4317
+    #[arg(long)]
+    pub otlp_endpoint: Option<String>,
+
     /// Video decoder preference: auto, software, prefer-hw, require-hw.
     ///
     /// Use "software" to force CPU decoding — bypasses hardware decoder

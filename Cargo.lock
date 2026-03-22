@@ -2932,11 +2932,13 @@ dependencies = [
  "hostname",
  "minifb",
  "nv-core",
+ "nv-metrics",
  "nv-perception",
  "nv-runtime",
  "nv-sample-detection",
  "nv-sample-tracking",
  "nv-test-util",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
