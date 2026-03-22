@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::error::MetricsError;
-use crate::recorder::Instruments;
+use crate::recorder::{HealthCounters, Instruments};
 
 // ---------------------------------------------------------------------------
 // Builder
@@ -30,7 +30,7 @@ use crate::recorder::Instruments;
 /// ```no_run
 /// use std::time::Duration;
 /// use nv_metrics::MetricsExporter;
-/// # fn example(handle: nv_runtime::RuntimeHandle) -> Result<(), nv_metrics::MetricsError> {
+/// # async fn example(handle: nv_runtime::RuntimeHandle) -> Result<(), nv_metrics::MetricsError> {
 ///
 /// let metrics = MetricsExporter::builder()
 ///     .runtime_handle(handle)
@@ -39,7 +39,7 @@ use crate::recorder::Instruments;
 ///
 /// // ... application runs ...
 ///
-/// metrics.shutdown();
+/// metrics.shutdown().await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -145,16 +145,31 @@ impl MetricsExporterBuilder {
     /// Returns [`MetricsError::NoRuntimeHandle`] if no handle was set.
     /// Returns [`MetricsError::NoExporter`] if no provider or endpoint
     /// was configured.
+    /// Returns [`MetricsError::ZeroPollInterval`] if `poll_interval` is zero.
+    /// Returns [`MetricsError::NoTokioRuntime`] if called outside a tokio
+    /// runtime context.
     pub fn build(self) -> Result<MetricsExporter, MetricsError> {
+        if self.poll_interval.is_zero() {
+            return Err(MetricsError::ZeroPollInterval);
+        }
+
+        let owns_provider = self.provider.is_none();
         let provider = self.resolve_provider()?;
         let handle = self.handle.ok_or(MetricsError::NoRuntimeHandle)?;
         let meter = provider.meter("nv-metrics");
         let instruments = Instruments::new(&meter);
+        let health_counters = HealthCounters::new(&meter);
+        let health_rx = handle.health_subscribe();
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let poll_interval = self.poll_interval;
 
-        let task = tokio::spawn(poll_loop(handle, instruments, poll_interval, shutdown_rx));
+        let task = tokio::runtime::Handle::try_current()
+            .map_err(|_| MetricsError::NoTokioRuntime)?
+            .spawn(poll_loop(
+                handle, instruments, health_counters, health_rx,
+                poll_interval, shutdown_rx,
+            ));
 
         debug!(
             poll_interval_ms = poll_interval.as_millis() as u64,
@@ -163,6 +178,7 @@ impl MetricsExporterBuilder {
 
         Ok(MetricsExporter {
             _provider: provider,
+            owns_provider,
             shutdown_tx,
             task: Some(task),
         })
@@ -236,24 +252,43 @@ fn build_otlp_provider(
 async fn poll_loop(
     handle: RuntimeHandle,
     instruments: Instruments,
+    health_counters: HealthCounters,
+    mut health_rx: tokio::sync::broadcast::Receiver<nv_runtime::HealthEvent>,
     interval: Duration,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
+    let mut poll_tick = tokio::time::interval(interval);
+    // First tick fires immediately — skip it so the first real
+    // recording happens after one full interval.
+    poll_tick.tick().await;
+
     loop {
         tokio::select! {
-            _ = tokio::time::sleep(interval) => {}
+            _ = poll_tick.tick() => {
+                match handle.diagnostics() {
+                    Ok(diag) => instruments.record(&diag),
+                    Err(e) => {
+                        warn!(error = %e, "nv-metrics: failed to read diagnostics, skipping cycle");
+                    }
+                }
+            }
+            event = health_rx.recv() => {
+                match event {
+                    Ok(ref e) => health_counters.record(e),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(missed = n, "nv-metrics: health subscriber lagged, some events uncounted");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        debug!("nv-metrics: health channel closed");
+                        return;
+                    }
+                }
+            }
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
                     debug!("nv-metrics poll loop shutting down");
                     return;
                 }
-            }
-        }
-
-        match handle.diagnostics() {
-            Ok(diag) => instruments.record(&diag),
-            Err(e) => {
-                warn!(error = %e, "nv-metrics: failed to read diagnostics, skipping cycle");
             }
         }
     }
@@ -279,6 +314,10 @@ async fn poll_loop(
 pub struct MetricsExporter {
     /// Kept alive so the OTel pipeline is not dropped prematurely.
     _provider: SdkMeterProvider,
+    /// `true` when we built the provider internally (OTLP endpoint flow).
+    /// `false` when the caller supplied their own via `meter_provider()`.
+    /// We only call `provider.shutdown()` when we own it.
+    owns_provider: bool,
     shutdown_tx: watch::Sender<bool>,
     task: Option<JoinHandle<()>>,
 }
@@ -303,7 +342,9 @@ impl MetricsExporter {
         if let Some(task) = self.task.take() {
             let _ = task.await;
         }
-        self._provider.shutdown()?;
+        if self.owns_provider {
+            self._provider.shutdown()?;
+        }
         debug!("nv-metrics exporter shut down");
         Ok(())
     }
@@ -452,6 +493,66 @@ mod tests {
             *rx.borrow(),
             "dropping MetricsExporter should signal shutdown"
         );
+        runtime.shutdown().unwrap();
+    }
+
+    #[test]
+    fn build_rejects_zero_poll_interval() {
+        let runtime = nv_runtime::Runtime::builder().build().unwrap();
+        let result = MetricsExporter::builder()
+            .runtime_handle(runtime.handle())
+            .meter_provider(SdkMeterProvider::builder().build())
+            .poll_interval(Duration::ZERO)
+            .build();
+        assert!(
+            matches!(result, Err(MetricsError::ZeroPollInterval)),
+            "zero poll interval should be rejected"
+        );
+        runtime.shutdown().unwrap();
+    }
+
+    #[test]
+    fn build_outside_tokio_returns_typed_error() {
+        // Run on a plain thread with no tokio runtime active.
+        let result = std::thread::spawn(|| {
+            let runtime = nv_runtime::Runtime::builder().build().unwrap();
+            let result = MetricsExporter::builder()
+                .runtime_handle(runtime.handle())
+                .meter_provider(SdkMeterProvider::builder().build())
+                .build();
+            runtime.shutdown().unwrap();
+            result
+        })
+        .join()
+        .unwrap();
+        assert!(
+            matches!(result, Err(MetricsError::NoTokioRuntime)),
+            "should return NoTokioRuntime"
+        );
+    }
+
+    #[tokio::test]
+    async fn byo_provider_not_shut_down() {
+        let runtime = nv_runtime::Runtime::builder().build().unwrap();
+        let provider = SdkMeterProvider::builder().build();
+        let exporter = MetricsExporter::builder()
+            .runtime_handle(runtime.handle())
+            .meter_provider(provider.clone())
+            .build()
+            .unwrap();
+
+        // Shutting down the exporter should NOT shut down the
+        // caller-supplied provider.
+        exporter.shutdown().await.unwrap();
+
+        // The provider should still be usable — creating a meter
+        // and recording a value should not panic.
+        let meter = provider.meter("post-shutdown-test");
+        let counter = meter.u64_counter("test_counter").build();
+        counter.add(1, &[]);
+
+        // Clean up by shutting down the provider ourselves.
+        provider.shutdown().unwrap();
         runtime.shutdown().unwrap();
     }
 }

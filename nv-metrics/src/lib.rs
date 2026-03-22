@@ -53,11 +53,41 @@
 //! configuring an endpoint. The exporter will record into your
 //! provider's meter and respect your export/resource configuration.
 //!
-//! # Phase 2 (planned)
+//! **Ownership note:** when you supply your own provider, `shutdown()`
+//! does *not* call `provider.shutdown()` — the caller retains full
+//! lifecycle ownership. The exporter only shuts down providers it
+//! created internally (i.e. from an OTLP endpoint).
 //!
-//! - Health event counters via `RuntimeHandle::health_subscribe()`
-//!   (stage errors, sink panics, backpressure drops, etc.)
-//! - Prometheus pull endpoint behind a `prometheus` feature flag
+//! # Health-event counters
+//!
+//! In addition to periodic gauge snapshots, the exporter subscribes to
+//! [`RuntimeHandle::health_subscribe()`](nv_runtime::RuntimeHandle::health_subscribe)
+//! and increments OTel **counters** on each event:
+//!
+//! | Counter | Attributes | Trigger |
+//! |---|---|---|
+//! | `nv.health.source_disconnections` | `feed_id` | `SourceDisconnected` |
+//! | `nv.health.source_reconnections` | `feed_id` | `SourceReconnecting` |
+//! | `nv.health.stage_errors` | `feed_id`, `stage_id` | `StageError` |
+//! | `nv.health.stage_panics` | `feed_id`, `stage_id` | `StagePanic` |
+//! | `nv.health.feed_restarts` | `feed_id` | `FeedRestarting` |
+//! | `nv.health.feeds_stopped` | `feed_id` | `FeedStopped` |
+//! | `nv.health.backpressure_drops` | `feed_id` | `BackpressureDrop` |
+//! | `nv.health.view_epoch_changes` | `feed_id` | `ViewEpochChanged` |
+//! | `nv.health.view_degradations` | `feed_id` | `ViewDegraded` |
+//! | `nv.health.output_lag_events` | — | `OutputLagged` |
+//! | `nv.health.sink_panics` | `feed_id` | `SinkPanic` |
+//! | `nv.health.sink_timeouts` | `feed_id` | `SinkTimeout` |
+//! | `nv.health.sink_backpressure` | `feed_id` | `SinkBackpressure` |
+//! | `nv.health.track_admission_rejected` | `feed_id` | `TrackAdmissionRejected` |
+//! | `nv.health.batch_errors` | `processor_id` | `BatchError` |
+//! | `nv.health.batch_submission_rejected` | `feed_id`, `processor_id` | `BatchSubmissionRejected` |
+//! | `nv.health.batch_timeouts` | `feed_id`, `processor_id` | `BatchTimeout` |
+//! | `nv.health.batch_in_flight_exceeded` | `feed_id`, `processor_id` | `BatchInFlightExceeded` |
+//!
+//! # Optional extensions
+//!
+//! - A Prometheus pull endpoint can be added behind a `prometheus` feature flag.
 
 mod error;
 mod exporter;

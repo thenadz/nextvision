@@ -139,6 +139,13 @@ nextvision/
 │       ├── executor/             # stage executor, frame processing, view management
 │       └── worker/               # per-feed worker threads, ingress adapter, sink
 │
+├── nv-metrics/                   # optional OpenTelemetry metrics bridge (OTLP export)
+│   └── src/
+│       ├── lib.rs                # crate docs, MetricsExporter re-export
+│       ├── exporter.rs           # MetricsExporter, MetricsExporterBuilder, background task
+│       ├── recorder.rs           # Instruments (30 gauges), HealthCounters (18 counters)
+│       └── error.rs              # MetricsError
+│
 └── nv-test-util/                 # test harnesses, synthetic frames, mock stages
     └── src/
         ├── lib.rs
@@ -147,12 +154,14 @@ nextvision/
         └── clock.rs              # controllable test clock
 ```
 
-### Why 8 crates, not 10
+### Crate boundary rationale
 
-The original design had `nv-output` (3 files: envelope, provenance, sink) and `nv-observe` (3 files: metrics, health, tracing) as separate crates. Both were too thin to justify the crate boundary overhead:
+Output types (`OutputEnvelope`, `Provenance`, `OutputSink`) live in `nv-runtime`. They depend on four other crates (`nv-core`, `nv-perception`, `nv-temporal`, `nv-view`) and consist of only an aggregation struct, a provenance struct, and a 1-method trait — direct artifacts of the pipeline orchestrator.
 
-- **`nv-output`** depended on 4 other crates (`nv-core`, `nv-perception`, `nv-temporal`, `nv-view`) and contributed only an aggregation struct (`OutputEnvelope`), a provenance struct, and a 1-method trait (`OutputSink`). These are direct artifacts of the pipeline orchestrator and belong in `nv-runtime`.
-- **`nv-observe`** needed to reference types from `nv-core`, `nv-view`, and `nv-perception` (for `HealthEvent` variants that carry `StageError`, `MediaError`, `ViewEpoch`, etc.). This created dependency pressure that either forced `nv-observe` to depend on half the workspace or forced the `HealthEvent` enum to live elsewhere. `HealthEvent` and metric snapshot types are foundational — `HealthEvent` goes in `nv-core` (where the error/id types it references already live), metric snapshot helpers go in `nv-core`, and tracing span helpers go in `nv-runtime` (where the feed/stage execution context lives).
+Observability primitives are split by dependency weight:
+
+- **`HealthEvent` and metric snapshot types** live in `nv-core`, where the error/ID types they reference already live. Tracing span helpers live in `nv-runtime`, where the feed/stage execution context lives. These have no external dependencies beyond what the core crates already pull in.
+- **`nv-metrics`** is a separate crate because it brings a heavy, optional dependency subtree (`opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`, `tonic`/gRPC) that most library consumers should not pay for. It depends only on `nv-runtime` (which re-exports the types it needs) and `nv-core` (dev-dependency for `HealthEvent` in tests). Users who do not want OpenTelemetry export simply omit `nv-metrics` from their dependency list — no feature flags, no conditional compilation in the core crates.
 
 ### Dependency graph (simplified)
 
@@ -164,10 +173,13 @@ nv-perception    ← nv-core, nv-frame
 nv-temporal      ← nv-core, nv-perception, nv-view
 nv-view          ← nv-core
 nv-runtime       ← nv-core, nv-frame, nv-media, nv-perception, nv-temporal, nv-view
+nv-metrics       ← nv-runtime, opentelemetry, opentelemetry-otlp (optional, standalone)
 nv-test-util     ← nv-core, nv-frame, nv-perception (dev-dependency only)
 ```
 
-Key rule: `gstreamer-rs` appears **only** in `nv-media`'s `Cargo.toml`. No other crate transitively depends on it.
+Key rules:
+- `gstreamer-rs` appears **only** in `nv-media`'s `Cargo.toml`. No other crate transitively depends on it.
+- `opentelemetry` / `opentelemetry-otlp` appear **only** in `nv-metrics`'s `Cargo.toml`. Users who do not depend on `nv-metrics` incur no OTel compile cost.
 
 ---
 
@@ -214,7 +226,7 @@ let mut health_rx = runtime.health_subscribe();
 ### Design decisions
 
 - **Builder pattern for config**, plain methods for runtime operations.
-- **No dynamic registration of stages after start.** Stages are fixed at feed creation. This eliminates a class of race conditions and simplifies reasoning.
+- **Stages are fixed at feed creation** — no dynamic registration after start. Race-free lifecycle.
 - **`FeedHandle` is the primary user touchpoint** for per-feed operations once running.
 - **`Runtime` manages cross-feed concerns**: thread pools, global metrics, shutdown coordination.
 
@@ -500,7 +512,7 @@ When each stage returns a `StageOutput`, the pipeline executor merges it into th
 
 The executor applies these rules immediately after each stage's `process()` returns, before calling the next stage. This means stage N+1 always sees the accumulated result of stages 0..N in `ctx.artifacts`.
 
-**Key constraint:** A stage that returns `Some(DetectionSet)` or `Some(Vec<Track>)` is asserting ownership of the full detection/track set. It is not asking the executor to merge — it is declaring "these are the detections/tracks for this frame as of my stage." This is a conscious design choice that avoids the ambiguity of partial-merge semantics.
+**Key constraint:** A stage that returns `Some(DetectionSet)` or `Some(Vec<Track>)` is asserting ownership of the full detection/track set — it declares "these are the detections/tracks for this frame as of my stage." Stages that need to augment a previous set read it from `ctx.artifacts`, combine, and return the full result.
 
 /// A generic named signal — domain users define the names and semantics.
 #[derive(Clone)]
@@ -606,9 +618,9 @@ impl FrameEnvelope {
 
 No mutable access. No pixel format conversion on the hot path — conversion utilities exist in `nv-frame::convert` but are opt-in and allocate a new `FrameEnvelope`.
 
-### Why normalized coordinates?
+### Normalized coordinates
 
-`BBox` and `Point2` use `[0, 1]` normalized coordinates relative to frame dimensions. This eliminates resolution-dependency throughout the perception pipeline. Stages that need absolute pixel coordinates can compute them trivially: `px_x = normalized_x * width`.
+`BBox` and `Point2` use `[0, 1]` normalized coordinates relative to frame dimensions, making all perception logic resolution-independent. Stages that need absolute pixel coordinates compute them trivially: `px_x = normalized_x * width`.
 
 ---
 
@@ -624,13 +636,9 @@ For each incoming frame on a given feed:
 4. Each stage's `StageOutput` is merged into the accumulator.
 5. After all stages complete, the accumulator is written into `TemporalStore` and forwarded to output.
 
-### Why linear, not a DAG?
+### Linear execution model
 
-- A linear pipeline covers the vast majority of real perception workloads (detect → track → classify → signal).
-- DAGs introduce scheduling complexity, partial-ordering ambiguity, and error-propagation nightmares that are not justified for this library's scope.
-- Users who need branching can compose multiple feeds or fan-out inside a custom stage.
-
-This follows AGENTS.md rule 22: *Do not build a framework inside the framework.*
+A linear pipeline covers the vast majority of real perception workloads (detect → track → classify → signal). Users who need branching can compose multiple feeds or fan-out inside a custom stage.
 
 ### Stage contract
 
@@ -761,11 +769,7 @@ The snapshot is taken once per frame, before stage execution begins. The strateg
 
 **Cost analysis:** With N active tracks, each holding an observations `VecDeque` (bounded by `max_observations_per_track`, typically 30-100) and a `Trajectory` (bounded by segment count and eviction), the clone cost is proportional to N * observations_per_track. For typical deployments (50-200 active tracks, 50 observations each), this is ~10K-20K small struct copies per frame — well under 100μs on modern hardware.
 
-**Why not a persistent data structure:** Persistent/immutable data structures (e.g., `im::HashMap`) eliminate the clone but add per-access overhead (pointer chasing, deeper trees) that affects every stage's temporal state lookup on every frame. The snapshot is taken once per frame; stage lookups happen many times per frame. Optimizing the uncommon operation (snapshot) at the expense of the common one (lookup) is the wrong tradeoff.
-
-**Why not double-buffering:** Double-buffering (two `TemporalStoreInner` instances, swap after write) would eliminate cloning but requires the executor to know that no stage holds a reference to the old buffer before overwriting. This is achievable but adds lifecycle complexity. It is a valid v1 optimization if profiling shows snapshot cloning is a bottleneck.
-
-**v0 decision:** Start with clone-and-arc. Profile under realistic track counts. If snapshot cloning appears in flamegraphs, switch to double-buffering. The `TemporalStoreSnapshot` type is opaque, so the strategy can change without public API impact.
+The `TemporalStoreSnapshot` type is opaque, so the snapshotting strategy is an internal implementation detail.
 
 ### Eviction
 
@@ -1012,9 +1016,9 @@ pub struct MotionReport {
 | Both are `None`, `motion_hint` is `Some` | `External` |
 | All fields are `None` | `None` |
 
-The derivation inspects `GlobalTransformEstimate.method` to distinguish video-inferred transforms from externally-supplied ones. This prevents an external transform provider from being misclassified as `Inferred`, which would cause downstream trust gating (e.g., "only act on Telemetry or External sources") to apply the wrong confidence model.
+The derivation inspects `GlobalTransformEstimate.method` to distinguish video-inferred transforms from externally-supplied ones, ensuring correct classification for downstream trust gating (e.g., "only act on Telemetry or External sources").
 
-This eliminates the redundancy of asking the provider to state something the fields already encode, and removes the possibility of inconsistency (e.g., provider says `Telemetry` but `ptz` is `None`). The derived `MotionSource` is stored on `ViewState` for downstream consumption.
+Deriving `MotionSource` from report contents (rather than having the provider declare it) guarantees consistency — the source always matches the data present. The derived `MotionSource` is stored on `ViewState` for downstream consumption.
 
 /// User-implementable. Provides camera motion information each frame.
 ///
@@ -1056,11 +1060,11 @@ pub struct MotionPollContext<'a> {
 - **Egomotion providers** (optical flow, feature matching): These perform computation on the frame (typically 1-5ms). This cost is unavoidable and is visible in the `nv.feed.pipeline_latency_ns` histogram. If egomotion computation is too expensive, the provider can run it asynchronously and return the previous frame's result with a one-frame lag — this is a valid tradeoff that the provider author makes, not the library.
 - **External providers**: Should return pre-computed data. `poll()` should be a channel read or atomic load.
 
-The library does not provide an async variant of `poll()` because the stage thread is synchronous (OS thread running blocking FFI). An async poll would require bridging to a tokio runtime just to call one function, adding complexity for no benefit. Providers that need async internally should manage their own background tasks and have `poll()` return the latest available result.
+`poll()` is synchronous. The stage thread runs blocking FFI (TensorRT, ONNX Runtime), so there is no async runtime available on this thread. Providers that need async internally manage their own background tasks and have `poll()` return the latest available result.
 
 ### Discontinuity policy: EpochPolicy trait
 
-The original design hard-coded "increment epoch + segment all trajectories" on every discontinuity. This is wrong for cameras that move frequently but return to known positions (PTZ presets, auto-tracking). The `EpochPolicy` trait lets the view system ask a configurable strategy what to do when motion is detected.
+Cameras that move frequently but return to known positions (PTZ presets, auto-tracking) require nuanced discontinuity handling. The `EpochPolicy` trait lets the view system ask a configurable strategy what to do when motion is detected.
 
 ```rust
 /// Returned by EpochPolicy to tell the view system what to do
@@ -1193,23 +1197,21 @@ When an `EpochDecision::Compensate { transform }` is applied, the `TemporalStore
 
 6. **What is NOT compensated:** Detection confidences, embeddings, and class IDs are not modified by compensation. Only spatial fields (`BBox` and `Point2`) are transformed. `MotionFeatures` are recomputed from the transformed trajectory points after compensation.
 
-### Why ViewEpoch still matters
+### ViewEpoch and compensation
 
-`Compensate` and `Degrade` reduce the frequency of epoch changes but do not eliminate the concept. When compensation is impossible (no transform, or confidence too low) and the view has changed substantially, `Segment` is the correct and only safe response. Epoch segmentation remains the firewall against silently mixing incompatible coordinates.
+`Compensate` and `Degrade` reduce the frequency of epoch changes but do not eliminate the concept. When compensation is impossible (no transform, or confidence too low) and the view has changed substantially, `Segment` is the only safe response. Epoch segmentation is the firewall against silently mixing incompatible coordinates.
 
-### Why ViewVersion?
+### ViewVersion
 
 `ViewVersion` is strictly finer-grained than `ViewEpoch`. It increments on every frame where *anything* in the ViewState changed — including small PTZ adjustments that don't trigger an epoch change. Consumers that cache data relative to a specific view (e.g., a stage that builds a local occupancy grid) can cheaply test `my_cached_version == current_view.version` to invalidate without deep-comparing the full `ViewState`.
 
-### Why MotionSource on ViewState?
+### MotionSource on ViewState
 
-A downstream analytics layer may reasonably apply different trust thresholds to telemetry-sourced vs. inferred-sourced motion. For example: "gate counting is reliable when motion_source is Telemetry with Known PTZ preset, but should be paused when motion_source is Inferred with confidence < 0.5." Without `MotionSource`, consumers would have to reverse-engineer this from the presence/absence of `ptz` and `global_transform` fields. That is fragile. Making it explicit is cheap and directly supports auditability.
+Downstream analytics layers apply different trust thresholds to telemetry-sourced vs. inferred-sourced motion (e.g., "gate counting is reliable when motion_source is Telemetry with known PTZ preset, but should be paused when motion_source is Inferred with confidence < 0.5"). `MotionSource` makes this distinction explicit and directly supports auditability.
 
 ### View-bound context: `ViewBoundContext`
 
-Downstream users often associate calibration data, spatial regions, transforms, or reference frames with a specific camera view. When the camera moves, these associations become stale or invalid. Without an explicit model for this, every consumer must independently track "was this calibration computed under the current view?" — leading to subtle staleness bugs.
-
-`ViewBoundContext` is a lightweight binding model that pairs user-supplied context data with the `ViewVersion` and `ViewEpoch` at which it was valid.
+Downstream users associate calibration data, spatial regions, transforms, or reference frames with a specific camera view. When the camera moves, these associations become stale or invalid. `ViewBoundContext` is a lightweight binding model that pairs user-supplied context data with the `ViewVersion` and `ViewEpoch` at which it was valid.
 
 ```rust
 /// A piece of user-supplied context data that is bound to a specific
@@ -1428,9 +1430,9 @@ pub trait OutputSink: Send + Sync + 'static {
 - **OutThread**: Per-feed lightweight thread or task. Calls `OutputSink::emit`. Isolates output latency from the perception hot path.
 - **Supervisor**: Single async task. Receives `HealthEvent`s. Triggers restarts per policy.
 
-### Why OS threads, not async tasks for stages?
+### OS threads for stage execution
 
-Perception stages commonly call into native inference libraries (TensorRT, ONNX Runtime, OpenCV DNN, libtorch) that are blocking and not async-aware. Running these on an async executor stalls other tasks. Dedicated OS threads avoid this entirely.
+Perception stages commonly call into native inference libraries (TensorRT, ONNX Runtime, OpenCV DNN, libtorch) that are blocking and not async-aware. Stages run on dedicated OS threads to avoid stalling the async runtime.
 
 The async runtime (tokio) is used for supervision, health monitoring, metrics export, and source management — not for perception hot paths.
 
@@ -1459,7 +1461,7 @@ pub enum BackpressurePolicy {
 }
 ```
 
-### Why `DropOldest` is the default
+### `DropOldest` as default policy
 
 In real-time perception, processing a stale frame is worse than skipping it. `DropOldest` ensures stages always see the most recent available frame. The number of dropped frames is tracked in `FeedMetrics`.
 
@@ -1567,6 +1569,36 @@ pub enum HealthEvent {
 
 Health events are broadcast via `tokio::sync::broadcast`. Users subscribe through `RuntimeHandle::health_subscribe()` (aggregate, runtime-scoped).
 
+### OpenTelemetry export (`nv-metrics`)
+
+The `nv-metrics` crate is an optional, standalone bridge that maps runtime internals into OpenTelemetry instruments and exports them via OTLP/gRPC. It introduces no changes to the core hot path — all instrumentation runs in a background tokio task.
+
+**Two-tier instrument model:**
+
+| Tier | Trigger | Instruments | Examples |
+|---|---|---|---|
+| Periodic gauges | `RuntimeDiagnostics` polled on a configurable interval (default 5 s) | 30 `Gauge<u64>` / `Gauge<f64>` | `nv.feed.frames_processed`, `nv.feed.queue_source_depth`, `nv.batch.avg_fill_ratio`, `nv.runtime.uptime_secs` |
+| Event-driven counters | `HealthEvent` received via `health_subscribe()` | 18 `Counter<u64>` | `nv.health.source_disconnected`, `nv.health.stage_error`, `nv.health.backpressure_drop`, `nv.health.view_epoch_changed` |
+
+All instruments carry a `feed_id` attribute where applicable. Stage-scoped instruments additionally carry `stage_id`.
+
+**Builder configuration:**
+
+```rust
+MetricsExporter::builder()
+    .runtime_handle(handle)          // required — RuntimeHandle for diagnostics + health
+    .otlp_endpoint("http://...:4317") // OTLP/gRPC collector endpoint
+    .service_name("my-app")          // OTel service.name resource attribute
+    .poll_interval(Duration::from_secs(10))  // gauge sampling interval
+    .resource_attributes(vec![("env", "prod")])  // additional OTel resource attributes
+    .meter_provider(custom_provider) // override: bring your own MeterProvider
+    .build()?;
+```
+
+If `.meter_provider()` is set, the endpoint/service-name/resource-attribute fields are ignored — the caller owns the full OTel pipeline configuration.
+
+**Shutdown:** The background task is signaled via a `tokio::sync::watch` channel when the `MetricsExporter` is dropped. The task drains any pending health events and exits cleanly.
+
 ### Tracing
 
 The library integrates with the `tracing` crate. Key spans:
@@ -1669,7 +1701,7 @@ pub enum ConfigError {
 | PTZ camera jumps mid-frame | View system detects discontinuity, consults `EpochPolicy`. Policy decides: `Continue` (within tolerance), `Degrade` (mark degraded), `Compensate` (transform existing positions), or `Segment` (increment epoch, close trajectory segments, notify stages). No hard-coded behavior. |
 | GStreamer thread hangs | The bounded channel between GstThread and StgThread will fill. Supervisor detects no frames received for configurable timeout and triggers feed restart. |
 | Output sink is slow | Bounded channel between StgThread and OutThread drops oldest outputs. Perception pipeline never blocks on output delivery. |
-| Too many feeds for available CPU | Each feed uses 2-3 OS threads. With 100+ feeds, thread count becomes a concern. Future optimization: shared thread pool for stage execution with per-feed work-stealing. Initial design uses per-feed threads for isolation simplicity. |
+| Too many feeds for available CPU | Each feed uses 2-3 OS threads. With 100+ feeds, thread count becomes a concern. Per-feed threads provide isolation simplicity. A shared thread pool with per-feed work-stealing can reduce thread count at the cost of isolation. |
 | Corrupt or unusual video stream | GStreamer handles codec errors internally. `nv-media` catches decoder errors, emits `HealthEvent`, and allows the stream to continue (GStreamer skips corrupt frames). |
 
 ---

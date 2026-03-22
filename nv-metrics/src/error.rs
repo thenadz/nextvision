@@ -19,6 +19,14 @@ pub enum MetricsError {
     #[error("OpenTelemetry SDK error: {0}")]
     OtelSdk(#[from] opentelemetry_sdk::error::OTelSdkError),
 
+    /// `poll_interval` was set to zero, which would create a hot loop.
+    #[error("poll_interval must be > 0")]
+    ZeroPollInterval,
+
+    /// `build()` was called outside a tokio runtime context.
+    #[error("no tokio runtime active — MetricsExporter::build() must be called within a tokio runtime")]
+    NoTokioRuntime,
+
     /// The OTLP exporter could not be constructed.
     #[cfg(feature = "otlp-grpc")]
     #[error("OTLP exporter build error: {0}")]
@@ -45,5 +53,17 @@ mod tests {
     fn errors_are_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<MetricsError>();
+    }
+
+    #[test]
+    fn zero_poll_interval_display() {
+        let e = MetricsError::ZeroPollInterval;
+        assert_eq!(e.to_string(), "poll_interval must be > 0");
+    }
+
+    #[test]
+    fn no_tokio_runtime_display() {
+        let e = MetricsError::NoTokioRuntime;
+        assert!(e.to_string().contains("no tokio runtime active"));
     }
 }

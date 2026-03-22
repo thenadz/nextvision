@@ -39,7 +39,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use nv_metrics::MetricsExporter;
 use nv_sample_tracking::{TrackerConfig, TrackerStage};
@@ -137,11 +137,16 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::builder().build()?;
     let runtime_handle = runtime.handle();
 
-    // Metrics: spin up a tokio runtime for the OTel background exporter.
-    // Only active when --otlp-endpoint is provided.
-    let _tokio_rt = tokio::runtime::Runtime::new()?;
-    let _tokio_guard = _tokio_rt.enter();
-    let _metrics = args.otlp_endpoint.as_ref().map(|endpoint| {
+    // Metrics: spin up a tokio runtime for the OTel background exporter
+    // only when --otlp-endpoint is provided.  No tokio overhead otherwise.
+    let metrics_rt = args.otlp_endpoint.as_ref().map(|_| {
+        tokio::runtime::Runtime::new()
+    }).transpose()?;
+    let metrics = args.otlp_endpoint.as_ref().map(|endpoint| {
+        // Enter the tokio context only for the duration of build(),
+        // then drop the guard so that block_on() in the shutdown path
+        // is never called from within an entered runtime context.
+        let _guard = metrics_rt.as_ref().unwrap().enter();
         MetricsExporter::builder()
             .runtime_handle(runtime_handle.clone())
             .otlp_endpoint(endpoint)
@@ -310,6 +315,14 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     info!("shutting down");
+    // Flush metrics before tearing down the runtime they observe.
+    if let Some(m) = metrics {
+        if let Some(rt) = &metrics_rt {
+            if let Err(e) = rt.block_on(m.shutdown()) {
+                warn!(error = %e, "metrics shutdown error");
+            }
+        }
+    }
     runtime.shutdown()?;
     Ok(())
 }

@@ -180,8 +180,8 @@ fn derive_motion_state(report: &MotionReport) -> CameraMotionState {
     if let Some(ref hint) = report.motion_hint {
         return hint.clone();
     }
-    // If PTZ telemetry is available, infer from deltas later (the epoch policy does that).
-    // For now, if we have a frame_transform with small displacement, stable.
+    // When PTZ telemetry is available the epoch policy infers state from deltas.
+    // Without an explicit hint, fall back to frame_transform displacement.
     if let Some(ref t) = report.frame_transform {
         if t.confidence > 0.5 {
             let displacement = t.displacement_magnitude();

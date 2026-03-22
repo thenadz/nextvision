@@ -28,11 +28,10 @@ use nv_core::TypedMetadata;
 /// built-in fields. Any `Clone + Send + Sync + 'static` value can be
 /// stored by type.
 ///
-/// This is also the intended extension point for **future sequence/window
-/// support**. A pre-processing stage could assemble a sliding window of
-/// frames (e.g., `Arc<[FrameEnvelope]>`) and store it as a typed artifact
-/// for a downstream temporal or clip-based model to consume, without any
-/// changes to the core pipeline execution model.
+/// A pre-processing stage can assemble a sliding window of frames
+/// (e.g., `Arc<[FrameEnvelope]>`) and store it as a typed artifact for a
+/// downstream temporal or clip-based model to consume, without any changes
+/// to the core pipeline execution model.
 #[derive(Clone, Debug, Default)]
 pub struct PerceptionArtifacts {
     /// Current detection set (replaced by each stage that returns detections).

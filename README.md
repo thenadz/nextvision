@@ -21,6 +21,7 @@ NextVision ingests live or recorded video, normalizes frames into a library-owne
 | `nv-temporal` | Temporal state: trajectories, motion features, continuity, retention |
 | `nv-view` | PTZ/view-state, camera motion modeling, epoch policy, context validity |
 | `nv-runtime` | Pipeline orchestration, feed lifecycle, output, concurrency, provenance |
+| `nv-metrics` | Optional OpenTelemetry metrics bridge — exports diagnostics and health events via OTLP |
 | `nv-test-util` | Test harnesses, synthetic frames, mock stages, controllable clock |
 
 ## Architecture
@@ -98,6 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             queue_capacity: None, // defaults to max_batch_size * 4
             response_timeout: None, // defaults to 5s safety margin
             max_in_flight_per_feed: 1, // prevent timeout-induced stacking
+            startup_timeout: None, // defaults to 30s; increase for GPU warm-up
         },
     )?;
 
@@ -213,6 +215,39 @@ fn inspect_batch(batch: &BatchHandle) {
 
 All counters are atomic — no per-frame allocations, no background polling
 threads, no additional mutex contention on hot paths.
+
+### OpenTelemetry export (`nv-metrics`)
+
+The optional `nv-metrics` crate bridges runtime diagnostics and health events
+into OpenTelemetry instruments, exported via OTLP/gRPC. It runs in a background
+tokio task and does not touch the frame-processing hot path.
+
+Two families of instruments are exported:
+
+- **Periodic gauges** (30 instruments) — sampled from `Runtime::diagnostics()`
+  on a configurable poll interval. Covers per-feed frame counts, queue depths,
+  stage latencies, view-state, batch metrics, and runtime uptime.
+- **Event-driven counters** (18 instruments) — incremented in real time as
+  `HealthEvent` variants arrive via `health_subscribe()`. Covers source
+  disconnects, reconnects, stage errors, panics, feed restarts, backpressure
+  drops, view epoch changes, and view degradations.
+
+```rust
+use nv_metrics::MetricsExporter;
+
+// Inside a tokio runtime:
+let _exporter = MetricsExporter::builder()
+    .runtime_handle(handle.clone())
+    .otlp_endpoint("http://localhost:4317")
+    .service_name("my-app")
+    .build()?;
+// Gauges poll automatically; health counters fire on events.
+// Call exporter.shutdown().await for clean teardown;
+// drop alone cancels the poll loop but does not flush.
+```
+
+See the [nv-metrics crate docs](nv-metrics/src/lib.rs) for the full instrument
+table and builder options.
 
 ## License
 

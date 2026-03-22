@@ -1,12 +1,16 @@
-//! Maps [`RuntimeDiagnostics`] snapshots to OpenTelemetry instrument recordings.
+//! Maps [`RuntimeDiagnostics`] snapshots and [`HealthEvent`]s to
+//! OpenTelemetry instrument recordings.
 //!
-//! All instruments are created once at startup. Each poll cycle calls
-//! [`Instruments::record()`] with a fresh snapshot, recording current
-//! values as gauges. Downstream systems (Prometheus, Grafana) derive
-//! rates from gauge deltas where appropriate.
+//! **Gauges** (phase 1) — created once at startup. Each poll cycle calls
+//! [`Instruments::record()`] with a fresh snapshot.
+//!
+//! **Counters** (phase 2) — event-driven. Each [`HealthEvent`] received
+//! from the broadcast channel increments the corresponding counter via
+//! [`HealthCounters::record()`].
 
 use nv_runtime::diagnostics::{RuntimeDiagnostics, ViewStatus};
-use opentelemetry::metrics::{Gauge, Meter};
+use nv_runtime::HealthEvent;
+use opentelemetry::metrics::{Counter, Gauge, Meter};
 use opentelemetry::KeyValue;
 
 // ---------------------------------------------------------------------------
@@ -276,6 +280,194 @@ fn view_status_to_u64(status: ViewStatus) -> u64 {
         ViewStatus::Stable => 0,
         ViewStatus::Degraded => 1,
         ViewStatus::Invalid => 2,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Health-event counters (phase 2)
+// ---------------------------------------------------------------------------
+
+/// OTel counters driven by [`HealthEvent`]s from the runtime broadcast.
+///
+/// Each counter is monotonic — the OTel SDK accumulates totals and
+/// downstream systems derive rates as needed.
+pub(crate) struct HealthCounters {
+    source_disconnections: Counter<u64>,
+    source_reconnections: Counter<u64>,
+    stage_errors: Counter<u64>,
+    stage_panics: Counter<u64>,
+    feed_restarts: Counter<u64>,
+    feeds_stopped: Counter<u64>,
+    backpressure_drops: Counter<u64>,
+    view_epoch_changes: Counter<u64>,
+    view_degradations: Counter<u64>,
+    output_lag_events: Counter<u64>,
+    sink_panics: Counter<u64>,
+    sink_timeouts: Counter<u64>,
+    sink_backpressure: Counter<u64>,
+    track_admission_rejected: Counter<u64>,
+    batch_errors: Counter<u64>,
+    batch_submission_rejected: Counter<u64>,
+    batch_timeouts: Counter<u64>,
+    batch_in_flight_exceeded: Counter<u64>,
+}
+
+impl HealthCounters {
+    pub(crate) fn new(meter: &Meter) -> Self {
+        Self {
+            source_disconnections: meter
+                .u64_counter("nv.health.source_disconnections")
+                .with_description("Source disconnection events")
+                .build(),
+            source_reconnections: meter
+                .u64_counter("nv.health.source_reconnections")
+                .with_description("Source reconnection attempts")
+                .build(),
+            stage_errors: meter
+                .u64_counter("nv.health.stage_errors")
+                .with_description("Stage processing errors")
+                .build(),
+            stage_panics: meter
+                .u64_counter("nv.health.stage_panics")
+                .with_description("Stage panics")
+                .build(),
+            feed_restarts: meter
+                .u64_counter("nv.health.feed_restarts")
+                .with_description("Feed restart events")
+                .build(),
+            feeds_stopped: meter
+                .u64_counter("nv.health.feeds_stopped")
+                .with_description("Feeds permanently stopped")
+                .build(),
+            backpressure_drops: meter
+                .u64_counter("nv.health.backpressure_drops")
+                .with_description("Frames dropped due to backpressure")
+                .build(),
+            view_epoch_changes: meter
+                .u64_counter("nv.health.view_epoch_changes")
+                .with_description("View epoch change events")
+                .build(),
+            view_degradations: meter
+                .u64_counter("nv.health.view_degradations")
+                .with_description("View degradation events")
+                .build(),
+            output_lag_events: meter
+                .u64_counter("nv.health.output_lag_events")
+                .with_description("Output channel saturation events")
+                .build(),
+            sink_panics: meter
+                .u64_counter("nv.health.sink_panics")
+                .with_description("Output sink panic events")
+                .build(),
+            sink_timeouts: meter
+                .u64_counter("nv.health.sink_timeouts")
+                .with_description("Output sink timeout events")
+                .build(),
+            sink_backpressure: meter
+                .u64_counter("nv.health.sink_backpressure")
+                .with_description("Output sink backpressure drop events")
+                .build(),
+            track_admission_rejected: meter
+                .u64_counter("nv.health.track_admission_rejected")
+                .with_description("Tracks rejected by temporal store admission control")
+                .build(),
+            batch_errors: meter
+                .u64_counter("nv.health.batch_errors")
+                .with_description("Batch processor errors")
+                .build(),
+            batch_submission_rejected: meter
+                .u64_counter("nv.health.batch_submission_rejected")
+                .with_description("Batch submissions rejected (queue full)")
+                .build(),
+            batch_timeouts: meter
+                .u64_counter("nv.health.batch_timeouts")
+                .with_description("Batch response timeouts")
+                .build(),
+            batch_in_flight_exceeded: meter
+                .u64_counter("nv.health.batch_in_flight_exceeded")
+                .with_description("Batch submissions rejected (in-flight cap)")
+                .build(),
+        }
+    }
+
+    /// Increment the appropriate counter for a single health event.
+    pub(crate) fn record(&self, event: &HealthEvent) {
+        match event {
+            HealthEvent::SourceConnected { .. } => {}
+            HealthEvent::SourceEos { .. } => {}
+            HealthEvent::DecodeDecision { .. } => {}
+            HealthEvent::ViewCompensationApplied { .. } => {}
+
+            HealthEvent::SourceDisconnected { feed_id, .. } => {
+                self.source_disconnections.add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
+            }
+            HealthEvent::SourceReconnecting { feed_id, .. } => {
+                self.source_reconnections.add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
+            }
+            HealthEvent::StageError { feed_id, stage_id, .. } => {
+                self.stage_errors.add(1, &[
+                    KeyValue::new("feed_id", feed_id.to_string()),
+                    KeyValue::new("stage_id", stage_id.as_str().to_owned()),
+                ]);
+            }
+            HealthEvent::StagePanic { feed_id, stage_id } => {
+                self.stage_panics.add(1, &[
+                    KeyValue::new("feed_id", feed_id.to_string()),
+                    KeyValue::new("stage_id", stage_id.as_str().to_owned()),
+                ]);
+            }
+            HealthEvent::FeedRestarting { feed_id, .. } => {
+                self.feed_restarts.add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
+            }
+            HealthEvent::FeedStopped { feed_id, .. } => {
+                self.feeds_stopped.add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
+            }
+            HealthEvent::BackpressureDrop { feed_id, frames_dropped } => {
+                self.backpressure_drops.add(*frames_dropped, &[KeyValue::new("feed_id", feed_id.to_string())]);
+            }
+            HealthEvent::ViewEpochChanged { feed_id, .. } => {
+                self.view_epoch_changes.add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
+            }
+            HealthEvent::ViewDegraded { feed_id, .. } => {
+                self.view_degradations.add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
+            }
+            HealthEvent::OutputLagged { messages_lost } => {
+                self.output_lag_events.add(*messages_lost, &[]);
+            }
+            HealthEvent::SinkPanic { feed_id } => {
+                self.sink_panics.add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
+            }
+            HealthEvent::SinkTimeout { feed_id } => {
+                self.sink_timeouts.add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
+            }
+            HealthEvent::SinkBackpressure { feed_id, outputs_dropped } => {
+                self.sink_backpressure.add(*outputs_dropped, &[KeyValue::new("feed_id", feed_id.to_string())]);
+            }
+            HealthEvent::TrackAdmissionRejected { feed_id, rejected_count } => {
+                self.track_admission_rejected.add(u64::from(*rejected_count), &[KeyValue::new("feed_id", feed_id.to_string())]);
+            }
+            HealthEvent::BatchError { processor_id, .. } => {
+                self.batch_errors.add(1, &[KeyValue::new("processor_id", processor_id.as_str().to_owned())]);
+            }
+            HealthEvent::BatchSubmissionRejected { feed_id, processor_id, dropped_count } => {
+                self.batch_submission_rejected.add(*dropped_count, &[
+                    KeyValue::new("feed_id", feed_id.to_string()),
+                    KeyValue::new("processor_id", processor_id.as_str().to_owned()),
+                ]);
+            }
+            HealthEvent::BatchTimeout { feed_id, processor_id, timed_out_count } => {
+                self.batch_timeouts.add(*timed_out_count, &[
+                    KeyValue::new("feed_id", feed_id.to_string()),
+                    KeyValue::new("processor_id", processor_id.as_str().to_owned()),
+                ]);
+            }
+            HealthEvent::BatchInFlightExceeded { feed_id, processor_id, rejected_count } => {
+                self.batch_in_flight_exceeded.add(*rejected_count, &[
+                    KeyValue::new("feed_id", feed_id.to_string()),
+                    KeyValue::new("processor_id", processor_id.as_str().to_owned()),
+                ]);
+            }
+        }
     }
 }
 
@@ -715,5 +907,235 @@ mod tests {
         let _ = provider.force_flush();
 
         assert_eq!(find_u64_gauge(&exporter, "nv.batch.pending_items"), Some(15));
+    }
+
+    // -- Health counter helpers & tests --
+
+    fn find_u64_sum(exporter: &InMemoryMetricExporter, name: &str) -> Option<u64> {
+        let metrics = exporter.get_finished_metrics().ok()?;
+        for rm in &metrics {
+            for sm in rm.scope_metrics() {
+                for m in sm.metrics() {
+                    if m.name() == name {
+                        if let AggregatedMetrics::U64(MetricData::Sum(sum)) = m.data() {
+                            return sum.data_points().next().map(|dp| dp.value());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn health_counter_does_not_panic_on_all_variants() {
+        use nv_core::error::{MediaError, StageError};
+
+        let provider = SdkMeterProvider::builder().build();
+        let meter = provider.meter("test");
+        let counters = HealthCounters::new(&meter);
+
+        let feed = FeedId::new(1);
+        let stage = StageId("det");
+        let proc = StageId("yolo");
+
+        let make_stage_err = || StageError::ProcessingFailed { stage_id: StageId("det"), detail: "err".into() };
+
+        // Fire every variant — none should panic.
+        let events: Vec<HealthEvent> = vec![
+            HealthEvent::SourceConnected { feed_id: feed },
+            HealthEvent::SourceDisconnected { feed_id: feed, reason: MediaError::Timeout },
+            HealthEvent::SourceReconnecting { feed_id: feed, attempt: 1 },
+            HealthEvent::StageError { feed_id: feed, stage_id: stage, error: make_stage_err() },
+            HealthEvent::StagePanic { feed_id: feed, stage_id: stage },
+            HealthEvent::FeedRestarting { feed_id: feed, restart_count: 1 },
+            HealthEvent::FeedStopped { feed_id: feed, reason: nv_core::health::StopReason::UserRequested },
+            HealthEvent::BackpressureDrop { feed_id: feed, frames_dropped: 5 },
+            HealthEvent::ViewEpochChanged { feed_id: feed, epoch: 2 },
+            HealthEvent::ViewDegraded { feed_id: feed, stability_score: 0.5 },
+            HealthEvent::ViewCompensationApplied { feed_id: feed, epoch: 2 },
+            HealthEvent::OutputLagged { messages_lost: 10 },
+            HealthEvent::SourceEos { feed_id: feed },
+            HealthEvent::DecodeDecision {
+                feed_id: feed,
+                outcome: nv_core::health::DecodeOutcome::Software,
+                preference: nv_core::health::DecodePreference::Auto,
+                fallback_active: false,
+                fallback_reason: None,
+                detail: "test".into(),
+            },
+            HealthEvent::SinkPanic { feed_id: feed },
+            HealthEvent::SinkTimeout { feed_id: feed },
+            HealthEvent::SinkBackpressure { feed_id: feed, outputs_dropped: 3 },
+            HealthEvent::TrackAdmissionRejected { feed_id: feed, rejected_count: 2 },
+            HealthEvent::BatchError { processor_id: proc, batch_size: 4, error: make_stage_err() },
+            HealthEvent::BatchSubmissionRejected { feed_id: feed, processor_id: proc, dropped_count: 1 },
+            HealthEvent::BatchTimeout { feed_id: feed, processor_id: proc, timed_out_count: 1 },
+            HealthEvent::BatchInFlightExceeded { feed_id: feed, processor_id: proc, rejected_count: 1 },
+        ];
+
+        for event in &events {
+            counters.record(event);
+        }
+    }
+
+    #[test]
+    fn health_counter_increments() {
+        let (provider, exporter) = in_memory_provider();
+        let meter = provider.meter("test");
+        let counters = HealthCounters::new(&meter);
+
+        let feed = FeedId::new(1);
+
+        counters.record(&HealthEvent::BackpressureDrop { feed_id: feed, frames_dropped: 3 });
+        counters.record(&HealthEvent::BackpressureDrop { feed_id: feed, frames_dropped: 7 });
+
+        drop(counters);
+        let _ = provider.force_flush();
+
+        // 3 + 7 = 10
+        assert_eq!(find_u64_sum(&exporter, "nv.health.backpressure_drops"), Some(10));
+    }
+
+    #[test]
+    fn health_counter_output_lag_accumulates() {
+        let (provider, exporter) = in_memory_provider();
+        let meter = provider.meter("test");
+        let counters = HealthCounters::new(&meter);
+
+        counters.record(&HealthEvent::OutputLagged { messages_lost: 5 });
+        counters.record(&HealthEvent::OutputLagged { messages_lost: 15 });
+
+        drop(counters);
+        let _ = provider.force_flush();
+
+        assert_eq!(find_u64_sum(&exporter, "nv.health.output_lag_events"), Some(20));
+    }
+
+    #[test]
+    fn health_counter_stage_error_carries_attributes() {
+        use nv_core::error::StageError;
+
+        let (provider, exporter) = in_memory_provider();
+        let meter = provider.meter("test");
+        let counters = HealthCounters::new(&meter);
+
+        counters.record(&HealthEvent::StageError {
+            feed_id: FeedId::new(42),
+            stage_id: StageId("detector"),
+            error: StageError::ProcessingFailed { stage_id: StageId("detector"), detail: "test".into() },
+        });
+
+        drop(counters);
+        let _ = provider.force_flush();
+
+        let metrics = exporter.get_finished_metrics().unwrap();
+        let mut found_feed = false;
+        let mut found_stage = false;
+        for rm in &metrics {
+            for sm in rm.scope_metrics() {
+                for m in sm.metrics() {
+                    if m.name() == "nv.health.stage_errors" {
+                        if let AggregatedMetrics::U64(MetricData::Sum(sum)) = m.data() {
+                            for dp in sum.data_points() {
+                                for attr in dp.attributes() {
+                                    if attr.key.as_str() == "feed_id" {
+                                        found_feed = true;
+                                    }
+                                    if attr.key.as_str() == "stage_id" {
+                                        found_stage = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(found_feed, "stage_errors counter must carry feed_id");
+        assert!(found_stage, "stage_errors counter must carry stage_id");
+    }
+
+    #[test]
+    fn health_counter_ignored_events_do_not_emit() {
+        let (provider, exporter) = in_memory_provider();
+        let meter = provider.meter("test");
+        let counters = HealthCounters::new(&meter);
+
+        // These variants are intentionally not counted.
+        counters.record(&HealthEvent::SourceConnected { feed_id: FeedId::new(1) });
+        counters.record(&HealthEvent::SourceEos { feed_id: FeedId::new(1) });
+
+        drop(counters);
+        let _ = provider.force_flush();
+
+        let names = metric_names(&exporter);
+        // No counter instruments should have been emitted for
+        // informational-only events.
+        assert!(names.is_empty(), "informational events should not produce metrics, got: {names:?}");
+    }
+
+    #[test]
+    fn health_counter_all_names_present() {
+        use nv_core::error::{MediaError, StageError};
+
+        let (provider, exporter) = in_memory_provider();
+        let meter = provider.meter("test");
+        let counters = HealthCounters::new(&meter);
+
+        let feed = FeedId::new(1);
+        let stage = StageId("s");
+        let proc = StageId("p");
+        let make_err = || StageError::ProcessingFailed { stage_id: StageId("s"), detail: "e".into() };
+
+        // Fire one of each counted variant.
+        counters.record(&HealthEvent::SourceDisconnected { feed_id: feed, reason: MediaError::Timeout });
+        counters.record(&HealthEvent::SourceReconnecting { feed_id: feed, attempt: 1 });
+        counters.record(&HealthEvent::StageError { feed_id: feed, stage_id: stage, error: make_err() });
+        counters.record(&HealthEvent::StagePanic { feed_id: feed, stage_id: stage });
+        counters.record(&HealthEvent::FeedRestarting { feed_id: feed, restart_count: 1 });
+        counters.record(&HealthEvent::FeedStopped { feed_id: feed, reason: nv_core::health::StopReason::UserRequested });
+        counters.record(&HealthEvent::BackpressureDrop { feed_id: feed, frames_dropped: 1 });
+        counters.record(&HealthEvent::ViewEpochChanged { feed_id: feed, epoch: 1 });
+        counters.record(&HealthEvent::ViewDegraded { feed_id: feed, stability_score: 0.5 });
+        counters.record(&HealthEvent::OutputLagged { messages_lost: 1 });
+        counters.record(&HealthEvent::SinkPanic { feed_id: feed });
+        counters.record(&HealthEvent::SinkTimeout { feed_id: feed });
+        counters.record(&HealthEvent::SinkBackpressure { feed_id: feed, outputs_dropped: 1 });
+        counters.record(&HealthEvent::TrackAdmissionRejected { feed_id: feed, rejected_count: 1 });
+        counters.record(&HealthEvent::BatchError { processor_id: proc, batch_size: 4, error: make_err() });
+        counters.record(&HealthEvent::BatchSubmissionRejected { feed_id: feed, processor_id: proc, dropped_count: 1 });
+        counters.record(&HealthEvent::BatchTimeout { feed_id: feed, processor_id: proc, timed_out_count: 1 });
+        counters.record(&HealthEvent::BatchInFlightExceeded { feed_id: feed, processor_id: proc, rejected_count: 1 });
+
+        drop(counters);
+        let _ = provider.force_flush();
+
+        let names = metric_names(&exporter);
+
+        let expected = [
+            "nv.health.source_disconnections",
+            "nv.health.source_reconnections",
+            "nv.health.stage_errors",
+            "nv.health.stage_panics",
+            "nv.health.feed_restarts",
+            "nv.health.feeds_stopped",
+            "nv.health.backpressure_drops",
+            "nv.health.view_epoch_changes",
+            "nv.health.view_degradations",
+            "nv.health.output_lag_events",
+            "nv.health.sink_panics",
+            "nv.health.sink_timeouts",
+            "nv.health.sink_backpressure",
+            "nv.health.track_admission_rejected",
+            "nv.health.batch_errors",
+            "nv.health.batch_submission_rejected",
+            "nv.health.batch_timeouts",
+            "nv.health.batch_in_flight_exceeded",
+        ];
+
+        for name in expected {
+            assert!(names.contains(&name.to_owned()), "missing counter: {name}");
+        }
     }
 }

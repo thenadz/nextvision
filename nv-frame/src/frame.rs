@@ -125,7 +125,7 @@ pub enum Residency {
 ///     DataAccess::Opaque => {
 ///         let handle = frame.accelerated_handle::<MyAccelBuf>();
 ///     }
-///     _ => { /* forward-compatible: handle future access classes */ }
+///     _ => { /* forward-compatible: handle additional access classes */ }
 /// }
 /// ```
 #[non_exhaustive]

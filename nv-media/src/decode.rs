@@ -63,8 +63,8 @@ pub(crate) enum DecoderSelection {
     /// Request a specific GStreamer element by name (e.g., `"nvh264dec"`).
     ///
     /// Falls back to `Auto` if the named element is not available.
-    /// Not currently reachable from the public `DecodePreference` API;
-    /// reserved for future use and internal tests.
+    /// Not reachable from the public `DecodePreference` API;
+    /// used for internal tests.
     #[allow(dead_code)]
     Named(String),
 }

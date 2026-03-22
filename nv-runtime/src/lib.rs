@@ -15,7 +15,7 @@
 //!                          ViewState                   (optional subscribers)
 //! ```
 //!
-//! The media backend (currently GStreamer, via `nv-media`) is an implementation
+//! The media backend (GStreamer, via `nv-media`) is an implementation
 //! detail. Users interact with backend-agnostic types: [`SourceSpec`](nv_core::SourceSpec),
 //! [`FeedConfig`], and [`OutputEnvelope`]. A custom backend can be injected via
 //! [`RuntimeBuilder::ingress_factory`].

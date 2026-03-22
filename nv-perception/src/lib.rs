@@ -57,22 +57,21 @@
 //! Stages take `&mut self` — they run on a dedicated thread per feed and are
 //! never shared across threads.
 //!
-//! ## Why a single `Stage` trait
+//! ## Single `Stage` trait
 //!
 //! The library uses one trait for all stage types — detection, tracking,
 //! classification, scene analysis, etc. Specialization happens by convention
 //! (which [`StageOutput`] fields a stage populates), not by type hierarchy.
-//! This keeps the abstraction minimal, avoids taxonomy assumptions, and lets
-//! users compose arbitrary pipeline shapes without framework-imposed constraints.
+//! The abstraction stays minimal, avoids taxonomy assumptions, and lets
+//! users compose arbitrary pipeline shapes.
 //!
 //! ## Extension seam: typed artifacts
 //!
 //! For inter-stage data that does not fit the built-in fields (feature maps,
 //! prepared clip/window tensors, calibration data), stages use the
 //! [`stage_artifacts`](PerceptionArtifacts::stage_artifacts) type-map.
-//! This is also the intended path for future temporal/window model support:
-//! a pre-processing stage assembles the window and stores it as a typed
-//! artifact for a downstream inference stage.
+//! A pre-processing stage can assemble a sliding window and store it as a
+//! typed artifact for a downstream inference stage to consume.
 //!
 //! ## Backend independence
 //!

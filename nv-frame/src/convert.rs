@@ -43,7 +43,7 @@ pub enum ConvertError {
 /// - `Rgba8` → `Rgb8`
 /// - `Rgb8` → `Gray8`
 ///
-/// Additional conversions will be added as needed.
+/// Other conversions can be contributed by adding a match arm below.
 pub fn convert(frame: &FrameEnvelope, target: PixelFormat) -> Result<FrameEnvelope, ConvertError> {
     if frame.format() == target {
         return Err(ConvertError::SameFormat);

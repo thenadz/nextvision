@@ -6,10 +6,10 @@
 //!
 //! # Design intent: one trait, composed pipelines
 //!
-//! The library intentionally uses a **single** `Stage` trait rather than
-//! separate trait hierarchies for detection, tracking, classification, etc.
-//! This keeps the abstraction minimal and avoids a taxonomy that would
-//! either leak domain assumptions or force awkward categorizations.
+//! The library uses a **single** `Stage` trait for all stage types —
+//! detection, tracking, classification, scene analysis, etc.
+//! The abstraction stays minimal, and specialization happens by
+//! convention (which fields a stage populates), not by type hierarchy.
 //!
 //! Instead, the pipeline _composes_ stages linearly: earlier stages write
 //! fields into [`StageOutput`] that later stages read from
@@ -125,14 +125,13 @@ pub enum StageCategory {
 ///
 /// # Validated fields
 ///
-/// Currently, [`validate_stages()`](crate::validate_stages) checks:
+/// The validator checks:
 /// - `consumes_detections` / `produces_detections`
 /// - `consumes_tracks` / `produces_tracks`
 ///
 /// The remaining fields (`consumes_temporal`, `produces_signals`,
-/// `produces_scene_features`) are informational — they are available
-/// for external tooling and future validation but are not enforced
-/// by the built-in validator.
+/// `produces_scene_features`) are informational — available
+/// for external tooling but not enforced by the built-in validator.
 ///
 /// # Example
 ///

@@ -16,14 +16,14 @@
 //! `BatchProcessor` does not assume ONNX, TensorRT, OpenVINO, or any
 //! specific inference framework. Implementors choose their own backend.
 //!
-//! # Current scope and future extensibility
+//! # Temporal window support
 //!
-//! Each [`BatchEntry`] carries a single [`FrameEnvelope`]. This is the
-//! right granularity for the current single-frame inference model.
+//! Each [`BatchEntry`] carries a single [`FrameEnvelope`] — the right
+//! granularity for single-frame inference.
 //!
-//! For future models that operate on **temporal windows or clips** (e.g.,
-//! video transformers, clip-based action recognition), the intended
-//! extension path is:
+//! For models that operate on **temporal windows or clips** (e.g.,
+//! video transformers, clip-based action recognition), the extension
+//! path is:
 //!
 //! 1. A per-feed stage assembles the frame window from internal state
 //!    or the temporal store.
@@ -32,8 +32,8 @@
 //!    stage, or the batch processor manages its own per-feed window
 //!    buffers internally.
 //!
-//! This avoids changing the `BatchEntry` type or the coordinator
-//! protocol for a pattern that is not yet needed.
+//! This keeps the `BatchEntry` type and coordinator protocol focused on
+//! the single-frame case.
 
 use nv_core::error::StageError;
 use nv_core::id::{FeedId, StageId};

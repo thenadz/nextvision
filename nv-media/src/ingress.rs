@@ -267,8 +267,8 @@ pub trait FrameSink: Send + Sync + 'static {
 /// be added without breaking the trait signature.
 ///
 /// Construct via [`IngressOptions::new()`] and the `with_*` builder
-/// methods. The struct is `#[non_exhaustive]`, so adding fields in a
-/// future release is not a semver break.
+/// methods. The struct is `#[non_exhaustive]`, so adding fields is
+/// not a semver break.
 ///
 /// # Examples
 ///
