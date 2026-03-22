@@ -109,8 +109,8 @@ impl EpochPolicy for DefaultEpochPolicy {
             ctx.previous_view.ptz.as_ref(),
             ctx.current_report.ptz.as_ref(),
         ) {
-            let pan_delta = (curr_ptz.pan - prev_ptz.pan).abs();
-            let tilt_delta = (curr_ptz.tilt - prev_ptz.tilt).abs();
+            let pan_delta = angular_delta(curr_ptz.pan, prev_ptz.pan);
+            let tilt_delta = angular_delta(curr_ptz.tilt, prev_ptz.tilt);
             let zoom_delta = (curr_ptz.zoom - prev_ptz.zoom).abs();
 
             if pan_delta > self.segment_angle_threshold
@@ -166,6 +166,13 @@ impl EpochPolicy for DefaultEpochPolicy {
 
         EpochDecision::Continue
     }
+}
+
+/// Compute the shortest angular delta between two angles in degrees,
+/// correctly handling wraparound at the 0°/360° boundary.
+fn angular_delta(a: f32, b: f32) -> f32 {
+    let raw = (a - b).abs();
+    raw.min(360.0 - raw)
 }
 
 #[cfg(test)]

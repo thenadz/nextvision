@@ -89,12 +89,11 @@ impl TemporalStore {
 
             // Epoch drift detection: if the active segment belongs to a
             // different epoch, close it and open a new segment.
-            let needs_epoch_segment = traj
+            if let Some(old_epoch) = traj
                 .active_segment()
-                .is_some_and(|seg| seg.view_epoch != current_epoch);
-
-            if needs_epoch_segment {
-                let old_epoch = traj.active_segment().unwrap().view_epoch;
+                .filter(|seg| seg.view_epoch != current_epoch)
+                .map(|seg| seg.view_epoch)
+            {
                 let boundary = SegmentBoundary::EpochChange {
                     from_epoch: old_epoch,
                     to_epoch: current_epoch,

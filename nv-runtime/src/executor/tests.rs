@@ -1548,7 +1548,7 @@ fn flush_batch_rejections_emits_accumulated_count() {
     // After flush, count should be zero.
     assert!(exec.flush_batch_rejections().is_none());
 
-    coord.shutdown();
+    coord.shutdown(std::time::Duration::from_secs(10));
 }
 
 /// When the feed shutdown flag is set *before* coordinator dies,
@@ -1602,7 +1602,7 @@ fn coordinator_shutdown_expected_emits_no_health() {
     );
 
     // Shut down the coordinator — the handle's next submit will see CoordinatorShutdown.
-    coord.shutdown();
+    coord.shutdown(std::time::Duration::from_secs(10));
     // Give coordinator thread a moment to exit.
     std::thread::sleep(std::time::Duration::from_millis(50));
 
@@ -1674,7 +1674,7 @@ fn coordinator_shutdown_unexpected_emits_one_stage_error() {
         Arc::new(AtomicBool::new(false)),
     );
 
-    coord.shutdown();
+    coord.shutdown(std::time::Duration::from_secs(10));
     std::thread::sleep(std::time::Duration::from_millis(50));
 
     let frame = nv_test_util::synthetic::solid_gray(
@@ -1762,7 +1762,7 @@ fn coordinator_shutdown_unexpected_deduplicates() {
         Arc::new(AtomicBool::new(false)),
     );
 
-    coord.shutdown();
+    coord.shutdown(std::time::Duration::from_secs(10));
     std::thread::sleep(std::time::Duration::from_millis(50));
 
     let frame1 = nv_test_util::synthetic::solid_gray(
@@ -1878,7 +1878,7 @@ fn flush_batch_timeouts_emits_accumulated_count() {
     // After flush, count should be zero.
     assert!(exec.flush_batch_timeouts().is_none());
 
-    coord.shutdown();
+    coord.shutdown(std::time::Duration::from_secs(10));
 }
 
 /// Integration test: timeout coalescing through process_frame.
@@ -2043,5 +2043,5 @@ fn timeout_coalescing_through_process_frame() {
     // After recovery, no more pending timeouts.
     assert_eq!(exec.batch_timeout_count, 0);
 
-    coord.shutdown();
+    coord.shutdown(std::time::Duration::from_secs(10));
 }

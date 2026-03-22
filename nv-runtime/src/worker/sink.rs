@@ -13,10 +13,10 @@ use crate::output::{OutputSink, SharedOutput};
 // SinkWorker — decoupled per-feed sink thread
 // ---------------------------------------------------------------------------
 
-/// Maximum time to wait for the sink worker thread to finish during
+/// Default time to wait for the sink worker thread to finish during
 /// shutdown. If the sink's `emit()` is blocked (e.g., on network I/O),
 /// we detach the thread rather than hang the feed/runtime shutdown.
-const SINK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const DEFAULT_SINK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Minimum interval between consecutive `SinkBackpressure` health events.
 pub(super) const SINK_BP_THROTTLE_INTERVAL: Duration = Duration::from_secs(1);
@@ -112,21 +112,22 @@ impl SinkWorker {
     /// join the thread with a bounded timeout, and return the recovered
     /// sink for reuse.
     ///
-    /// If the sink thread does not finish within [`SINK_SHUTDOWN_TIMEOUT`],
-    /// it is detached and a [`NullSink`] placeholder is returned. This
-    /// prevents a blocked `OutputSink::emit()` from hanging feed
-    /// restart or runtime shutdown.
+    /// If the sink thread does not finish within `timeout`, it is
+    /// detached and [`SinkRecovery::Lost`] is returned. This prevents a
+    /// blocked `OutputSink::emit()` from hanging feed restart or runtime
+    /// shutdown.
     ///
-    /// If the sink thread panicked, returns a [`NullSink`] placeholder.
+    /// If the sink thread panicked, returns [`SinkRecovery::Lost`].
     pub(super) fn shutdown(
         mut self,
         health_tx: &broadcast::Sender<HealthEvent>,
         feed_id: FeedId,
-    ) -> Box<dyn OutputSink> {
+        timeout: Duration,
+    ) -> SinkRecovery {
         // Drop the sender to signal the sink thread to exit.
         drop(self.tx);
         let Some(handle) = self.thread.take() else {
-            return Box::new(NullSink);
+            return SinkRecovery::Lost;
         };
 
         // Wait for the thread with a bounded timeout via a rendezvous channel.
@@ -139,15 +140,15 @@ impl SinkWorker {
                 let result = handle.join();
                 let _ = done_tx.send(result);
             });
-        match done_rx.recv_timeout(SINK_SHUTDOWN_TIMEOUT) {
-            Ok(Ok(sink)) => sink,
+        match done_rx.recv_timeout(timeout) {
+            Ok(Ok(sink)) => SinkRecovery::Recovered(sink),
             Ok(Err(_)) => {
                 tracing::error!(
                     feed_id = %feed_id,
                     "sink worker thread panicked during shutdown",
                 );
                 let _ = health_tx.send(HealthEvent::SinkPanic { feed_id });
-                Box::new(NullSink)
+                SinkRecovery::Lost
             }
             Err(_) => {
                 // Timed out — the sink thread is blocked in emit().
@@ -155,14 +156,23 @@ impl SinkWorker {
                 // when emit() returns or the process exits).
                 tracing::warn!(
                     feed_id = %feed_id,
-                    timeout_secs = SINK_SHUTDOWN_TIMEOUT.as_secs(),
+                    timeout_secs = timeout.as_secs(),
                     "sink worker thread did not finish within timeout — detaching",
                 );
                 let _ = health_tx.send(HealthEvent::SinkTimeout { feed_id });
-                Box::new(NullSink)
+                SinkRecovery::Lost
             }
         }
     }
+}
+
+/// Result of shutting down a [`SinkWorker`].
+pub(super) enum SinkRecovery {
+    /// The original sink was recovered and can be reused.
+    Recovered(Box<dyn OutputSink>),
+    /// The sink was lost (timeout or panic). A factory is needed to
+    /// reconstruct it, otherwise output will be discarded.
+    Lost,
 }
 
 // ---------------------------------------------------------------------------

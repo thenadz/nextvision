@@ -21,6 +21,12 @@ pub struct DetectorConfig {
     /// Falls back to CPU if CUDA is unavailable.
     /// Requires the `gpu` crate feature.
     pub gpu: bool,
+    /// Use the CUDA EP only, skipping TensorRT.
+    ///
+    /// Avoids TRT's expensive first-inference JIT compilation at the
+    /// cost of slightly lower throughput. Only meaningful when `gpu`
+    /// is also `true`.
+    pub cuda_only: bool,
 }
 
 impl Default for DetectorConfig {
@@ -31,6 +37,7 @@ impl Default for DetectorConfig {
             confidence_threshold: 0.25,
             class_names: Vec::new(),
             gpu: false,
+            cuda_only: false,
         }
     }
 }

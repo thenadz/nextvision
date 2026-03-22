@@ -29,6 +29,10 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/thenadz/nextvision"
+homepage = "https://github.com/thenadz/nextvision"
+categories = ["computer-vision", "multimedia::video", "concurrency"]
+keywords = ["video", "perception", "gstreamer", "detection", "tracking"]
 
 [workspace.dependencies]
 # Internal crates

@@ -22,7 +22,29 @@ This file defines the coding, architecture, and API standards that all contribut
 
 ## Core architectural principles
 
-### 1. The library is domain-agnostic
+### 1. Prefer event-driven design over timers and polling
+The runtime must be **purely event-driven** wherever possible. Behavior should be triggered by meaningful events — frame arrival, detection output, track lifecycle transitions, health signals, view-state changes — not by arbitrary timers, fixed-interval polling, or periodic sweeps.
+
+Timers and polling are acceptable **only** when no event source exists (e.g., a periodic health heartbeat where no upstream event is available). Even then, prefer the coarsest acceptable interval and document why an event-driven alternative is not feasible.
+
+This applies at every layer:
+- media: react to bus messages and pad events, not polling loops
+- perception: stages fire on frame arrival, not on wall-clock ticks
+- temporal: retention and degradation fire on observation events, not sweep timers
+- runtime: lifecycle transitions are event-driven via channels and signals
+- diagnostics: metrics are updated on the events that produce them
+
+Avoid:
+- arbitrary `sleep` or `interval` loops that approximate event-driven behavior
+- polling a shared flag in a hot loop when a channel or condvar would suffice
+- timer-based workarounds for missing event propagation
+- any design where removing or doubling the timer interval would silently change correctness
+
+When reviewing or writing code, ask: *"What event should trigger this?"* If the answer is clear, use that event. If no event exists yet, consider whether one should be introduced rather than falling back to a timer.
+
+---
+
+### 2. The library is domain-agnostic
 Do not introduce domain-specific concepts into the core library.
 
 Examples of forbidden concepts in the core:
@@ -53,7 +75,7 @@ If a concept would feel strange or overly specific to users in other domains, it
 
 ---
 
-### 2. GStreamer is an implementation detail of the media backend
+### 3. GStreamer is an implementation detail of the media backend
 The library is GStreamer-backed, but GStreamer types must not leak into the public API unless there is a compelling, explicit, reviewed reason.
 
 Public users should interact with:
@@ -66,7 +88,7 @@ They should not need to understand GStreamer internals to use the library.
 
 ---
 
-### 3. The public API is a first-class product
+### 4. The public API is a first-class product
 The public interface of this library is one of its most important assets.
 
 All public APIs must be:
@@ -89,7 +111,7 @@ Every new public type or trait should answer:
 
 ---
 
-### 4. DRY is mandatory
+### 5. DRY is mandatory
 Do not repeat logic unnecessarily.
 
 When similar logic appears in multiple places:
@@ -107,7 +129,7 @@ Use judgment:
 
 ---
 
-### 5. Abstractions must earn their existence
+### 6. Abstractions must earn their existence
 Do not introduce layers of traits, wrappers, or indirection without clear benefit.
 
 Every abstraction should improve one or more of:
@@ -128,7 +150,7 @@ Prefer a small number of logical, durable abstractions.
 
 ---
 
-### 6. Readability matters
+### 7. Readability matters
 This repository values readable code highly.
 
 Code should be:
@@ -150,7 +172,7 @@ Performance is important, but readability should not be sacrificed for speculati
 
 ---
 
-### 7. Performance is a design concern, not an afterthought
+### 8. Performance is a design concern, not an afterthought
 This is a high-performance runtime. Code should avoid needless overhead.
 
 Be careful about:
@@ -170,7 +192,7 @@ When performance-sensitive code is introduced:
 
 ---
 
-### 8. Temporal state is first-class
+### 9. Temporal state is first-class
 This library is not just a frame-processing toolkit.
 
 Temporal concepts are first-class:
@@ -187,7 +209,7 @@ Do not collapse everything into frame-local logic.
 
 ---
 
-### 9. PTZ/view-state is first-class and generic
+### 10. PTZ/view-state is first-class and generic
 The library must intelligently model changing camera views in a domain-agnostic way.
 
 This includes:
@@ -204,7 +226,7 @@ Do not implement domain-specific policies for PTZ behavior in the core library.
 
 ---
 
-### 10. Operational clarity matters
+### 11. Operational clarity matters
 This library is intended for real systems.
 
 Agents must preserve clear operational behavior around:
@@ -223,7 +245,7 @@ Never hide important runtime behavior behind abstractions that make failure sema
 
 ## Repository standards
 
-### 11. Crate boundaries matter
+### 12. Crate boundaries matter
 Keep crate/module responsibilities clean.
 
 Examples of appropriate separation:
@@ -243,7 +265,7 @@ If a file or crate starts accumulating unrelated responsibilities, refactor it.
 
 ---
 
-### 12. Public traits should be intentionally small
+### 13. Public traits should be intentionally small
 Traits in the public API should be focused and understandable.
 
 Avoid:
@@ -260,7 +282,7 @@ Prefer:
 
 ---
 
-### 13. Errors must be typed and informative
+### 14. Errors must be typed and informative
 Error handling should be:
 - explicit
 - typed
@@ -273,7 +295,7 @@ Include enough context to debug real failures.
 
 ---
 
-### 14. Tests are required for meaningful changes
+### 15. Tests are required for meaningful changes
 Important changes must include tests.
 
 At minimum, add or update tests for:
@@ -290,7 +312,7 @@ Do not rely on manual reasoning alone for correctness in runtime code.
 
 ---
 
-### 15. Benchmarks are expected for hot-path changes
+### 16. Benchmarks are expected for hot-path changes
 If a change affects likely hot paths, add or update benchmarks where practical.
 
 Examples:
@@ -304,7 +326,7 @@ Keep benchmarks focused and useful.
 
 ---
 
-### 16. Documentation is part of the implementation
+### 17. Documentation is part of the implementation
 Public APIs must be documented.
 Crates should have meaningful crate-level docs.
 The README should reflect reality.
@@ -321,7 +343,7 @@ Documentation should explain:
 
 ## Design rules for contributions
 
-### 17. Prefer library-defined semantic types over generic maps
+### 18. Prefer library-defined semantic types over generic maps
 Avoid shoving meaning into:
 - `HashMap<String, String>`
 - untyped JSON blobs
@@ -333,7 +355,7 @@ Metadata bags are acceptable only where genuinely open-ended extensibility is ne
 
 ---
 
-### 18. Avoid leaking implementation detail into the conceptual model
+### 19. Avoid leaking implementation detail into the conceptual model
 Do not let internal implementation choices shape the user-facing model unnecessarily.
 
 For example:
@@ -345,7 +367,7 @@ The conceptual model should reflect the library’s purpose, not its incidental 
 
 ---
 
-### 19. Backpressure and boundedness must be explicit
+### 20. Backpressure and boundedness must be explicit
 No unbounded queues in critical runtime paths unless there is an extremely strong reason.
 Memory growth must be controlled.
 Frame dropping/sampling/backpressure behavior must be explicit in config and code.
@@ -354,14 +376,14 @@ Hidden unbounded growth is unacceptable.
 
 ---
 
-### 20. Preserve feed isolation
+### 21. Preserve feed isolation
 Per-feed failures, state, and lifecycle should remain isolated wherever practical.
 
 Do not introduce shared-state shortcuts that make one feed able to poison the entire runtime unless there is a strong and documented reason.
 
 ---
 
-### 21. Prefer composition over sprawling inheritance-like hierarchies
+### 22. Prefer composition over sprawling inheritance-like hierarchies
 In Rust terms:
 - prefer focused structs and traits
 - prefer explicit composition
@@ -371,7 +393,7 @@ The architecture should feel modular, not tangled.
 
 ---
 
-### 22. Do not build a framework inside the framework
+### 23. Do not build a framework inside the framework
 This repository is a video perception runtime, not a general workflow engine.
 
 Avoid turning the stage system into:
@@ -388,16 +410,17 @@ Keep the system focused and practical.
 
 Before finalizing any significant code change, ask:
 
-1. Does this preserve domain-agnostic design?
-2. Does this improve or at least preserve public API clarity?
-3. Is any new abstraction justified?
-4. Did I reduce duplication where appropriate?
-5. Did I avoid introducing unnecessary complexity?
-6. Is runtime behavior still operationally clear?
-7. Did I preserve performance expectations?
-8. Did I avoid hidden allocations/clones/locks in hot paths?
-9. Did I add tests for meaningful behavior?
-10. Did I update docs if the behavior or API changed?
+1. Is the design event-driven? Could a timer or poll be replaced by reacting to an event?
+2. Does this preserve domain-agnostic design?
+3. Does this improve or at least preserve public API clarity?
+4. Is any new abstraction justified?
+5. Did I reduce duplication where appropriate?
+6. Did I avoid introducing unnecessary complexity?
+7. Is runtime behavior still operationally clear?
+8. Did I preserve performance expectations?
+9. Did I avoid hidden allocations/clones/locks in hot paths?
+10. Did I add tests for meaningful behavior?
+11. Did I update docs if the behavior or API changed?
 
 If the answer to any of these is no, revise the change.
 

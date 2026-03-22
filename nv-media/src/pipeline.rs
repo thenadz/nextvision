@@ -153,8 +153,14 @@ impl PipelineBuilder {
         //   GST_AUTOPLUG_SELECT_SKIP   = 2
         fn autoplug_select_result(discriminant: i32) -> gst::glib::Value {
             use gst::glib::translate::ToGlibPtrMut;
-            let gtype = gst::glib::Type::from_name("GstAutoplugSelectResult")
-                .expect("GstAutoplugSelectResult GType must be registered (is decodebin loaded?)");
+            let Some(gtype) = gst::glib::Type::from_name("GstAutoplugSelectResult") else {
+                // decodebin is not loaded — fall back to the raw integer value.
+                // GStreamer will coerce it, but may log a type warning.
+                tracing::error!(
+                    "GstAutoplugSelectResult GType not registered — is decodebin loaded?"
+                );
+                return discriminant.into();
+            };
             unsafe {
                 let mut value = gst::glib::Value::from_type(gtype);
                 gst::glib::gobject_ffi::g_value_set_enum(

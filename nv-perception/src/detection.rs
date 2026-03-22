@@ -88,17 +88,27 @@ impl DetectionBuilder {
         self
     }
 
-    /// Build the detection.
+    /// Build the detection. Confidence is clamped to `[0.0, 1.0]`;
+    /// NaN is treated as `0.0`.
     #[must_use]
     pub fn build(self) -> Detection {
         Detection {
             id: self.id,
             class_id: self.class_id,
-            confidence: self.confidence,
+            confidence: clamp_unit(self.confidence),
             bbox: self.bbox,
             embedding: self.embedding,
             metadata: self.metadata,
         }
+    }
+}
+
+/// Clamp a float to `[0.0, 1.0]`, treating NaN as `0.0`.
+fn clamp_unit(v: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(0.0, 1.0)
+    } else {
+        0.0
     }
 }
 

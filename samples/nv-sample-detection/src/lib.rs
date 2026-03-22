@@ -49,7 +49,7 @@ mod config;
 mod inference;
 mod letterbox;
 mod postprocess;
-mod session;
+pub mod session;
 mod stage;
 
 pub use batch::DetectorBatchProcessor;

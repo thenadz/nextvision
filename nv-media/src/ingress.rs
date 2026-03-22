@@ -299,6 +299,9 @@ pub struct IngressOptions {
     /// Optional post-decode hook — can inject a pipeline element between
     /// the decoder and the color-space converter.
     pub post_decode_hook: Option<PostDecodeHook>,
+    /// Maximum number of media events buffered before new events are
+    /// dropped. Default: 64.
+    pub event_queue_capacity: usize,
 }
 
 impl IngressOptions {
@@ -316,6 +319,7 @@ impl IngressOptions {
             ptz_provider: None,
             decode_preference: DecodePreference::default(),
             post_decode_hook: None,
+            event_queue_capacity: 64,
         }
     }
 
@@ -337,6 +341,13 @@ impl IngressOptions {
     #[must_use]
     pub fn with_post_decode_hook(mut self, hook: PostDecodeHook) -> Self {
         self.post_decode_hook = Some(hook);
+        self
+    }
+
+    /// Set the event queue capacity. Default: 64.
+    #[must_use]
+    pub fn with_event_queue_capacity(mut self, capacity: usize) -> Self {
+        self.event_queue_capacity = capacity;
         self
     }
 }

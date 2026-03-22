@@ -35,9 +35,12 @@ const DEFAULT_HEALTH_CAPACITY: usize = 256;
 /// Default output broadcast channel capacity.
 const DEFAULT_OUTPUT_CAPACITY: usize = 256;
 
-/// Maximum time to wait for a feed worker thread to join during
+/// Default time to wait for a feed worker thread to join during
 /// remove/shutdown. If exceeded, the thread is detached.
-const FEED_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_FEED_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Default time to wait for a batch coordinator thread to join.
+const DEFAULT_COORDINATOR_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Builder for constructing a [`Runtime`].
 ///
@@ -59,6 +62,8 @@ pub struct RuntimeBuilder {
     health_capacity: usize,
     output_capacity: usize,
     ingress_factory: Option<Box<dyn MediaIngressFactory>>,
+    feed_join_timeout: Duration,
+    coordinator_join_timeout: Duration,
 }
 
 impl RuntimeBuilder {
@@ -101,6 +106,25 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn ingress_factory(mut self, factory: Box<dyn MediaIngressFactory>) -> Self {
         self.ingress_factory = Some(factory);
+        self
+    }
+
+    /// Set the maximum time to wait for a feed worker thread to join
+    /// during shutdown or removal. Default: `10s`.
+    ///
+    /// If a feed thread does not finish within this timeout, it is
+    /// detached and a health event is emitted.
+    #[must_use]
+    pub fn feed_join_timeout(mut self, timeout: Duration) -> Self {
+        self.feed_join_timeout = timeout;
+        self
+    }
+
+    /// Set the maximum time to wait for a batch coordinator thread
+    /// to join during shutdown. Default: `10s`.
+    #[must_use]
+    pub fn coordinator_join_timeout(mut self, timeout: Duration) -> Self {
+        self.coordinator_join_timeout = timeout;
         self
     }
 
@@ -148,6 +172,9 @@ impl RuntimeBuilder {
             shutdown: AtomicBool::new(false),
             factory,
             started_at: Instant::now(),
+            feed_join_timeout: self.feed_join_timeout,
+            coordinator_join_timeout: self.coordinator_join_timeout,
+            detached_threads: Mutex::new(Vec::new()),
         });
 
         Ok(Runtime { inner })
@@ -175,6 +202,13 @@ struct RuntimeInner {
     factory: Arc<dyn MediaIngressFactory>,
     /// Instant when the runtime was created. Used by `uptime()`.
     started_at: Instant,
+    /// Timeout for joining feed worker threads.
+    feed_join_timeout: Duration,
+    /// Timeout for joining batch coordinator threads.
+    coordinator_join_timeout: Duration,
+    /// Threads that were detached due to join timeouts, tracked for
+    /// periodic reaping to prevent unbounded thread accumulation.
+    detached_threads: Mutex<Vec<DetachedJoin>>,
 }
 
 /// Internal state tracked per running feed.
@@ -190,6 +224,34 @@ impl RuntimeInner {
             .lock()
             .map_err(|_| NvError::Runtime(RuntimeError::RegistryPoisoned))?;
         Ok(feeds.len())
+    }
+
+    /// Attempt to reap detached threads that have since finished.
+    /// Returns the number of threads still detached after reaping.
+    fn reap_detached(&self) -> usize {
+        let mut detached = self
+            .detached_threads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        detached.retain(|d| {
+            match d.done_rx.try_recv() {
+                Ok(_) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // Thread finished or channel dropped — safe to remove.
+                    false
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            }
+        });
+        detached.len()
+    }
+
+    /// Store detached thread handles for later reaping.
+    fn track_detached(&self, joins: impl IntoIterator<Item = DetachedJoin>) {
+        let mut detached = self
+            .detached_threads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        detached.extend(joins);
     }
 
     fn diagnostics(&self) -> Result<crate::diagnostics::RuntimeDiagnostics, NvError> {
@@ -229,6 +291,10 @@ impl RuntimeInner {
         // Output channel lag status.
         let output_lag = self.lag_detector.status();
 
+        // Reap any detached threads that have since finished and
+        // report how many are still outstanding.
+        let detached_thread_count = self.reap_detached();
+
         Ok(crate::diagnostics::RuntimeDiagnostics {
             uptime: self.started_at.elapsed(),
             feed_count: feed_diags.len(),
@@ -236,6 +302,7 @@ impl RuntimeInner {
             feeds: feed_diags,
             batches,
             output_lag,
+            detached_thread_count,
         })
     }
 
@@ -294,7 +361,9 @@ impl RuntimeInner {
             if self.shutdown.load(Ordering::Acquire) {
                 if let Some(orphan) = coords.pop() {
                     drop(coords);
-                    orphan.shutdown();
+                    if let Some(detached) = orphan.shutdown(self.coordinator_join_timeout) {
+                        self.track_detached(std::iter::once(detached));
+                    }
                 }
                 if let Ok(mut ids) = self.batch_ids.lock() {
                     ids.remove(&processor_id);
@@ -360,7 +429,9 @@ impl RuntimeInner {
         drop(feeds);
 
         if let Some(handle) = entry.thread {
-            bounded_join(handle, feed_id, &self.health_tx);
+            if let Some(detached) = bounded_join(handle, feed_id, &self.health_tx, self.feed_join_timeout) {
+                self.track_detached(std::iter::once(detached));
+            }
         }
         Ok(())
     }
@@ -390,7 +461,13 @@ impl RuntimeInner {
         // response channels). Without this, feeds can hang for up to
         // `max_latency + RESPONSE_TIMEOUT_SAFETY` waiting for a batch
         // that the coordinator hasn't been told to stop.
-        if let Ok(coordinators) = self.coordinators.lock() {
+        //
+        // Use unwrap_or_else(PoisonError::into_inner) to guarantee
+        // coordinator signaling even when the mutex is poisoned —
+        // shutdown must not silently skip cleanup.
+        {
+            let coordinators = self.coordinators.lock()
+                .unwrap_or_else(|e| e.into_inner());
             for coordinator in coordinators.iter() {
                 coordinator.signal_shutdown();
             }
@@ -402,16 +479,24 @@ impl RuntimeInner {
         // blocked on batch responses will unblock promptly.
         for (id, mut entry) in entries {
             if let Some(handle) = entry.thread.take() {
-                bounded_join(handle, id, &self.health_tx);
+                if let Some(detached) = bounded_join(handle, id, &self.health_tx, self.feed_join_timeout) {
+                    self.track_detached(std::iter::once(detached));
+                }
             }
         }
 
         // --- Phase 3: Join batch coordinators. ---
         //
         // All feed threads are done (or detached). No new submissions.
-        if let Ok(mut coordinators) = self.coordinators.lock() {
-            for coordinator in coordinators.drain(..) {
-                coordinator.shutdown();
+        {
+            let mut coordinators = self.coordinators.lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let detached: Vec<_> = coordinators
+                .drain(..)
+                .filter_map(|c| c.shutdown(self.coordinator_join_timeout))
+                .collect();
+            if !detached.is_empty() {
+                self.track_detached(detached);
             }
         }
 
@@ -425,34 +510,40 @@ impl RuntimeInner {
 
 /// Join a feed worker thread with a bounded timeout.
 ///
-/// If the thread does not finish within [`FEED_JOIN_TIMEOUT`], it is
+/// If the thread does not finish within `timeout`, it is
 /// detached (the helper thread will eventually join when the worker
 /// finishes) and a `FeedStopped` health event with a timeout reason
 /// is emitted.
+///
+/// Returns `Some(DetachedJoin)` when the thread did not finish in time,
+/// allowing the caller to track the detached thread for later reaping.
 fn bounded_join(
     handle: std::thread::JoinHandle<()>,
     feed_id: FeedId,
     health_tx: &broadcast::Sender<HealthEvent>,
-) {
+    timeout: Duration,
+) -> Option<DetachedJoin> {
     let (done_tx, done_rx) = std::sync::mpsc::channel();
-    let _joiner = std::thread::Builder::new()
-        .name(format!("nv-join-{feed_id}"))
+    let label = format!("nv-join-{feed_id}");
+    let joiner = std::thread::Builder::new()
+        .name(label.clone())
         .spawn(move || {
             let result = handle.join();
             let _ = done_tx.send(result);
         });
-    match done_rx.recv_timeout(FEED_JOIN_TIMEOUT) {
-        Ok(Ok(())) => {}
+    match done_rx.recv_timeout(timeout) {
+        Ok(Ok(())) => None,
         Ok(Err(_)) => {
             tracing::error!(
                 feed_id = %feed_id,
                 "feed worker thread panicked during join",
             );
+            None
         }
         Err(_) => {
             tracing::warn!(
                 feed_id = %feed_id,
-                timeout_secs = FEED_JOIN_TIMEOUT.as_secs(),
+                timeout_secs = timeout.as_secs(),
                 "feed worker thread did not finish within timeout — detaching",
             );
             let _ = health_tx.send(HealthEvent::FeedStopped {
@@ -460,12 +551,32 @@ fn bounded_join(
                 reason: nv_core::health::StopReason::Fatal {
                     detail: format!(
                         "worker thread did not join within {}s — detached",
-                        FEED_JOIN_TIMEOUT.as_secs()
+                        timeout.as_secs()
                     ),
                 },
             });
+            joiner.ok().map(|j| DetachedJoin { label, done_rx, joiner: j })
         }
     }
+}
+
+/// Tracks a thread that was detached due to a join timeout.
+///
+/// When a `bounded_join` times out, the helper thread continues waiting
+/// for the original thread to finish. This struct retains the helper's
+/// `JoinHandle` and the completion channel so the runtime can
+/// periodically attempt to reap finished threads.
+pub(crate) struct DetachedJoin {
+    /// Human-readable label for diagnostics logging.
+    #[allow(dead_code)]
+    pub(crate) label: String,
+    /// Receives the original thread's join result when the helper
+    /// thread finishes its blocking join.
+    pub(crate) done_rx: std::sync::mpsc::Receiver<std::thread::Result<()>>,
+    /// Helper thread handle — joining this is instantaneous once
+    /// `done_rx` has a message.
+    #[allow(dead_code)]
+    pub(crate) joiner: std::thread::JoinHandle<()>,
 }
 
 // ---------------------------------------------------------------------------
@@ -493,6 +604,8 @@ impl Runtime {
             health_capacity: DEFAULT_HEALTH_CAPACITY,
             output_capacity: DEFAULT_OUTPUT_CAPACITY,
             ingress_factory: None,
+            feed_join_timeout: DEFAULT_FEED_JOIN_TIMEOUT,
+            coordinator_join_timeout: DEFAULT_COORDINATOR_JOIN_TIMEOUT,
         }
     }
 
@@ -622,6 +735,17 @@ impl Runtime {
     /// and returns. After shutdown the runtime cannot accept new feeds.
     pub fn shutdown(self) -> Result<(), NvError> {
         self.inner.shutdown_all()
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        // Best-effort cleanup: if the user forgot to call shutdown(), make
+        // sure all worker threads are signaled and joined rather than
+        // silently detached.
+        if !self.inner.shutdown.load(Ordering::Acquire) {
+            let _ = self.inner.shutdown_all();
+        }
     }
 }
 

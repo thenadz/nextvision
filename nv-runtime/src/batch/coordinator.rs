@@ -17,12 +17,6 @@ use super::metrics::BatchMetricsInner;
 /// thread. Overridden by [`BatchConfig::startup_timeout`] when set.
 const DEFAULT_ON_START_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Maximum time to wait for the coordinator thread to finish during
-/// shutdown. The coordinator checks its shutdown flag every
-/// [`SHUTDOWN_POLL_INTERVAL`], so this is generous. If exceeded, the
-/// thread is detached.
-const COORDINATOR_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// Interval at which the coordinator thread checks the shutdown flag
 /// during batch formation (Phase 1 and Phase 2). Keeps shutdown
 /// responsive even when `max_latency` is large.
@@ -225,12 +219,14 @@ impl BatchCoordinator {
     ///
     /// The coordinator thread checks the shutdown flag every 100 ms in
     /// its recv loop, so termination is prompt under normal conditions.
-    /// If it does not finish within [`COORDINATOR_JOIN_TIMEOUT`], the
-    /// thread is detached with a warning.
-    pub fn shutdown(mut self) {
+    /// If it does not finish within `timeout`, the thread is detached
+    /// with a warning and the detached join handle is returned.
+    pub fn shutdown(mut self, timeout: Duration) -> Option<crate::runtime::DetachedJoin> {
         self.shutdown.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
-            bounded_coordinator_join(thread, self.handle.processor_id());
+            bounded_coordinator_join(thread, self.handle.processor_id(), timeout)
+        } else {
+            None
         }
     }
 }
@@ -504,28 +500,37 @@ fn call_on_stop(processor: &mut dyn BatchProcessor) {
 
 /// Join the coordinator thread with a bounded timeout, mirroring the
 /// [`bounded_join`](crate::runtime) pattern used for feed workers.
-fn bounded_coordinator_join(thread: std::thread::JoinHandle<()>, processor_id: StageId) {
+///
+/// Returns `Some(DetachedJoin)` when the thread did not finish in time.
+fn bounded_coordinator_join(
+    thread: std::thread::JoinHandle<()>,
+    processor_id: StageId,
+    timeout: Duration,
+) -> Option<crate::runtime::DetachedJoin> {
     let (done_tx, done_rx) = std::sync::mpsc::channel();
-    let _ = std::thread::Builder::new()
-        .name(format!("nv-join-batch-{processor_id}"))
+    let label = format!("nv-join-batch-{processor_id}");
+    let joiner = std::thread::Builder::new()
+        .name(label.clone())
         .spawn(move || {
             let result = thread.join();
             let _ = done_tx.send(result);
         });
-    match done_rx.recv_timeout(COORDINATOR_JOIN_TIMEOUT) {
-        Ok(Ok(())) => {}
+    match done_rx.recv_timeout(timeout) {
+        Ok(Ok(())) => None,
         Ok(Err(_)) => {
             tracing::error!(
                 processor = %processor_id,
                 "batch coordinator thread panicked during join"
             );
+            None
         }
         Err(_) => {
             tracing::warn!(
                 processor = %processor_id,
-                timeout_secs = COORDINATOR_JOIN_TIMEOUT.as_secs(),
+                timeout_secs = timeout.as_secs(),
                 "batch coordinator thread did not finish within timeout — detaching"
             );
+            joiner.ok().map(|j| crate::runtime::DetachedJoin { label, done_rx, joiner: j })
         }
     }
 }

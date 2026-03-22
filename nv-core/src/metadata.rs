@@ -33,9 +33,22 @@ struct CloneableEntry {
 fn make_clone_fn<T: Clone + Send + Sync + 'static>()
 -> fn(&(dyn Any + Send + Sync)) -> Box<dyn Any + Send + Sync> {
     |any| {
-        let val = any
-            .downcast_ref::<T>()
-            .expect("type mismatch in TypedMetadata clone");
+        // Safety-net: downcast must succeed because the clone_fn is monomorphised
+        // for the same T that was inserted. A failure here indicates memory
+        // corruption or a logic bug — log and abort rather than panicking with
+        // an opaque message in production.
+        let val = match any.downcast_ref::<T>() {
+            Some(v) => v,
+            None => {
+                // This branch is structurally unreachable: the clone_fn is
+                // always paired with the correct type at insertion time.
+                // If it ever fires, something is deeply wrong.
+                unreachable!(
+                    "TypedMetadata clone: type mismatch for TypeId {:?}",
+                    std::any::TypeId::of::<T>()
+                );
+            }
+        };
         Box::new(val.clone())
     }
 }

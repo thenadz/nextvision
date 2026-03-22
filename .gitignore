@@ -1,3 +1,7 @@
 /target
 
 /.vscode/launch.json
+
+# macOS
+.DS_Store
+._*

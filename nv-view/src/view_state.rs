@@ -144,7 +144,7 @@ impl ViewState {
             ptz: None,
             global_transform: None,
             validity: ContextValidity::Valid,
-            stability_score: 1.0,
+            stability_score: clamp_unit(1.0),
         }
     }
 
@@ -166,7 +166,7 @@ impl ViewState {
             validity: ContextValidity::Degraded {
                 reason: crate::validity::DegradationReason::Unknown,
             },
-            stability_score: 0.0,
+                stability_score: clamp_unit(0.0),
         }
     }
 }
@@ -249,6 +249,14 @@ impl ViewSnapshot {
     #[must_use]
     pub fn as_view_state(&self) -> &ViewState {
         &self.inner
+    }
+}
+
+fn clamp_unit(v: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(0.0, 1.0)
+    } else {
+        0.0
     }
 }
 

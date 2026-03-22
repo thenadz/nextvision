@@ -465,6 +465,33 @@ impl eframe::App for NvApp {
                                 .color(egui::Color32::GRAY),
                         ).on_hover_text("Average batch inference time");
                     }
+                    // Per-frame batch stage latency (shown once, from first
+                    // feed that has it) — this is the actual wall-clock time
+                    // the shared batch took for the latest dispatch.
+                    let batch_stage_name = self
+                        .batch_handle
+                        .as_ref()
+                        .map(|b| b.processor_id().as_str());
+                    if let Some(bname) = batch_stage_name {
+                        let batch_latency_us = feed_order
+                            .iter()
+                            .filter_map(|fid| state.telemetry.get(fid))
+                            .flat_map(|t| t.last_stage_latencies.iter())
+                            .find(|(name, _)| name == bname)
+                            .map(|(_, us)| *us);
+                        if let Some(us) = batch_latency_us {
+                            let display = format!("{} [{}]", bname, self.inference_label);
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}: {:.1}ms",
+                                    display,
+                                    us as f64 / 1000.0
+                                ))
+                                .size(9.0)
+                                .color(egui::Color32::GRAY),
+                            ).on_hover_text("Batch stage latency (shared across feeds)");
+                        }
+                    }
                     ui.separator();
                 }
 
@@ -486,28 +513,36 @@ impl eframe::App for NvApp {
                 ).on_hover_text("Total frames dropped across all feeds");
             });
 
-            // Row 2: stage latencies (only if available, small text).
-            let has_stages = feed_order.iter().any(|fid| {
+            // Row 2: per-feed stage latencies (batch stages excluded — shown
+            // globally in row 1 alongside batch metrics).
+            let batch_stage_name: Option<&str> = self
+                .batch_handle
+                .as_ref()
+                .map(|b| b.processor_id().as_str());
+            let has_non_batch_stages = feed_order.iter().any(|fid| {
                 state
                     .telemetry
                     .get(fid)
-                    .map(|t| !t.last_stage_latencies.is_empty())
+                    .map(|t| {
+                        t.last_stage_latencies
+                            .iter()
+                            .any(|(name, _)| batch_stage_name.map_or(true, |bn| name != bn))
+                    })
                     .unwrap_or(false)
             });
-            if has_stages {
+            if has_non_batch_stages {
                 ui.horizontal(|ui| {
                     for fid in feed_order.iter() {
                         if let Some(t) = state.telemetry.get(fid) {
                             for (name, us) in &t.last_stage_latencies {
-                                let display_name = if name.contains("detector") {
-                                    format!("{} [{}]", name, self.inference_label)
-                                } else {
-                                    name.clone()
-                                };
+                                // Skip batch stages — rendered globally.
+                                if batch_stage_name.map_or(false, |bn| name == bn) {
+                                    continue;
+                                }
                                 ui.label(
                                     egui::RichText::new(format!(
                                         "{}: {:.1}ms",
-                                        display_name,
+                                        name,
                                         *us as f64 / 1000.0
                                     ))
                                     .size(9.0)

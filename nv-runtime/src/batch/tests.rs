@@ -93,7 +93,7 @@ fn single_item_dispatched_on_timeout() {
     assert!(result.unwrap().detections.is_some());
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn full_batch_dispatched_immediately() {
     );
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 #[test]
@@ -174,7 +174,7 @@ fn partial_batch_on_timeout() {
     assert_eq!(m.min_batch_size, 3);
     assert_eq!(m.max_batch_size_seen, 3);
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 #[test]
@@ -228,7 +228,7 @@ fn processor_error_propagated_to_all_feeds() {
         "expected BatchError health event"
     );
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 #[test]
@@ -262,7 +262,7 @@ fn processor_panic_propagated_to_all_feeds() {
     let event = health_rx.try_recv();
     assert!(matches!(event, Ok(HealthEvent::BatchError { .. })));
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 #[test]
@@ -288,7 +288,7 @@ fn metrics_track_submissions_and_rejections() {
     assert_eq!(m.items_submitted, 2);
     assert!(m.batches_dispatched >= 1);
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 #[test]
@@ -319,7 +319,7 @@ fn shutdown_while_waiting() {
     std::thread::sleep(Duration::from_millis(50));
 
     let start = Instant::now();
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
     // The response should arrive (either success from a partial batch
     // or CoordinatorShutdown). Both are acceptable.
     let _ = jh.join().unwrap();
@@ -425,7 +425,7 @@ fn multi_feed_results_routed_correctly() {
         );
     }
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 #[test]
@@ -466,7 +466,7 @@ fn explicit_queue_capacity_accepted() {
     );
     let handle = coord.handle();
     let _ = handle.submit_and_wait(make_entry(1), None);
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 #[test]
@@ -486,7 +486,7 @@ fn disconnected_submit_increments_rejected() {
 
     let handle = coord.handle();
     // Shut down the coordinator so the channel becomes disconnected.
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
     // Give the thread time to finish.
     std::thread::sleep(Duration::from_millis(100));
 
@@ -630,7 +630,7 @@ fn configured_max_batch_size_in_metrics() {
     );
     let m = coord.handle().metrics();
     assert_eq!(m.configured_max_batch_size, 16);
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 #[test]
@@ -769,7 +769,7 @@ fn non_detector_output_routed_correctly() {
     assert_eq!(output.scene_features.len(), 1);
     assert_eq!(output.scene_features[0].name, "weather");
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 #[test]
@@ -819,7 +819,7 @@ fn slow_on_start_completes_successfully() {
         result.is_ok(),
         "slow-but-completing on_start should succeed"
     );
-    result.unwrap().shutdown();
+    result.unwrap().shutdown(Duration::from_secs(10));
 }
 
 #[test]
@@ -927,7 +927,7 @@ fn custom_response_timeout_applied() {
         "expected Timeout with short response_timeout, got: {result:?}"
     );
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 #[test]
@@ -978,7 +978,7 @@ fn batch_error_throttle_coalesces_events() {
         "BatchError should be throttled to 1 per second, got {event_count}"
     );
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 // ---------------------------------------------------------------
@@ -1125,7 +1125,7 @@ fn consecutive_errors_tracks_and_resets() {
     let m = handle.metrics();
     assert_eq!(m.consecutive_errors, 0, "should reset to 0 after success");
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 #[test]
@@ -1152,7 +1152,7 @@ fn items_timed_out_metric_incremented() {
     handle.record_timeout();
     assert_eq!(handle.metrics().items_timed_out, 2);
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 #[test]
@@ -1286,7 +1286,7 @@ fn shutdown_processes_last_batch_before_drain() {
     assert_eq!(m.batches_dispatched, 1);
     assert_eq!(m.items_processed, 2);
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 // ---------------------------------------------------------------
@@ -1373,7 +1373,7 @@ fn submit_and_wait_serializes_per_feed_preventing_starvation() {
         "no rejections expected with adequate queue"
     );
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 #[test]
@@ -1438,7 +1438,7 @@ fn mixed_rate_feeds_all_make_progress() {
         );
     }
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 /// Under non-timeout operation, `submit_and_wait` blocks so each
@@ -1497,7 +1497,7 @@ fn single_inflight_per_feed_under_contention() {
         t.join().unwrap();
     }
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 // ---------------------------------------------------------------
@@ -1597,7 +1597,7 @@ fn in_flight_cap_prevents_stacking_after_timeout() {
     let r3 = handle.submit_and_wait(make_entry(1), Some(&in_flight));
     assert!(r3.is_ok(), "third submit should succeed, got: {r3:?}");
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 #[test]
@@ -1633,7 +1633,7 @@ fn in_flight_guard_decremented_on_queue_full() {
         "in_flight should be 0 after send failure"
     );
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 #[test]
@@ -1699,7 +1699,7 @@ fn shutdown_drain_clears_in_flight_guards() {
 
     // Signal shutdown while the processor is still sleeping.
     // Coordinator will finish item 1 (~400ms), then drain items 2-4.
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 
     // Wait for threads to finish.
     for t in threads {
@@ -1783,7 +1783,7 @@ fn mixed_rate_feeds_progress_with_in_flight_cap() {
         );
     }
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 #[test]
@@ -1859,7 +1859,7 @@ fn in_flight_cap_higher_than_one_allows_stacking() {
     assert_eq!(m.items_rejected, 1, "cap rejection counted");
     assert_eq!(m.pending_items(), 3, "3 items genuinely in-flight");
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }
 
 /// Reproducer for the Jetson stuck-batch issue: when the first
@@ -1971,5 +1971,5 @@ fn slow_first_process_causes_in_flight_cascade() {
     let r4 = handle.submit_and_wait(make_entry(1), Some(&in_flight));
     assert!(r4.is_ok(), "submit after recovery should succeed, got: {r4:?}");
 
-    coord.shutdown();
+    coord.shutdown(Duration::from_secs(10));
 }

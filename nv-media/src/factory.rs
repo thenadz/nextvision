@@ -66,6 +66,7 @@ impl MediaIngressFactory for GstMediaIngressFactory {
         if let Some(hook) = options.post_decode_hook {
             source.set_post_decode_hook(hook);
         }
+        source.event_queue_capacity = options.event_queue_capacity;
         Ok(Box::new(source))
     }
 }

@@ -158,7 +158,7 @@ pub use batch::{BatchConfig, BatchHandle, BatchMetrics};
 pub use diagnostics::{BatchDiagnostics, FeedDiagnostics, OutputLagStatus, RuntimeDiagnostics, ViewDiagnostics, ViewStatus};
 pub use feed::{FeedConfig, FeedConfigBuilder};
 pub use feed_handle::{DecodeStatus, FeedHandle, QueueTelemetry};
-pub use output::{AdmissionSummary, FrameInclusion, OutputEnvelope, OutputSink, SharedOutput};
+pub use output::{AdmissionSummary, FrameInclusion, OutputEnvelope, OutputSink, SharedOutput, SinkFactory};
 pub use pipeline::{FeedPipeline, FeedPipelineBuilder, PipelineError};
 pub use provenance::{
     Provenance, StageOutcomeCategory, StageProvenance, StageResult, ViewProvenance,

@@ -63,6 +63,8 @@ pub(crate) struct SessionConfig {
     pub ptz_provider: Option<Arc<dyn PtzProvider>>,
     /// Optional post-decode hook — can inject a pipeline element.
     pub post_decode_hook: Option<PostDecodeHook>,
+    /// Maximum events buffered in the event queue before drops.
+    pub event_queue_capacity: usize,
 }
 
 impl std::fmt::Debug for SessionConfig {
@@ -183,6 +185,7 @@ impl GstSession {
         let sink_wake = Arc::clone(&sink);
         let pts_clone = Arc::clone(&pts_tracker);
         let eq_clone = Arc::clone(&event_queue);
+        let eq_capacity = config.event_queue_capacity;
         built.appsink.set_callbacks(
             gstreamer_app::AppSinkCallbacks::builder()
                 .new_sample(move |appsink| {
@@ -207,7 +210,7 @@ impl GstSession {
                                 } = result
                                 {
                                     if let Ok(mut q) = eq_clone.lock() {
-                                        if q.len() < EVENT_QUEUE_CAPACITY {
+                                        if q.len() < eq_capacity {
                                             q.push_back(MediaEvent::Discontinuity {
                                                 gap_ns,
                                                 prev_pts_ns: prev_ns,
@@ -570,6 +573,7 @@ mod tests {
             output_format: OutputFormat::default(),
             ptz_provider: None,
             post_decode_hook: None,
+            event_queue_capacity: EVENT_QUEUE_CAPACITY,
         }
     }
 

@@ -1,4 +1,4 @@
-//! Output types: [`OutputEnvelope`], [`OutputSink`] trait, and lag detection.
+//! Output types: [`OutputEnvelope`], [`OutputSink`] trait, [`SinkFactory`], and lag detection.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -13,6 +13,14 @@ use nv_view::ViewState;
 use tokio::sync::broadcast;
 
 use crate::provenance::Provenance;
+
+/// Factory for constructing fresh [`OutputSink`] instances.
+///
+/// When a sink thread times out or panics during shutdown, the feed
+/// worker loses the original sink. If a `SinkFactory` was provided,
+/// the next restart can construct a fresh sink rather than falling
+/// back to a silent `NullSink`.
+pub type SinkFactory = Box<dyn Fn() -> Box<dyn OutputSink> + Send + Sync>;
 
 /// Controls whether the source [`FrameEnvelope`] is included in the
 /// [`OutputEnvelope`].

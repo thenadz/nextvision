@@ -1,5 +1,9 @@
 # NextVision
 
+[![CI](https://github.com/thenadz/nextvision/actions/workflows/ci.yml/badge.svg)](https://github.com/thenadz/nextvision/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
+[![Rust: 1.92+](https://img.shields.io/badge/Rust-1.92%2B-orange.svg)](https://www.rust-lang.org)
+
 A domain-agnostic, production-oriented, high-performance Rust video perception runtime built on GStreamer.
 
 ## Overview
@@ -128,6 +132,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - **Operational clarity**: Every queue is bounded, every restart path is explicit, every failure is typed.
 - **Composition over framework**: Linear stage pipeline, not a DAG engine or meta-framework.
 
+## Requirements
+
+- **Rust 1.92+** (edition 2024)
+- **GStreamer 1.16+** runtime libraries (for video ingestion)
+- Linux recommended for production; macOS supported for development; Windows supported with use of VS Code devcontainer
+
+### Installation
+
+Add the crates you need to your `Cargo.toml`:
+
+```toml
+[dependencies]
+nv-runtime = "0.1"          # Full runtime (includes nv-core, nv-frame, etc.)
+nv-perception = "0.1"       # Stage trait, detection/track types
+nv-metrics = "0.1"          # Optional: OpenTelemetry metrics bridge
+```
+
+For most applications, `nv-runtime` is the only direct dependency needed — it
+re-exports the essential types from `nv-core`, `nv-frame`, `nv-perception`,
+`nv-temporal`, and `nv-view`.
+
+### Building from source
+
+```bash
+# Install GStreamer development libraries (Debian/Ubuntu)
+sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+# Build the workspace
+cargo build --workspace
+
+# Run the test suite
+cargo test --workspace
+```
+
 ## Telemetry
 
 The runtime exposes lightweight telemetry through public APIs. Per-feed and
@@ -178,4 +216,15 @@ threads, no additional mutex contention on hot paths.
 
 ## License
 
-Licensed under either of Apache License, Version 2.0 or MIT license, at your option.
+Licensed under either of
+
+- [Apache License, Version 2.0](LICENSE-APACHE)
+- [MIT License](LICENSE-MIT)
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this project by you, as defined in the Apache-2.0 license,
+shall be dual licensed as above, without any additional terms or conditions.

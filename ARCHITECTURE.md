@@ -1443,7 +1443,7 @@ The async runtime (tokio) is used for supervision, health monitoring, metrics ex
 | Channel | Capacity | Drop policy |
 |---|---|---|
 | GstThread → StgThread | Configurable (default: 4) | Configurable: `DropOldest`, `DropNewest`, `Block` |
-| StgThread → OutThread | Configurable (default: 2) | `DropOldest` (output must never block perception) |
+| StgThread → OutThread | Configurable (default: 16) | `DropNewest` via `try_send` (output must never block perception) |
 
 ### `BackpressurePolicy`
 

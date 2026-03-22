@@ -196,6 +196,11 @@ pub struct RuntimeDiagnostics {
     pub batches: Vec<BatchDiagnostics>,
     /// Current output broadcast channel saturation status.
     pub output_lag: OutputLagStatus,
+    /// Number of threads that were detached due to join timeouts and
+    /// have not yet been reaped. Non-zero values indicate threads that
+    /// are still blocked (e.g. in `OutputSink::emit()` or a batch
+    /// processor). Monitored and reaped on each diagnostics poll.
+    pub detached_thread_count: usize,
 }
 
 #[cfg(test)]

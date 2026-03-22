@@ -146,6 +146,8 @@ pub struct MediaSource {
     pub(super) session_fallback_reason: Option<String>,
     /// Optional post-decode hook — passed through to the pipeline builder.
     pub(super) post_decode_hook: Option<PostDecodeHook>,
+    /// Maximum events buffered in the event queue before drops.
+    pub(super) event_queue_capacity: usize,
 }
 
 impl MediaSource {
@@ -176,6 +178,7 @@ impl MediaSource {
             decoder_verified: false,
             session_fallback_reason: None,
             post_decode_hook: None,
+            event_queue_capacity: crate::backend::EVENT_QUEUE_CAPACITY,
         }
     }
 
@@ -313,6 +316,7 @@ impl MediaSource {
             output_format: OutputFormat::default(),
             ptz_provider: self.ptz_provider.clone(),
             post_decode_hook: self.post_decode_hook.clone(),
+            event_queue_capacity: self.event_queue_capacity,
         };
         let sink = self
             .sink
@@ -346,6 +350,7 @@ impl MediaSource {
             output_format: OutputFormat::default(),
             ptz_provider: None,
             post_decode_hook: None,
+            event_queue_capacity: self.event_queue_capacity,
         };
         self.session = Some(GstSession::start_stub(config));
         self.decoder_verified = false;

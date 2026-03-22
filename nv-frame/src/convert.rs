@@ -55,6 +55,37 @@ pub fn convert(frame: &FrameEnvelope, target: PixelFormat) -> Result<FrameEnvelo
     let h = frame.height();
     let src_stride = frame.stride();
 
+    // Validate that the frame data is large enough for the declared dimensions.
+    // A truncated or corrupt frame would otherwise panic in pixel_rows().
+    // All arithmetic is checked to prevent overflow from adversarial dimensions.
+    let src_bpp = match frame.format() {
+        PixelFormat::Gray8 => 1u32,
+        PixelFormat::Rgb8 | PixelFormat::Bgr8 => 3,
+        PixelFormat::Rgba8 => 4,
+        _ => {
+            return Err(ConvertError::Unsupported {
+                from: frame.format(),
+                to: target,
+            })
+        }
+    };
+    let required = checked_frame_size(w, h, src_stride, src_bpp).ok_or_else(|| {
+        ConvertError::Access(FrameAccessError::MaterializationFailed {
+            detail: format!(
+                "dimension overflow: {}x{} stride={} bpp={}",
+                w, h, src_stride, src_bpp,
+            ),
+        })
+    })?;
+    if host_bytes.len() < required {
+        return Err(ConvertError::Access(FrameAccessError::MaterializationFailed {
+            detail: format!(
+                "frame data too short: {} bytes for {}x{} stride={} bpp={}",
+                host_bytes.len(), w, h, src_stride, src_bpp,
+            ),
+        }));
+    }
+
     let converted = match (frame.format(), target) {
         (PixelFormat::Bgr8, PixelFormat::Rgb8) | (PixelFormat::Rgb8, PixelFormat::Bgr8) => {
             swap_rb(&host_bytes, w, h, src_stride)
@@ -71,8 +102,16 @@ pub fn convert(frame: &FrameEnvelope, target: PixelFormat) -> Result<FrameEnvelo
 
     let out_stride = match target {
         PixelFormat::Gray8 => w,
-        PixelFormat::Rgb8 | PixelFormat::Bgr8 => w * 3,
-        PixelFormat::Rgba8 => w * 4,
+        PixelFormat::Rgb8 | PixelFormat::Bgr8 => w.checked_mul(3).ok_or_else(|| {
+            ConvertError::Access(FrameAccessError::MaterializationFailed {
+                detail: format!("output stride overflow: width={} bpp=3", w),
+            })
+        })?,
+        PixelFormat::Rgba8 => w.checked_mul(4).ok_or_else(|| {
+            ConvertError::Access(FrameAccessError::MaterializationFailed {
+                detail: format!("output stride overflow: width={} bpp=4", w),
+            })
+        })?,
         _ => {
             return Err(ConvertError::Unsupported {
                 from: frame.format(),
@@ -95,13 +134,31 @@ pub fn convert(frame: &FrameEnvelope, target: PixelFormat) -> Result<FrameEnvelo
     ))
 }
 
+/// Compute the minimum buffer size for the given frame dimensions using
+/// checked arithmetic. Returns `None` on overflow.
+fn checked_frame_size(width: u32, height: u32, stride: u32, bpp: u32) -> Option<usize> {
+    if height == 0 {
+        return Some(0);
+    }
+    let last_row_bytes = (width as usize).checked_mul(bpp as usize)?;
+    let prefix_rows = (height as usize).checked_sub(1)?;
+    let prefix_bytes = prefix_rows.checked_mul(stride as usize)?;
+    prefix_bytes.checked_add(last_row_bytes)
+}
+
 /// Extract tightly-packed pixel rows from potentially padded data.
 ///
 /// GStreamer (and other backends) may deliver rows with padding bytes
 /// at the end (stride > width × bpp). This iterator yields only the
 /// meaningful bytes of each row, skipping any trailing padding.
+///
+/// # Safety contract
+///
+/// The caller must ensure that `data.len()` is at least
+/// `checked_frame_size(width, height, stride, bpp)`. The `convert()`
+/// function validates this before calling `pixel_rows`.
 fn pixel_rows(data: &[u8], width: u32, height: u32, stride: u32, bpp: u32) -> Vec<&[u8]> {
-    let row_bytes = (width * bpp) as usize;
+    let row_bytes = (width as usize) * (bpp as usize);
     let stride = stride as usize;
     (0..height as usize)
         .map(|y| {

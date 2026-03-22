@@ -12,13 +12,13 @@ use tokio::sync::broadcast;
 use crate::backpressure::BackpressurePolicy;
 use crate::executor::PipelineExecutor;
 use crate::feed::FeedConfig;
-use crate::output::{LagDetector, OutputSink, SharedOutput};
+use crate::output::{LagDetector, OutputSink, SharedOutput, SinkFactory};
 use crate::queue::{FrameQueue, PopResult};
 use crate::shutdown::{RestartPolicy, RestartTrigger};
 
 use super::ingress_adapter::{BackpressureThrottle, FeedFrameSink};
 use super::shared_state::FeedSharedState;
-use super::sink::{NullSink, SinkBpThrottle, SinkWorker};
+use super::sink::{NullSink, SinkBpThrottle, SinkRecovery, SinkWorker};
 
 // ---------------------------------------------------------------------------
 // FeedWorker — the per-feed thread entry point
@@ -34,6 +34,9 @@ enum ExitReason {
     FileEos,
     /// A stage panicked — may trigger restart if policy allows.
     StagePanic,
+    /// A stage failed during startup (`on_start`) — restart may be allowed
+    /// under `SourceOrStagePanic` policy but not under `SourceFailure`.
+    StageStartFailed,
     /// Source reported permanently stopped (reconnection budget exhausted).
     SourceStopped,
     /// The sink worker thread could not be spawned. A terminal health
@@ -84,6 +87,7 @@ pub(crate) fn spawn_feed_worker(
                     Arc::clone(&shared_clone.shutdown),
                 ),
                 output_sink: config.output_sink,
+                sink_factory: config.sink_factory,
                 ptz_provider: config.ptz_provider,
                 health_tx,
                 output_tx,
@@ -92,6 +96,7 @@ pub(crate) fn spawn_feed_worker(
                 lag_detector,
                 had_external_subscribers: false,
                 sink_queue_capacity: config.sink_queue_capacity,
+                sink_shutdown_timeout: config.sink_shutdown_timeout,
                 decode_preference: config.decode_preference,
                 post_decode_hook: config.post_decode_hook,
             };
@@ -116,6 +121,8 @@ struct FeedWorker {
     restart_policy: RestartPolicy,
     executor: PipelineExecutor,
     output_sink: Box<dyn OutputSink>,
+    /// Optional factory for constructing a fresh sink after timeout/panic.
+    sink_factory: Option<SinkFactory>,
     ptz_provider: Option<Arc<dyn nv_media::PtzProvider>>,
     health_tx: broadcast::Sender<HealthEvent>,
     output_tx: broadcast::Sender<SharedOutput>,
@@ -130,6 +137,8 @@ struct FeedWorker {
     had_external_subscribers: bool,
     /// Per-feed output sink queue capacity (bounded channel to sink thread).
     sink_queue_capacity: usize,
+    /// Timeout for joining the sink worker thread during shutdown/restart.
+    sink_shutdown_timeout: Duration,
     /// Decode preference — plumbed through to the media ingress factory.
     decode_preference: nv_media::DecodePreference,
     /// Optional post-decode hook — plumbed through to the media ingress.
@@ -174,7 +183,7 @@ impl FeedWorker {
                 if !self.try_restart(
                     &mut restart_count,
                     &mut session_start,
-                    &ExitReason::SourceEnded,
+                    &ExitReason::StageStartFailed,
                     format!("stage startup failed: {e}"),
                 ) {
                     break;
@@ -296,10 +305,10 @@ impl FeedWorker {
                     // Terminal health event already emitted by processing_loop.
                     break;
                 }
-                ExitReason::SourceEnded | ExitReason::StagePanic => {
+                ExitReason::SourceEnded | ExitReason::StagePanic | ExitReason::StageStartFailed => {
                     let detail = match exit_reason {
-                        ExitReason::StagePanic => format!(
-                            "stage panic (trigger {:?} does not allow restart, or budget exhausted after {} restarts)",
+                        ExitReason::StagePanic | ExitReason::StageStartFailed => format!(
+                            "stage failure (trigger {:?} does not allow restart, or budget exhausted after {} restarts)",
                             self.restart_policy.restart_on, restart_count,
                         ),
                         _ => format!("restart budget exhausted after {} restarts", restart_count,),
@@ -373,7 +382,38 @@ impl FeedWorker {
 
         // Recover the sink from the worker thread so it can be reused
         // if the feed restarts.
-        self.output_sink = sink_worker.shutdown(&self.health_tx, self.feed_id);
+        match sink_worker.shutdown(&self.health_tx, self.feed_id, self.sink_shutdown_timeout) {
+            SinkRecovery::Recovered(sink) => {
+                self.output_sink = sink;
+            }
+            SinkRecovery::Lost => {
+                // The sink thread timed out or panicked. When a factory is
+                // available, construct a fresh sink so the next restart
+                // produces output instead of silently discarding it.
+                if let Some(ref factory) = self.sink_factory {
+                    tracing::info!(
+                        feed_id = %self.feed_id,
+                        "sink was lost (timeout/panic) — reconstructing from factory",
+                    );
+                    self.output_sink = factory();
+                } else {
+                    tracing::warn!(
+                        feed_id = %self.feed_id,
+                        "sink was lost (timeout/panic) and no sink_factory configured — \
+                         output will be discarded on restart",
+                    );
+                    // Alert operators: the feed will continue processing but
+                    // all output is silently discarded until the feed is
+                    // reconfigured with a new sink or removed.
+                    self.emit_feed_stopped(StopReason::Fatal {
+                        detail: "sink lost with no sink_factory — \
+                                 output will be discarded on restart"
+                            .into(),
+                    });
+                    self.output_sink = Box::new(NullSink);
+                }
+            }
+        }
 
         result
     }
@@ -652,7 +692,7 @@ impl FeedWorker {
             return false;
         }
         match (&self.restart_policy.restart_on, reason) {
-            (RestartTrigger::SourceFailure, ExitReason::StagePanic) => return false,
+            (RestartTrigger::SourceFailure, ExitReason::StagePanic | ExitReason::StageStartFailed) => return false,
             (RestartTrigger::SourceOrStagePanic, _) => {}
             (RestartTrigger::SourceFailure, _) => {}
             (RestartTrigger::Never, _) => return false,

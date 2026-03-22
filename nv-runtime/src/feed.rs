@@ -1,6 +1,7 @@
 //! Feed configuration and validation.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use nv_core::config::{CameraMode, ReconnectPolicy, SourceSpec};
 use nv_core::error::{ConfigError, NvError};
@@ -13,9 +14,10 @@ use nv_view::{EpochPolicy, ViewStateProvider};
 
 use crate::backpressure::BackpressurePolicy;
 use crate::batch::BatchHandle;
-use crate::output::{FrameInclusion, OutputSink};
+use crate::output::{FrameInclusion, OutputSink, SinkFactory};
 use crate::pipeline::FeedPipeline;
 use crate::shutdown::RestartPolicy;
+use crate::worker::sink::DEFAULT_SINK_SHUTDOWN_TIMEOUT;
 
 /// Configuration for a single video feed.
 ///
@@ -29,6 +31,7 @@ pub struct FeedConfig {
     pub(crate) view_state_provider: Option<Box<dyn ViewStateProvider>>,
     pub(crate) epoch_policy: Box<dyn EpochPolicy>,
     pub(crate) output_sink: Box<dyn OutputSink>,
+    pub(crate) sink_factory: Option<SinkFactory>,
     pub(crate) backpressure: BackpressurePolicy,
     pub(crate) temporal: RetentionPolicy,
     pub(crate) reconnect: ReconnectPolicy,
@@ -36,6 +39,7 @@ pub struct FeedConfig {
     pub(crate) ptz_provider: Option<Arc<dyn PtzProvider>>,
     pub(crate) frame_inclusion: FrameInclusion,
     pub(crate) sink_queue_capacity: usize,
+    pub(crate) sink_shutdown_timeout: Duration,
     pub(crate) decode_preference: DecodePreference,
     pub(crate) post_decode_hook: Option<PostDecodeHook>,
 }
@@ -62,6 +66,7 @@ pub struct FeedConfigBuilder {
     view_state_provider: Option<Box<dyn ViewStateProvider>>,
     epoch_policy: Option<Box<dyn EpochPolicy>>,
     output_sink: Option<Box<dyn OutputSink>>,
+    sink_factory: Option<SinkFactory>,
     backpressure: BackpressurePolicy,
     temporal: RetentionPolicy,
     reconnect: ReconnectPolicy,
@@ -70,6 +75,7 @@ pub struct FeedConfigBuilder {
     frame_inclusion: FrameInclusion,
     validation_mode: ValidationMode,
     sink_queue_capacity: usize,
+    sink_shutdown_timeout: Duration,
     decode_preference: DecodePreference,
     post_decode_hook: Option<PostDecodeHook>,
 }
@@ -86,6 +92,7 @@ impl FeedConfig {
             view_state_provider: None,
             epoch_policy: None,
             output_sink: None,
+            sink_factory: None,
             backpressure: BackpressurePolicy::default(),
             temporal: RetentionPolicy::default(),
             reconnect: ReconnectPolicy::default(),
@@ -94,6 +101,7 @@ impl FeedConfig {
             frame_inclusion: FrameInclusion::default(),
             validation_mode: ValidationMode::default(),
             sink_queue_capacity: 16,
+            sink_shutdown_timeout: DEFAULT_SINK_SHUTDOWN_TIMEOUT,
             decode_preference: DecodePreference::default(),
             post_decode_hook: None,
         }
@@ -171,6 +179,18 @@ impl FeedConfigBuilder {
         self
     }
 
+    /// Set an optional sink factory for reconstructing the sink after
+    /// timeout or panic.
+    ///
+    /// Without a factory, a sink that times out during shutdown is
+    /// permanently replaced with a silent no-op. With a factory, the
+    /// next feed restart constructs a fresh sink.
+    #[must_use]
+    pub fn sink_factory(mut self, factory: SinkFactory) -> Self {
+        self.sink_factory = Some(factory);
+        self
+    }
+
     /// Set the backpressure policy. Default: `DropOldest { queue_depth: 4 }`.
     #[must_use]
     pub fn backpressure(mut self, policy: BackpressurePolicy) -> Self {
@@ -238,6 +258,14 @@ impl FeedConfigBuilder {
     #[must_use]
     pub fn sink_queue_capacity(mut self, capacity: usize) -> Self {
         self.sink_queue_capacity = capacity;
+        self
+    }
+
+    /// Set the timeout for joining the sink worker thread during
+    /// shutdown or restart. Default: 5 seconds.
+    #[must_use]
+    pub fn sink_shutdown_timeout(mut self, timeout: Duration) -> Self {
+        self.sink_shutdown_timeout = timeout;
         self
     }
 
@@ -385,6 +413,7 @@ impl FeedConfigBuilder {
             view_state_provider: self.view_state_provider,
             epoch_policy,
             output_sink,
+            sink_factory: self.sink_factory,
             backpressure: self.backpressure,
             temporal: self.temporal,
             reconnect: self.reconnect,
@@ -392,6 +421,7 @@ impl FeedConfigBuilder {
             ptz_provider: self.ptz_provider,
             frame_inclusion: self.frame_inclusion,
             sink_queue_capacity: self.sink_queue_capacity.max(1),
+            sink_shutdown_timeout: self.sink_shutdown_timeout,
             decode_preference: self.decode_preference,
             post_decode_hook: self.post_decode_hook,
         })

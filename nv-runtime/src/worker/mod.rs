@@ -31,7 +31,7 @@
 mod feed_loop;
 mod ingress_adapter;
 mod shared_state;
-mod sink;
+pub(crate) mod sink;
 
 pub(crate) use feed_loop::spawn_feed_worker;
 pub(crate) use shared_state::{BroadcastHealthSink, FeedSharedState};

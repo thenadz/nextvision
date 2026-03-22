@@ -61,7 +61,7 @@ fn configure_gpu(
 /// When `config.gpu` is true and the `gpu` crate feature is enabled,
 /// the session is configured with the CUDA execution provider before
 /// falling back to CPU.
-pub(crate) fn load_session(config: &DetectorConfig, stage_id: StageId) -> Result<Session, StageError> {
+pub fn load_session(config: &DetectorConfig, stage_id: StageId) -> Result<Session, StageError> {
     let mut builder = Session::builder().map_err(|e| StageError::ModelLoadFailed {
         stage_id,
         detail: format!("session builder failed: {e}"),
