@@ -674,6 +674,7 @@ mod tests {
             spec: SourceSpec::Rtsp {
                 url: "rtsp://test/stream".into(),
                 transport: RtspTransport::Tcp,
+                security: nv_core::security::RtspSecurityPolicy::AllowInsecure,
             },
             decoder: DecoderSelection::Auto,
             output_format: OutputFormat::default(),

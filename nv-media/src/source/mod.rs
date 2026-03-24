@@ -150,6 +150,10 @@ pub struct MediaSource {
     pub(super) event_queue_capacity: usize,
     /// Device residency mode — determines pipeline tail strategy.
     pub(super) device_residency: DeviceResidency,
+    /// When `true`, the source's `PreferTls` policy has been downgraded to
+    /// `AllowInsecure` because a TLS connection attempt failed (liveness
+    /// watchdog expired). Reset on successful `StreamStarted`.
+    pub(super) tls_fallback_active: bool,
 }
 
 impl MediaSource {
@@ -182,6 +186,7 @@ impl MediaSource {
             post_decode_hook: None,
             event_queue_capacity: crate::backend::EVENT_QUEUE_CAPACITY,
             device_residency: DeviceResidency::default(),
+            tls_fallback_active: false,
         }
     }
 
@@ -238,9 +243,11 @@ impl MediaSource {
     }
 
     /// Extract the URL (or path) from the source spec for diagnostics.
+    ///
+    /// **Credentials are redacted** — safe for logging and health events.
     fn source_url(&self) -> Option<String> {
         match &self.spec {
-            SourceSpec::Rtsp { url, .. } => Some(url.clone()),
+            SourceSpec::Rtsp { url, .. } => Some(nv_core::security::redact_url(url)),
             SourceSpec::File { path, .. } => Some(path.display().to_string()),
             SourceSpec::V4l2 { device } => Some(device.clone()),
             SourceSpec::Custom { .. } => None,
@@ -312,9 +319,28 @@ impl MediaSource {
             "creating session with decoder selection",
         );
 
+        // When TLS fallback is active, downgrade PreferTls → AllowInsecure
+        // so the pipeline uses the original rtsp:// URL instead of rtsps://.
+        let effective_spec = if self.tls_fallback_active {
+            match &self.spec {
+                SourceSpec::Rtsp { url, transport, security }
+                    if *security == nv_core::security::RtspSecurityPolicy::PreferTls =>
+                {
+                    SourceSpec::Rtsp {
+                        url: url.clone(),
+                        transport: *transport,
+                        security: nv_core::security::RtspSecurityPolicy::AllowInsecure,
+                    }
+                }
+                other => other.clone(),
+            }
+        } else {
+            self.spec.clone()
+        };
+
         let config = SessionConfig {
             feed_id: self.feed_id,
-            spec: self.spec.clone(),
+            spec: effective_spec,
             decoder: selection,
             output_format: OutputFormat::default(),
             ptz_provider: self.ptz_provider.clone(),

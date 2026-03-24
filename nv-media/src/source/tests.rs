@@ -1852,3 +1852,71 @@ fn no_residency_downgrade_for_host_residency() {
         events,
     );
 }
+
+// ===========================================================================
+// TLS fallback tests
+// ===========================================================================
+
+/// When a PreferTls source's liveness watchdog fires, `tls_fallback_active`
+/// should be set so the next reconnection attempt uses plain RTSP.
+#[test]
+fn liveness_expiry_activates_tls_fallback_for_prefer_tls() {
+    use nv_core::security::RtspSecurityPolicy;
+
+    let spec = SourceSpec::rtsp("rtsp://cam/stream");
+    // Verify the spec has PreferTls.
+    if let SourceSpec::Rtsp { ref security, .. } = spec {
+        assert_eq!(*security, RtspSecurityPolicy::PreferTls);
+    } else {
+        panic!("expected Rtsp spec");
+    }
+
+    let (mut src, _, _, _) = started_source(spec, test_reconnect());
+    assert!(!src.tls_fallback_active, "should start inactive");
+
+    // Arm and expire the liveness watchdog.
+    src.liveness_deadline = Some(Instant::now() - Duration::from_secs(1));
+    src.tick();
+
+    assert!(
+        src.tls_fallback_active,
+        "tls_fallback_active should be set after liveness expiry"
+    );
+}
+
+/// An AllowInsecure source should NOT activate TLS fallback on liveness expiry.
+#[test]
+fn liveness_expiry_does_not_activate_tls_fallback_for_allow_insecure() {
+    let spec = SourceSpec::rtsp_insecure("rtsp://cam/stream");
+    let (mut src, _, _, _) = started_source(spec, test_reconnect());
+
+    src.liveness_deadline = Some(Instant::now() - Duration::from_secs(1));
+    src.tick();
+
+    assert!(
+        !src.tls_fallback_active,
+        "AllowInsecure should not activate TLS fallback"
+    );
+}
+
+/// When TLS fallback is active and the stream succeeds, an InsecureRtspSource
+/// health event should be emitted.
+#[test]
+fn tls_fallback_emits_insecure_health_event() {
+    let spec = SourceSpec::rtsp("rtsp://cam/stream");
+    let (mut src, _, _, _, health) = started_source_with_health(spec, test_reconnect());
+
+    // Simulate TLS fallback having been activated.
+    src.tls_fallback_active = true;
+    src.state = SourceState::Reconnecting;
+    health.drain();
+
+    src.handle_event(MediaEvent::StreamStarted);
+
+    let events = health.drain();
+    assert!(
+        events.iter().any(|e| matches!(e, HealthEvent::InsecureRtspSource { .. })),
+        "should emit InsecureRtspSource when TLS fallback is active; got: {:?}",
+        events,
+    );
+}

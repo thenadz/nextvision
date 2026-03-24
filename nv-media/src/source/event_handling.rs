@@ -58,6 +58,47 @@ impl MediaSource {
                 self.emit_health(HealthEvent::SourceConnected {
                     feed_id: self.feed_id,
                 });
+
+                // Emit a warning if the effective RTSP URL is insecure.
+                // This covers both explicit AllowInsecure and the case where
+                // PreferTls fell back to plain RTSP after a TLS timeout.
+                if let nv_core::config::SourceSpec::Rtsp { url, security, .. } = &self.spec {
+                    use nv_core::security::{RtspSecurityPolicy, is_insecure_rtsp, promote_rtsp_to_tls, redact_url};
+                    let effective_url = if self.tls_fallback_active {
+                        // TLS failed, we connected with plain RTSP.
+                        url.clone()
+                    } else {
+                        match security {
+                            RtspSecurityPolicy::PreferTls => promote_rtsp_to_tls(url),
+                            _ => url.clone(),
+                        }
+                    };
+                    if is_insecure_rtsp(&effective_url) {
+                        let redacted = redact_url(&effective_url);
+                        if self.tls_fallback_active {
+                            tracing::warn!(
+                                feed_id = %self.feed_id,
+                                url = %redacted,
+                                "RTSP/TLS connection failed — connected with \
+                                 insecure transport; camera may not support TLS",
+                            );
+                        } else {
+                            tracing::warn!(
+                                feed_id = %self.feed_id,
+                                url = %redacted,
+                                policy = %security,
+                                "RTSP source is using insecure (non-TLS) transport — \
+                                 consider migrating to rtsps:// or placing the camera \
+                                 on a firewalled network segment",
+                            );
+                        }
+                        self.emit_health(HealthEvent::InsecureRtspSource {
+                            feed_id: self.feed_id,
+                            redacted_url: redacted,
+                        });
+                    }
+                }
+
                 None
             }
             MediaEvent::Eos => {

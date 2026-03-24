@@ -243,8 +243,17 @@ impl PipelineBuilder {
 
         // --- Source element ---
         let source = match &self.spec {
-            SourceSpec::Rtsp { url, transport } => gst::ElementFactory::make("rtspsrc")
-                .property("location", url.as_str())
+            SourceSpec::Rtsp { url, transport, security } => {
+                use nv_core::security::{RtspSecurityPolicy, promote_rtsp_to_tls};
+                // Apply TLS promotion based on security policy.
+                let effective_url = match security {
+                    RtspSecurityPolicy::PreferTls => promote_rtsp_to_tls(url),
+                    RtspSecurityPolicy::AllowInsecure | RtspSecurityPolicy::RequireTls => {
+                        url.clone()
+                    }
+                };
+                gst::ElementFactory::make("rtspsrc")
+                .property("location", effective_url.as_str())
                 .property("latency", self.latency_ms)
                 .property("tcp-timeout", DEFAULT_RTSP_TCP_TIMEOUT_US)
                 .property_from_str(
@@ -257,7 +266,8 @@ impl PipelineBuilder {
                 .build()
                 .map_err(|e| MediaError::Unsupported {
                     detail: format!("failed to create rtspsrc: {e}"),
-                })?,
+                })?
+            }
             SourceSpec::File { path, loop_: _ } => gst::ElementFactory::make("filesrc")
                 .property("location", path.to_string_lossy().as_ref())
                 .build()
@@ -985,6 +995,7 @@ mod tests {
         let b = PipelineBuilder::new(SourceSpec::Rtsp {
             url: "rtsp://test".into(),
             transport: RtspTransport::Tcp,
+            security: nv_core::security::RtspSecurityPolicy::AllowInsecure,
         });
         assert_eq!(b.rtsp_protocols(), Some("tcp"));
     }
@@ -994,6 +1005,7 @@ mod tests {
         let b = PipelineBuilder::new(SourceSpec::Rtsp {
             url: "rtsp://test".into(),
             transport: RtspTransport::UdpUnicast,
+            security: nv_core::security::RtspSecurityPolicy::AllowInsecure,
         });
         assert_eq!(b.rtsp_protocols(), Some("udp"));
     }

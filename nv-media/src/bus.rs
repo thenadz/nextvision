@@ -75,10 +75,21 @@ impl BusMessage {
 
             Self::Error { message, debug } => {
                 let error = classify_bus_error(&message);
-                Some(MediaEvent::Error { error, debug })
+                let sanitized_debug = debug.map(|d| {
+                    nv_core::security::sanitize_error_string(&nv_core::security::redact_urls_in_string(&d))
+                });
+                Some(MediaEvent::Error { error, debug: sanitized_debug })
             }
 
-            Self::Warning { message, debug } => Some(MediaEvent::Warning { message, debug }),
+            Self::Warning { message, debug } => {
+                let sanitized_msg = nv_core::security::sanitize_error_string(
+                    &nv_core::security::redact_urls_in_string(&message),
+                );
+                let sanitized_debug = debug.map(|d| {
+                    nv_core::security::sanitize_error_string(&nv_core::security::redact_urls_in_string(&d))
+                });
+                Some(MediaEvent::Warning { message: sanitized_msg, debug: sanitized_debug })
+            }
 
             Self::StreamStart => Some(MediaEvent::StreamStarted),
 
@@ -90,8 +101,13 @@ impl BusMessage {
 }
 
 /// Classify a GStreamer error message into the appropriate [`MediaError`] variant.
+///
+/// Detail strings are sanitized (control chars stripped, secrets redacted).
 fn classify_bus_error(message: &str) -> MediaError {
     let lower = message.to_lowercase();
+    let sanitized = nv_core::security::sanitize_error_string(
+        &nv_core::security::redact_urls_in_string(message)
+    );
     // Check timeout before connection — "connection timed out" should be Timeout
     if lower.contains("timeout") || lower.contains("timed out") {
         MediaError::Timeout
@@ -104,7 +120,7 @@ fn classify_bus_error(message: &str) -> MediaError {
     {
         MediaError::ConnectionFailed {
             url: String::new(),
-            detail: message.to_string(),
+            detail: sanitized,
         }
     } else if lower.contains("not supported")
         || lower.contains("unsupported")
@@ -112,11 +128,11 @@ fn classify_bus_error(message: &str) -> MediaError {
         || lower.contains("missing plugin")
     {
         MediaError::Unsupported {
-            detail: message.to_string(),
+            detail: sanitized,
         }
     } else {
         MediaError::DecodeFailed {
-            detail: message.to_string(),
+            detail: sanitized,
         }
     }
 }

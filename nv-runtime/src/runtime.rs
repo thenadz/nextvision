@@ -64,6 +64,7 @@ pub struct RuntimeBuilder {
     ingress_factory: Option<Box<dyn MediaIngressFactory>>,
     feed_join_timeout: Duration,
     coordinator_join_timeout: Duration,
+    custom_pipeline_policy: nv_core::security::CustomPipelinePolicy,
 }
 
 impl RuntimeBuilder {
@@ -128,6 +129,20 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Set the custom pipeline security policy.
+    ///
+    /// Controls whether `SourceSpec::Custom` pipeline fragments are
+    /// accepted. Default: [`Reject`](nv_core::security::CustomPipelinePolicy::Reject).
+    ///
+    /// Set to [`AllowTrusted`](nv_core::security::CustomPipelinePolicy::AllowTrusted)
+    /// when pipeline strings originate from trusted sources (e.g.,
+    /// hard-coded application code).
+    #[must_use]
+    pub fn custom_pipeline_policy(mut self, policy: nv_core::security::CustomPipelinePolicy) -> Self {
+        self.custom_pipeline_policy = policy;
+        self
+    }
+
     /// Build the runtime.
     ///
     /// # Errors
@@ -175,6 +190,7 @@ impl RuntimeBuilder {
             feed_join_timeout: self.feed_join_timeout,
             coordinator_join_timeout: self.coordinator_join_timeout,
             detached_threads: Mutex::new(Vec::new()),
+            custom_pipeline_policy: self.custom_pipeline_policy,
         });
 
         Ok(Runtime { inner })
@@ -209,6 +225,8 @@ struct RuntimeInner {
     /// Threads that were detached due to join timeouts, tracked for
     /// periodic reaping to prevent unbounded thread accumulation.
     detached_threads: Mutex<Vec<DetachedJoin>>,
+    /// Security policy for custom pipeline fragments.
+    custom_pipeline_policy: nv_core::security::CustomPipelinePolicy,
 }
 
 /// Internal state tracked per running feed.
@@ -378,6 +396,22 @@ impl RuntimeInner {
     fn add_feed(&self, config: FeedConfig) -> Result<FeedHandle, NvError> {
         if self.shutdown.load(Ordering::Relaxed) {
             return Err(NvError::Runtime(RuntimeError::ShutdownInProgress));
+        }
+
+        // --- Security validation ---
+        // Reject Custom pipelines unless policy allows them.
+        if matches!(config.source, nv_core::config::SourceSpec::Custom { .. })
+            && self.custom_pipeline_policy == nv_core::security::CustomPipelinePolicy::Reject
+        {
+            return Err(NvError::Media(nv_core::error::MediaError::CustomPipelineRejected));
+        }
+        // Reject insecure RTSP URLs when RequireTls is set.
+        if let nv_core::config::SourceSpec::Rtsp { ref url, security, .. } = config.source {
+            if security == nv_core::security::RtspSecurityPolicy::RequireTls
+                && nv_core::security::is_insecure_rtsp(url)
+            {
+                return Err(NvError::Media(nv_core::error::MediaError::InsecureRtspRejected));
+            }
         }
 
         let mut feeds = self
@@ -606,6 +640,7 @@ impl Runtime {
             ingress_factory: None,
             feed_join_timeout: DEFAULT_FEED_JOIN_TIMEOUT,
             coordinator_join_timeout: DEFAULT_COORDINATOR_JOIN_TIMEOUT,
+            custom_pipeline_policy: nv_core::security::CustomPipelinePolicy::default(),
         }
     }
 

@@ -118,6 +118,21 @@ pub enum HealthEvent {
     /// The video source is attempting to reconnect.
     SourceReconnecting { feed_id: FeedId, attempt: u32 },
 
+    /// An RTSP source is using insecure (non-TLS) transport.
+    ///
+    /// Emitted once per session start when the effective RTSP URL uses
+    /// `rtsp://` instead of `rtsps://`. This is informational — the feed
+    /// still operates, but the operator should consider migrating the
+    /// camera to TLS or a firewalled network segment.
+    ///
+    /// Not emitted when `RtspSecurityPolicy::RequireTls` is set (that
+    /// policy rejects insecure sources at config time).
+    InsecureRtspSource {
+        feed_id: FeedId,
+        /// Redacted URL (credentials stripped) for operator diagnostics.
+        redacted_url: String,
+    },
+
     /// A stage returned an error for a single frame.
     /// The frame was dropped; the feed continues.
     StageError {

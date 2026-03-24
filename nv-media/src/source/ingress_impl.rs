@@ -126,6 +126,23 @@ impl MediaIngress for MediaSource {
                         "liveness watchdog expired — no stream started, forcing reconnect"
                     );
                     self.liveness_deadline = None;
+
+                    // If the source is using PreferTls and TLS fallback is
+                    // not yet active, activate it so the next reconnection
+                    // attempt uses plain rtsp:// instead of rtsps://.
+                    if !self.tls_fallback_active {
+                        if let SourceSpec::Rtsp { security, .. } = &self.spec {
+                            if *security == nv_core::security::RtspSecurityPolicy::PreferTls {
+                                tracing::info!(
+                                    feed_id = %self.feed_id,
+                                    "TLS connection did not produce a stream — \
+                                     falling back to plain RTSP"
+                                );
+                                self.tls_fallback_active = true;
+                            }
+                        }
+                    }
+
                     self.disconnect_and_reconnect(MediaError::Timeout);
                     // Re-poll to pick up the reconnection state.
                     let _delay = self.poll_bus();

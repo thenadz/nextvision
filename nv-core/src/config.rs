@@ -6,6 +6,8 @@
 
 use std::path::PathBuf;
 
+use crate::security::RtspSecurityPolicy;
+
 /// Specification of a video source.
 ///
 /// Defined in `nv-core` (not `nv-media`) to prevent downstream crates
@@ -13,9 +15,15 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub enum SourceSpec {
     /// An RTSP stream.
+    ///
+    /// The `security` field controls TLS enforcement. The default
+    /// ([`PreferTls`](RtspSecurityPolicy::PreferTls)) promotes bare
+    /// `rtsp://` URLs to `rtsps://` at pipeline construction time.
     Rtsp {
         url: String,
         transport: RtspTransport,
+        /// TLS security policy for this source. Default: `PreferTls`.
+        security: RtspSecurityPolicy,
     },
 
     /// A local video file.
@@ -32,16 +40,43 @@ pub enum SourceSpec {
     ///
     /// The library constructs the pipeline internally for all other variants.
     /// Use this only for exotic sources not covered above.
+    ///
+    /// **Security note:** Custom pipelines are gated by
+    /// [`CustomPipelinePolicy`](crate::security::CustomPipelinePolicy) at
+    /// the runtime layer. The default policy rejects custom pipelines;
+    /// set `CustomPipelinePolicy::AllowTrusted` on the runtime builder to
+    /// enable them.
     Custom { pipeline_fragment: String },
 }
 
 impl SourceSpec {
     /// Convenience constructor for an RTSP source with TCP transport.
+    ///
+    /// Under the default [`RtspSecurityPolicy::PreferTls`], bare `rtsp://`
+    /// URLs are promoted to `rtsps://` at pipeline construction time.
+    /// Pass an explicit `rtsps://` URL to guarantee TLS, or use
+    /// [`rtsp_insecure`](Self::rtsp_insecure) for cameras without TLS
+    /// support.
     #[must_use]
     pub fn rtsp(url: impl Into<String>) -> Self {
         Self::Rtsp {
             url: url.into(),
             transport: RtspTransport::Tcp,
+            security: RtspSecurityPolicy::default(),
+        }
+    }
+
+    /// Convenience constructor for an RTSP source with explicit insecure
+    /// transport (`AllowInsecure`).
+    ///
+    /// Use this for cameras that do not support TLS behind trusted networks.
+    /// A health warning will be emitted when the source starts.
+    #[must_use]
+    pub fn rtsp_insecure(url: impl Into<String>) -> Self {
+        Self::Rtsp {
+            url: url.into(),
+            transport: RtspTransport::Tcp,
+            security: RtspSecurityPolicy::AllowInsecure,
         }
     }
 
@@ -143,6 +178,7 @@ pub enum BackoffKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::RtspSecurityPolicy;
 
     #[test]
     fn file_looping_creates_looping_file_spec() {
@@ -164,12 +200,25 @@ mod tests {
     }
 
     #[test]
-    fn rtsp_creates_tcp_spec() {
+    fn rtsp_creates_tcp_spec_with_prefer_tls() {
         let spec = SourceSpec::rtsp("rtsp://example.com/stream");
         match &spec {
-            SourceSpec::Rtsp { url, transport } => {
+            SourceSpec::Rtsp { url, transport, security } => {
                 assert_eq!(url, "rtsp://example.com/stream");
                 assert_eq!(*transport, RtspTransport::Tcp);
+                assert_eq!(*security, RtspSecurityPolicy::PreferTls);
+            }
+            _ => panic!("expected Rtsp variant"),
+        }
+    }
+
+    #[test]
+    fn rtsp_insecure_creates_allow_insecure_spec() {
+        let spec = SourceSpec::rtsp_insecure("rtsp://example.com/stream");
+        match &spec {
+            SourceSpec::Rtsp { url, security, .. } => {
+                assert_eq!(url, "rtsp://example.com/stream");
+                assert_eq!(*security, RtspSecurityPolicy::AllowInsecure);
             }
             _ => panic!("expected Rtsp variant"),
         }

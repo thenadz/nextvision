@@ -23,6 +23,7 @@ pub mod health;
 pub mod id;
 pub mod metadata;
 pub mod metrics;
+pub mod security;
 pub mod timestamp;
 
 // Re-export key types at crate root for ergonomic imports.
@@ -33,4 +34,5 @@ pub use health::*;
 pub use id::*;
 pub use metadata::TypedMetadata;
 pub use metrics::*;
+pub use security::*;
 pub use timestamp::*;

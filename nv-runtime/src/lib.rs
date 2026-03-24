@@ -196,3 +196,6 @@ pub use nv_media::{GpuPipelineProvider, SharedGpuProvider};
 
 // Re-export health types from nv-core for convenience.
 pub use nv_core::health::{DecodeOutcome, HealthEvent};
+
+// Re-export security policy types from nv-core for convenience.
+pub use nv_core::security::{CustomPipelinePolicy, RtspSecurityPolicy};

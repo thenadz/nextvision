@@ -38,10 +38,14 @@ pub enum NvError {
 /// `Clone` is derived so that the same typed error can be delivered to
 /// both the health-event path and the frame-sink callback without
 /// downgrading one copy to a lossy display string.
+///
+/// **Security:** The `Display` implementation redacts credentials from
+/// URLs and sanitizes untrusted backend strings. This means log output
+/// and health events never contain raw secrets.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum MediaError {
     /// Failed to connect to the video source.
-    #[error("connection failed to `{url}`: {detail}")]
+    #[error("connection failed to `{redacted_url}`: {detail}", redacted_url = crate::security::redact_url(url))]
     ConnectionFailed { url: String, detail: String },
 
     /// Decoding a video frame failed.
@@ -59,6 +63,14 @@ pub enum MediaError {
     /// The source format or codec is not supported.
     #[error("unsupported: {detail}")]
     Unsupported { detail: String },
+
+    /// An RTSP source with `RequireTls` policy was given a non-TLS URL.
+    #[error("insecure RTSP rejected by RequireTls policy (use rtsps:// or set AllowInsecure)")]
+    InsecureRtspRejected,
+
+    /// A `SourceSpec::Custom` pipeline was rejected by the security policy.
+    #[error("custom pipeline rejected: set CustomPipelinePolicy::AllowTrusted on the runtime builder to enable custom pipelines")]
+    CustomPipelineRejected,
 }
 
 /// Errors from perception stages.
