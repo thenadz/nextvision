@@ -1,0 +1,23 @@
+[package]
+name = "nv-jetson"
+description = "JetPack 5.x (GStreamer 1.16) GPU residency provider for the NextVision runtime — NVMM-based pipeline tail and frame bridge."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
+readme = "../README.md"
+
+[dependencies]
+nv-core.workspace = true
+nv-frame.workspace = true
+nv-media = { workspace = true, features = ["gst-backend"] }
+tracing.workspace = true
+
+gstreamer = { version = "0.25", package = "gstreamer" }
+gstreamer-allocators = { version = "0.25", package = "gstreamer-allocators" }
+gstreamer-app = { version = "0.25", package = "gstreamer-app" }
+gstreamer-video = { version = "0.25", package = "gstreamer-video" }

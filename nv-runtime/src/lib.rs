@@ -175,5 +175,24 @@ pub use nv_media::{DecodePreference, DecodeCapabilities, discover_decode_capabil
 // Re-export post-decode hook types from nv-media for convenience.
 pub use nv_media::{DecodedStreamInfo, PostDecodeHook};
 
+// Re-export device residency type from nv-media for convenience.
+//
+// To enable the built-in CUDA-resident frame pipeline, activate the `cuda`
+// cargo feature on nv-runtime (which forwards to `nv-media/cuda`):
+//
+//   nv-runtime = { version = "0.1", features = ["cuda"] }
+//
+// Then set `FeedConfig::device_residency(DeviceResidency::Cuda)`. Without
+// the feature, requesting `DeviceResidency::Cuda` returns
+// `MediaError::Unsupported` at pipeline build time.
+//
+// For platform-specific providers (e.g., Jetson NVMM), use
+// `DeviceResidency::Provider(provider)` — this path does **not** require
+// the `cuda` feature.
+pub use nv_media::DeviceResidency;
+
+// Re-export GPU pipeline provider types for application-level wiring.
+pub use nv_media::{GpuPipelineProvider, SharedGpuProvider};
+
 // Re-export health types from nv-core for convenience.
 pub use nv_core::health::{DecodeOutcome, HealthEvent};

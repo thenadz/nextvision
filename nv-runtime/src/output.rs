@@ -30,14 +30,153 @@ pub type SinkFactory = Box<dyn Fn() -> Box<dyn OutputSink> + Send + Sync>;
 /// downstream consumers need access to the pixel data (e.g., annotation
 /// overlays, frame archival, or visual debugging).
 ///
+/// [`Sampled`](FrameInclusion::Sampled) provides a middle ground: frames
+/// are included every `interval` outputs, keeping metadata (detections,
+/// tracks, signals) at full rate while reducing the cost of host
+/// materialization and downstream pixel processing in the sink thread.
+/// For example, `Sampled { interval: 6 }` on a 30 fps source yields
+/// ~5 fps of frame delivery while perception runs at full rate.
+///
 /// Because `FrameEnvelope` is `Arc`-backed, inclusion is zero-copy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum FrameInclusion {
     /// Never include frames in output (default).
     #[default]
     Never,
     /// Always include the source frame in output.
     Always,
+    /// Include the source frame every `interval` outputs.
+    ///
+    /// Perception artifacts (detections, tracks, signals, provenance)
+    /// flow at full rate regardless. Only the pixel payload is gated.
+    ///
+    /// An `interval` of `1` behaves like [`Always`](Self::Always).
+    /// An `interval` of `0` behaves like [`Never`](Self::Never).
+    Sampled {
+        /// Include a frame every N-th output envelope.
+        interval: u32,
+    },
+    /// Include frames at a target preview FPS, resolved dynamically from
+    /// the observed source rate.
+    ///
+    /// During a warmup window (first ~30 frames), `fallback_interval` is
+    /// used. Once the source FPS is estimated, the interval is computed
+    /// as `round(source_fps / target_fps)` and the variant is resolved
+    /// in-place to [`Sampled`](Self::Sampled).
+    ///
+    /// This avoids hardcoding an assumed source FPS at config time.
+    TargetFps {
+        /// Desired preview frames per second.
+        target: f32,
+        /// Interval to use before the source rate is known.
+        fallback_interval: u32,
+    },
+}
+
+impl FrameInclusion {
+    /// Create a sampled frame inclusion policy with edge-case normalization.
+    ///
+    /// - `interval == 0` → [`Never`](Self::Never)
+    /// - `interval == 1` → [`Always`](Self::Always)
+    /// - `interval > 1` → [`Sampled`](Self::Sampled)
+    ///
+    /// Prefer this over constructing [`Sampled`](Self::Sampled) directly
+    /// to avoid footgun values that silently alias other variants.
+    #[must_use]
+    pub fn sampled(interval: u32) -> Self {
+        match interval {
+            0 => Self::Never,
+            1 => Self::Always,
+            n => Self::Sampled { interval: n },
+        }
+    }
+
+    /// Create a target-FPS frame inclusion that resolves dynamically
+    /// from the observed source rate.
+    ///
+    /// Until the source rate is known (warmup window), falls back to
+    /// `fallback_interval`. Once observed, resolves to [`Sampled`].
+    ///
+    /// `fallback_interval` is normalized: 0 → Never, 1 → Always.
+    #[must_use]
+    pub fn target_fps(target: f32, fallback_interval: u32) -> Self {
+        if target <= 0.0 {
+            return Self::Never;
+        }
+        Self::TargetFps {
+            target,
+            fallback_interval,
+        }
+    }
+
+    /// Compute a sampled frame inclusion from a target preview FPS and
+    /// an assumed source FPS.
+    ///
+    /// The interval is `round(source / target)`, clamped to valid range.
+    ///
+    /// For runtime-adaptive behavior, prefer [`target_fps`](Self::target_fps)
+    /// which resolves from observed source rate instead of a static assumption.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use nv_runtime::FrameInclusion;
+    /// assert_eq!(
+    ///     FrameInclusion::from_target_fps(5.0, 30.0),
+    ///     FrameInclusion::Sampled { interval: 6 },
+    /// );
+    /// assert_eq!(
+    ///     FrameInclusion::from_target_fps(60.0, 30.0),
+    ///     FrameInclusion::Always,
+    /// );
+    /// ```
+    #[must_use]
+    pub fn from_target_fps(target_fps: f32, assumed_source_fps: f32) -> Self {
+        if target_fps <= 0.0 {
+            return Self::Never;
+        }
+        if assumed_source_fps <= 0.0 || target_fps >= assumed_source_fps {
+            return Self::Always;
+        }
+        let interval = (assumed_source_fps / target_fps).round() as u32;
+        Self::sampled(interval)
+    }
+
+    /// The effective sample interval.
+    ///
+    /// - [`Never`](Self::Never) → `0`
+    /// - [`Always`](Self::Always) → `1`
+    /// - [`Sampled`](Self::Sampled) → the configured interval
+    /// - [`TargetFps`](Self::TargetFps) → the fallback interval
+    ///   (actual interval is determined at runtime)
+    #[must_use]
+    pub fn effective_interval(&self) -> u32 {
+        match self {
+            Self::Never => 0,
+            Self::Always => 1,
+            Self::Sampled { interval } => *interval,
+            Self::TargetFps { fallback_interval, .. } => *fallback_interval,
+        }
+    }
+
+    /// Resolve a [`TargetFps`](Self::TargetFps) variant to a concrete
+    /// [`Sampled`](Self::Sampled) interval given the observed source FPS.
+    ///
+    /// Returns the resolved variant. Non-`TargetFps` variants are
+    /// returned unchanged.
+    #[must_use]
+    pub fn resolve_with_source_fps(self, source_fps: f32) -> Self {
+        match self {
+            Self::TargetFps { target, fallback_interval } => {
+                if source_fps <= 0.0 {
+                    Self::sampled(fallback_interval)
+                } else {
+                    Self::from_target_fps(target, source_fps)
+                }
+            }
+            other => other,
+        }
+    }
 }
 
 /// Summary of temporal-store admission for this frame.
@@ -86,8 +225,9 @@ pub struct OutputEnvelope {
     pub provenance: Provenance,
     /// Extensible output metadata.
     pub metadata: TypedMetadata,
-    /// The source frame, present only when [`FrameInclusion::Always`] is
-    /// configured on the feed.
+    /// The source frame, present when [`FrameInclusion::Always`] is
+    /// configured, or on sampled frames when [`FrameInclusion::Sampled`]
+    /// is configured.
     ///
     /// This is a zero-copy `Arc` clone of the frame the pipeline processed.
     pub frame: Option<FrameEnvelope>,
@@ -435,6 +575,7 @@ mod tests {
                 frame_receive_ts: MonotonicTs::from_nanos(0),
                 pipeline_complete_ts: MonotonicTs::from_nanos(0),
                 total_latency: nv_core::Duration::from_nanos(0),
+                frame_included: false,
             },
             metadata: TypedMetadata::new(),
             frame: None,
@@ -682,5 +823,169 @@ mod tests {
         detector.flush(&health_tx);
         let after = collect_lag_deltas(&mut health_rx);
         assert!(after.is_empty(), "no pending loss after realign + flush");
+    }
+
+    // ---------------------------------------------------------------
+    // FrameInclusion normalization + constructor tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn sampled_zero_normalizes_to_never() {
+        assert_eq!(FrameInclusion::sampled(0), FrameInclusion::Never);
+    }
+
+    #[test]
+    fn sampled_one_normalizes_to_always() {
+        assert_eq!(FrameInclusion::sampled(1), FrameInclusion::Always);
+    }
+
+    #[test]
+    fn sampled_above_one_creates_sampled() {
+        assert_eq!(
+            FrameInclusion::sampled(6),
+            FrameInclusion::Sampled { interval: 6 },
+        );
+    }
+
+    #[test]
+    fn from_target_fps_5_at_30_yields_interval_6() {
+        assert_eq!(
+            FrameInclusion::from_target_fps(5.0, 30.0),
+            FrameInclusion::Sampled { interval: 6 },
+        );
+    }
+
+    #[test]
+    fn from_target_fps_10_at_30_yields_interval_3() {
+        assert_eq!(
+            FrameInclusion::from_target_fps(10.0, 30.0),
+            FrameInclusion::Sampled { interval: 3 },
+        );
+    }
+
+    #[test]
+    fn from_target_fps_zero_is_never() {
+        assert_eq!(
+            FrameInclusion::from_target_fps(0.0, 30.0),
+            FrameInclusion::Never,
+        );
+    }
+
+    #[test]
+    fn from_target_fps_negative_is_never() {
+        assert_eq!(
+            FrameInclusion::from_target_fps(-5.0, 30.0),
+            FrameInclusion::Never,
+        );
+    }
+
+    #[test]
+    fn from_target_fps_above_source_is_always() {
+        assert_eq!(
+            FrameInclusion::from_target_fps(60.0, 30.0),
+            FrameInclusion::Always,
+        );
+    }
+
+    #[test]
+    fn from_target_fps_equal_to_source_is_always() {
+        assert_eq!(
+            FrameInclusion::from_target_fps(30.0, 30.0),
+            FrameInclusion::Always,
+        );
+    }
+
+    #[test]
+    fn from_target_fps_with_zero_source_is_always() {
+        assert_eq!(
+            FrameInclusion::from_target_fps(5.0, 0.0),
+            FrameInclusion::Always,
+        );
+    }
+
+    #[test]
+    fn effective_interval_values() {
+        assert_eq!(FrameInclusion::Never.effective_interval(), 0);
+        assert_eq!(FrameInclusion::Always.effective_interval(), 1);
+        assert_eq!(
+            FrameInclusion::Sampled { interval: 6 }.effective_interval(),
+            6,
+        );
+        assert_eq!(
+            FrameInclusion::TargetFps { target: 5.0, fallback_interval: 6 }
+                .effective_interval(),
+            6,
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // TargetFps constructor + resolution tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn target_fps_zero_is_never() {
+        assert_eq!(FrameInclusion::target_fps(0.0, 6), FrameInclusion::Never);
+    }
+
+    #[test]
+    fn target_fps_negative_is_never() {
+        assert_eq!(FrameInclusion::target_fps(-5.0, 6), FrameInclusion::Never);
+    }
+
+    #[test]
+    fn target_fps_positive_creates_variant() {
+        assert_eq!(
+            FrameInclusion::target_fps(5.0, 6),
+            FrameInclusion::TargetFps { target: 5.0, fallback_interval: 6 },
+        );
+    }
+
+    #[test]
+    fn resolve_target_fps_with_30_source() {
+        let fi = FrameInclusion::target_fps(5.0, 6);
+        let resolved = fi.resolve_with_source_fps(30.0);
+        assert_eq!(resolved, FrameInclusion::Sampled { interval: 6 });
+    }
+
+    #[test]
+    fn resolve_target_fps_with_25_source() {
+        let fi = FrameInclusion::target_fps(5.0, 6);
+        let resolved = fi.resolve_with_source_fps(25.0);
+        assert_eq!(resolved, FrameInclusion::Sampled { interval: 5 });
+    }
+
+    #[test]
+    fn resolve_target_fps_with_15_source() {
+        let fi = FrameInclusion::target_fps(5.0, 6);
+        let resolved = fi.resolve_with_source_fps(15.0);
+        assert_eq!(resolved, FrameInclusion::Sampled { interval: 3 });
+    }
+
+    #[test]
+    fn resolve_target_fps_above_source_is_always() {
+        let fi = FrameInclusion::target_fps(60.0, 6);
+        let resolved = fi.resolve_with_source_fps(30.0);
+        assert_eq!(resolved, FrameInclusion::Always);
+    }
+
+    #[test]
+    fn resolve_target_fps_zero_source_uses_fallback() {
+        let fi = FrameInclusion::target_fps(5.0, 6);
+        let resolved = fi.resolve_with_source_fps(0.0);
+        assert_eq!(resolved, FrameInclusion::Sampled { interval: 6 });
+    }
+
+    #[test]
+    fn resolve_noop_for_sampled() {
+        let fi = FrameInclusion::Sampled { interval: 3 };
+        let resolved = fi.resolve_with_source_fps(30.0);
+        assert_eq!(resolved, FrameInclusion::Sampled { interval: 3 });
+    }
+
+    #[test]
+    fn resolve_noop_for_never() {
+        let fi = FrameInclusion::Never;
+        let resolved = fi.resolve_with_source_fps(30.0);
+        assert_eq!(resolved, FrameInclusion::Never);
     }
 }

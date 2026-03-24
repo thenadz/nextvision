@@ -61,10 +61,38 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub headless: bool,
 
-    /// Run detection on GPU via the CUDA execution provider.
-    /// Requires the `gpu` feature on nv-sample-detection.
+    /// Enable GPU-resident frame pipeline and GPU inference (CUDA EP).
+    ///
+    /// Build with `--features gpu` — this single feature activates both
+    /// the CUDA media pipeline (`nv-media/cuda`) and the GPU inference
+    /// execution provider (`nv-sample-detection/gpu`).
+    ///
+    /// Runtime requirements: NVIDIA drivers and GStreamer CUDA plugins
+    /// (e.g., `gstreamer1.0-plugins-bad` built with CUDA support).
     #[arg(long, default_value_t = false)]
     pub gpu: bool,
+
+    /// Target preview FPS for sampled frame delivery (UI mode only).
+    ///
+    /// At runtime, the actual sampling interval is resolved from the
+    /// observed source rate after a brief warmup (~30 frames). For
+    /// example, `--preview-fps 5` on a 30 FPS source resolves to an
+    /// interval of 6 (one frame every 6 outputs). During the warmup
+    /// window a conservative fallback interval is used.
+    ///
+    /// Overridden by `--sample-interval` if both are provided. Ignored
+    /// in headless mode.
+    #[arg(long)]
+    pub preview_fps: Option<f32>,
+
+    /// Explicit frame sample interval (include every N-th frame in output).
+    ///
+    /// Takes precedence over `--preview-fps`. For example, `--sample-interval 3`
+    /// delivers one frame every 3 outputs regardless of source rate.
+    /// A value of 1 delivers every frame; 0 disables frame delivery.
+    /// Ignored in headless mode.
+    #[arg(long)]
+    pub sample_interval: Option<u32>,
 
     /// OTLP gRPC endpoint for OpenTelemetry metrics export.
     /// When set, runtime diagnostics are exported as standard OTel metrics.

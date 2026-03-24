@@ -29,3 +29,19 @@ nv-test-util.workspace = true
 [[bench]]
 name = "runtime_bench"
 harness = false
+
+[features]
+## Wire the GStreamer backend in nv-media. Enabled by default so that
+## `cargo build` gives you a fully functional runtime. Disable with
+## `--no-default-features` for a gst-free check (CI, type-only crates).
+default = ["gst-backend"]
+gst-backend = ["nv-media/gst-backend"]
+## Enable the built-in CUDA-resident frame pipeline in nv-media.
+## Decoded frames stay on the GPU as device memory.
+## Requires GStreamer >= 1.20 CUDA plugins at runtime.
+## Usage: depend on nv-runtime with `features = ["cuda"]` and set
+## `DeviceResidency::Cuda` via `FeedConfig::builder().device_residency(...)`.
+## For platform-specific providers (e.g., Jetson NVMM), use
+## `DeviceResidency::Provider(...)` instead — the `cuda` feature is
+## not needed for provider-based GPU residency.
+cuda = ["gst-backend", "nv-media/cuda"]

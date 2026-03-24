@@ -15,15 +15,21 @@ use nv_core::error::StageError;
 use nv_core::id::StageId;
 use nv_frame::PixelFormat;
 
-/// Assert that a frame is RGB8, returning a typed [`StageError`] on mismatch.
-pub(crate) fn require_rgb8(format: PixelFormat, stage_id: StageId) -> Result<(), StageError> {
-    if format != PixelFormat::Rgb8 {
-        return Err(StageError::ProcessingFailed {
+/// Assert that a frame is RGB8 or RGBA8, returning the bytes-per-pixel.
+///
+/// NVMM-resident frames on Jetson use RGBA8 because nvvidconv does not
+/// support 3-byte formats in NVMM memory.  The letterbox preprocessing
+/// extracts R, G, B channels regardless (alpha is discarded), so both
+/// formats produce identical inference results.
+pub(crate) fn require_rgb_compatible(format: PixelFormat, stage_id: StageId) -> Result<u32, StageError> {
+    match format {
+        PixelFormat::Rgb8 => Ok(3),
+        PixelFormat::Rgba8 => Ok(4),
+        _ => Err(StageError::ProcessingFailed {
             stage_id,
-            detail: format!("unsupported pixel format {format:?}, expected Rgb8"),
-        });
+            detail: format!("unsupported pixel format {format:?}, expected Rgb8 or Rgba8"),
+        }),
     }
-    Ok(())
 }
 
 /// Run ONNX inference and process the output via a callback.
@@ -57,6 +63,7 @@ pub(crate) fn with_inference<R>(
             })?;
 
     let output_value = &outputs[0];
+
     let (out_shape, output_data) =
         output_value
             .try_extract_tensor::<f32>()
@@ -64,6 +71,28 @@ pub(crate) fn with_inference<R>(
                 stage_id,
                 detail: format!("output tensor extraction failed: {e}"),
             })?;
+
+    // Diagnostic: log output data statistics so we can distinguish
+    // "all zeros" (GPU memory read issue) from "low confidence"
+    // (model/EP numerical divergence).
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let len = output_data.len();
+        let (min, max, non_zero) = output_data.iter().fold(
+            (f32::INFINITY, f32::NEG_INFINITY, 0usize),
+            |(mn, mx, nz), &v| (mn.min(v), mx.max(v), nz + usize::from(v != 0.0)),
+        );
+        let sample: Vec<f32> = output_data.iter().take(12).copied().collect();
+        tracing::debug!(
+            stage = %stage_id,
+            shape = ?&**out_shape,
+            len,
+            min,
+            max,
+            non_zero,
+            ?sample,
+            "inference output tensor stats",
+        );
+    }
 
     f(out_shape, output_data)
 }

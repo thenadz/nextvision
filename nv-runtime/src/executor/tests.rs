@@ -2045,3 +2045,132 @@ fn timeout_coalescing_through_process_frame() {
 
     coord.shutdown(std::time::Duration::from_secs(10));
 }
+
+// ------------------------------------------------------------------
+// TargetFps resolution from source cadence (P1)
+// ------------------------------------------------------------------
+
+/// TargetFps resolution derives FPS from frame timestamps, not wall-clock.
+///
+/// Simulates a 30 FPS source by creating frames spaced at 33.333ms
+/// intervals, then verifies that processing them — even with arbitrary
+/// wall-clock delays between calls — produces the correct resolved
+/// interval. This proves that startup CUDA/TRT JIT stalls cannot
+/// distort the estimate.
+#[test]
+fn target_fps_resolves_from_source_cadence_not_wall_clock() {
+    // TargetFps(5.0, fallback=6) should resolve to Sampled { interval: 6 }
+    // when the source is 30 FPS: round(30/5) = 6.
+    let mut exec = PipelineExecutor::new(
+        FeedId::new(1),
+        Vec::new(),
+        None,
+        Vec::new(),
+        RetentionPolicy::default(),
+        CameraMode::Fixed,
+        None,
+        Box::new(DefaultEpochPolicy::default()),
+        FrameInclusion::target_fps(5.0, 6),
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    // Create 35 frames at 30 FPS (33_333_333 ns interval).
+    let interval_ns = 33_333_333u64; // ~30 FPS
+    let frames = nv_test_util::synthetic::frame_sequence(
+        FeedId::new(1), 35, 2, 2, interval_ns,
+    );
+
+    // Process all frames. Even though we're not inserting any wall-clock
+    // delay, the source timestamps carry the cadence information.
+    for f in &frames {
+        let _ = exec.process_frame(f);
+    }
+
+    // After 35 frames (>30 warmup), TargetFps should be resolved.
+    assert!(
+        matches!(exec.frame_inclusion, FrameInclusion::Sampled { interval: 6 }),
+        "expected Sampled {{ interval: 6 }}, got {:?}",
+        exec.frame_inclusion,
+    );
+}
+
+/// TargetFps resolution is not affected by simulated processing delay.
+///
+/// Creates frames with 25 FPS source cadence (40ms intervals) and
+/// target of 5 FPS. Expected interval = round(25/5) = 5. The test
+/// processes frames with a deliberate wall-clock sleep to simulate a
+/// startup CUDA/TRT JIT stall, and verifies the resolved interval is
+/// still correct.
+#[test]
+fn target_fps_unaffected_by_processing_stall() {
+    let mut exec = PipelineExecutor::new(
+        FeedId::new(1),
+        Vec::new(),
+        None,
+        Vec::new(),
+        RetentionPolicy::default(),
+        CameraMode::Fixed,
+        None,
+        Box::new(DefaultEpochPolicy::default()),
+        FrameInclusion::target_fps(5.0, 6),
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    // 25 FPS source: 40ms between frames
+    let interval_ns = 40_000_000u64; // 25 FPS
+    let frames = nv_test_util::synthetic::frame_sequence(
+        FeedId::new(1), 35, 2, 2, interval_ns,
+    );
+
+    // Simulate a 100ms processing stall on the first frame (as CUDA/TRT
+    // JIT would cause). With wall-clock estimation this would inflate
+    // elapsed time and depress the FPS estimate. With source-cadence
+    // estimation, we get 25 FPS regardless.
+    for (i, f) in frames.iter().enumerate() {
+        if i == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = exec.process_frame(f);
+    }
+
+    // round(25/5) = 5
+    assert!(
+        matches!(exec.frame_inclusion, FrameInclusion::Sampled { interval: 5 }),
+        "expected Sampled {{ interval: 5 }} from 25 FPS source, got {:?}",
+        exec.frame_inclusion,
+    );
+}
+
+/// TargetFps uses fallback_interval during warmup window.
+#[test]
+fn target_fps_uses_fallback_during_warmup() {
+    let mut exec = PipelineExecutor::new(
+        FeedId::new(1),
+        Vec::new(),
+        None,
+        Vec::new(),
+        RetentionPolicy::default(),
+        CameraMode::Fixed,
+        None,
+        Box::new(DefaultEpochPolicy::default()),
+        FrameInclusion::target_fps(5.0, 8),
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    // Process only 10 frames — within warmup window (30 frames).
+    let interval_ns = 33_333_333u64; // 30 FPS
+    let frames = nv_test_util::synthetic::frame_sequence(
+        FeedId::new(1), 10, 2, 2, interval_ns,
+    );
+
+    for f in &frames {
+        let _ = exec.process_frame(f);
+    }
+
+    // Should still be TargetFps (unresolved).
+    assert!(
+        matches!(exec.frame_inclusion, FrameInclusion::TargetFps { fallback_interval: 8, .. }),
+        "should remain TargetFps during warmup, got {:?}",
+        exec.frame_inclusion,
+    );
+}

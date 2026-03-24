@@ -3,6 +3,12 @@
 //! Preprocesses each frame individually (letterbox), concatenates them
 //! into a single `[N, 3, H, W]` tensor, runs one ONNX session call,
 //! then splits the output back into per-item detection sets.
+//!
+//! Frame preprocessing is delegated to a [`BatchFramePreprocessor`].
+//! The default [`HostBatchPreprocessor`] uses CPU letterbox; hardware
+//! backends provide their own implementations to bypass host
+//! materialization. Inference, batching, and postprocessing logic are
+//! shared regardless of the preprocessing backend.
 
 use ort::session::Session;
 use tracing::debug;
@@ -14,8 +20,9 @@ use nv_perception::stage::{StageCapabilities, StageCategory, StageOutput};
 
 use crate::config::DetectorConfig;
 use crate::inference;
-use crate::letterbox::{LetterboxInfo, letterbox_preprocess_into};
+use crate::letterbox::LetterboxInfo;
 use crate::postprocess::decode_end2end_output;
+use crate::preprocess::{BatchFramePreprocessor, HostBatchPreprocessor};
 use crate::session;
 
 /// Sample batch detector.
@@ -23,22 +30,53 @@ use crate::session;
 /// Implements [`BatchProcessor`] so multiple feeds can share a single
 /// model session. Frames from different feeds are batched into one
 /// inference call.
+///
+/// Frame preprocessing is delegated to a [`BatchFramePreprocessor`]:
+/// - Default [`HostBatchPreprocessor`] handles host/mappable frames
+///   via CPU letterbox.
+/// - Hardware backends (CUDA, TensorRT) provide GPU-native
+///   implementations to avoid host materialization.
+///
+/// Inference, output validation, and postprocessing are shared.
 pub struct DetectorBatchProcessor {
     config: DetectorConfig,
     session: Option<Session>,
     det_counter: u64,
+    preprocessor: Box<dyn BatchFramePreprocessor>,
 }
 
 impl DetectorBatchProcessor {
     const PROCESSOR_ID: StageId = StageId("sample-detector-batch");
 
-    /// Create a new batch processor. The model is loaded when the runtime
-    /// calls `on_start`.
+    /// Create a new batch processor with the default host preprocessor.
+    ///
+    /// The host fallback policy is resolved from
+    /// [`DetectorConfig::effective_host_fallback`](crate::DetectorConfig::effective_host_fallback):
+    /// [`Auto`](crate::HostFallbackPolicy::Auto) yields `Warn` for GPU,
+    /// `Allow` for CPU; explicit variants are passed through unchanged.
     pub fn new(config: DetectorConfig) -> Self {
+        let policy = config.effective_host_fallback();
+        Self {
+            preprocessor: Box::new(HostBatchPreprocessor::with_policy(Self::PROCESSOR_ID, policy)),
+            config,
+            session: None,
+            det_counter: 0,
+        }
+    }
+
+    /// Create a batch processor with a custom frame preprocessor.
+    ///
+    /// Use this when the default host-path letterbox is insufficient,
+    /// e.g., for device-native batch preprocessing on Jetson.
+    pub fn with_preprocessor(
+        config: DetectorConfig,
+        preprocessor: Box<dyn BatchFramePreprocessor>,
+    ) -> Self {
         Self {
             config,
             session: None,
             det_counter: 0,
+            preprocessor,
         }
     }
 }
@@ -80,24 +118,17 @@ impl BatchProcessor for DetectorBatchProcessor {
         let mut lb_infos: Vec<LetterboxInfo> = Vec::with_capacity(batch_size);
 
         for (i, item) in items.iter().enumerate() {
-            inference::require_rgb8(item.frame.format(), Self::PROCESSOR_ID)?;
-
             let offset = i * pixels_per_frame;
-            let host_pixels =
-                item.frame
-                    .require_host_data()
-                    .map_err(|e| StageError::ProcessingFailed {
-                        stage_id: Self::PROCESSOR_ID,
-                        detail: e.to_string(),
-                    })?;
-            let lb_info = letterbox_preprocess_into(
-                &host_pixels,
-                item.frame.width(),
-                item.frame.height(),
-                item.frame.stride(),
+
+            // Delegate to the configured BatchFramePreprocessor.
+            // The default HostBatchPreprocessor uses resolve_host_pixels
+            // + letterbox_preprocess_into. Device-native backends bypass
+            // host materialization entirely.
+            let lb_info = self.preprocessor.preprocess_into(
+                &item.frame,
                 input_size,
                 &mut batch_tensor[offset..offset + pixels_per_frame],
-            );
+            )?;
             lb_infos.push(lb_info);
         }
 

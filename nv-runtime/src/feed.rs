@@ -8,6 +8,7 @@ use nv_core::error::{ConfigError, NvError};
 use nv_media::PostDecodeHook;
 use nv_media::PtzProvider;
 use nv_media::DecodePreference;
+use nv_media::DeviceResidency;
 use nv_perception::{Stage, StagePipeline, ValidationMode, validate_pipeline_phased};
 use nv_temporal::RetentionPolicy;
 use nv_view::{EpochPolicy, ViewStateProvider};
@@ -42,6 +43,7 @@ pub struct FeedConfig {
     pub(crate) sink_shutdown_timeout: Duration,
     pub(crate) decode_preference: DecodePreference,
     pub(crate) post_decode_hook: Option<PostDecodeHook>,
+    pub(crate) device_residency: DeviceResidency,
 }
 
 /// Builder for [`FeedConfig`].
@@ -78,6 +80,7 @@ pub struct FeedConfigBuilder {
     sink_shutdown_timeout: Duration,
     decode_preference: DecodePreference,
     post_decode_hook: Option<PostDecodeHook>,
+    device_residency: DeviceResidency,
 }
 
 impl FeedConfig {
@@ -104,6 +107,7 @@ impl FeedConfig {
             sink_shutdown_timeout: DEFAULT_SINK_SHUTDOWN_TIMEOUT,
             decode_preference: DecodePreference::default(),
             post_decode_hook: None,
+            device_residency: DeviceResidency::default(),
         }
     }
 }
@@ -231,9 +235,22 @@ impl FeedConfigBuilder {
 
     /// Set the frame inclusion policy.
     ///
-    /// When set to [`FrameInclusion::Always`], each [`OutputEnvelope`]
-    /// includes a zero-copy reference to the source [`FrameEnvelope`].
-    /// Default is [`FrameInclusion::Never`].
+    /// - [`FrameInclusion::Never`] (default) — no pixel data in outputs.
+    /// - [`FrameInclusion::Always`] — every output carries a frame.
+    /// - [`FrameInclusion::Sampled { interval }`] — a frame is included
+    ///   every `interval` outputs, reducing host materialization and sink
+    ///   thread cost while keeping perception artifacts at full rate.
+    /// - [`FrameInclusion::TargetFps { target, fallback_interval }`] —
+    ///   resolve the sample interval dynamically from the observed source
+    ///   rate. During a warmup window (first ~30 frames),
+    ///   `fallback_interval` is used. Once the source cadence is
+    ///   estimated from frame timestamps, the interval is computed as
+    ///   `round(source_fps / target)` and locked for the feed's lifetime.
+    ///
+    /// Use [`TargetFps`](FrameInclusion::TargetFps) when the source FPS
+    /// is unknown at config time or varies across feeds. Use
+    /// [`Sampled`](FrameInclusion::Sampled) when the interval is known
+    /// statically.
     #[must_use]
     pub fn frame_inclusion(mut self, policy: FrameInclusion) -> Self {
         self.frame_inclusion = policy;
@@ -284,10 +301,29 @@ impl FeedConfigBuilder {
     /// Set a post-decode hook that can inject a pipeline element between
     /// the decoder and the color-space converter.
     ///
+    /// **Ignored when `device_residency` is `Provider`** — the provider
+    /// controls the full decoder-to-tail path.  Hooks are only evaluated
+    /// for `Host` and `Cuda` residency modes, so this can be set
+    /// unconditionally without conflicting with provider-managed feeds.
+    ///
     /// See [`PostDecodeHook`] for details and usage examples.
     #[must_use]
     pub fn post_decode_hook(mut self, hook: PostDecodeHook) -> Self {
         self.post_decode_hook = Some(hook);
+        self
+    }
+
+    /// Set the device residency mode for decoded frames.
+    ///
+    /// Controls the pipeline tail strategy:
+    /// - [`DeviceResidency::Host`] (default) — `videoconvert → appsink`
+    /// - [`DeviceResidency::Cuda`] — `cudaupload → cudaconvert → appsink(memory:CUDAMemory)`
+    /// - [`DeviceResidency::Provider(p)`] — delegates to the provider
+    ///
+    /// See [`DeviceResidency`] for details.
+    #[must_use]
+    pub fn device_residency(mut self, residency: DeviceResidency) -> Self {
+        self.device_residency = residency;
         self
     }
 
@@ -424,6 +460,7 @@ impl FeedConfigBuilder {
             sink_shutdown_timeout: self.sink_shutdown_timeout,
             decode_preference: self.decode_preference,
             post_decode_hook: self.post_decode_hook,
+            device_residency: self.device_residency,
         })
     }
 }

@@ -115,12 +115,13 @@ fn colour_for_track(track_id: u64) -> [u8; 3] {
     TRACK_COLOURS[track_id as usize % TRACK_COLOURS.len()]
 }
 
-/// Mutable reference to an RGB8 pixel buffer with its dimensions.
+/// Mutable reference to a pixel buffer with its dimensions.
 struct Canvas<'a> {
     buf: &'a mut [u8],
     w: u32,
     h: u32,
     stride: u32,
+    bpp: u32,
 }
 
 impl Canvas<'_> {
@@ -129,11 +130,12 @@ impl Canvas<'_> {
         if x < 0 || y < 0 || x >= self.w as i32 || y >= self.h as i32 {
             return;
         }
-        let idx = (y as u32 * self.stride + x as u32 * 3) as usize;
-        if idx + 2 < self.buf.len() {
+        let idx = (y as u32 * self.stride + x as u32 * self.bpp) as usize;
+        if idx + (self.bpp as usize - 1) < self.buf.len() {
             self.buf[idx] = c[0];
             self.buf[idx + 1] = c[1];
             self.buf[idx + 2] = c[2];
+            // Leave alpha unchanged when bpp == 4.
         }
     }
 
@@ -166,9 +168,9 @@ impl Canvas<'_> {
     }
 }
 
-/// Draw all track bounding boxes and IDs onto an RGB8 buffer.
-pub fn draw_tracks(buf: &mut [u8], w: u32, h: u32, stride: u32, tracks: &[Track]) {
-    let mut canvas = Canvas { buf, w, h, stride };
+/// Draw all track bounding boxes and IDs onto a pixel buffer.
+pub fn draw_tracks(buf: &mut [u8], w: u32, h: u32, stride: u32, bpp: u32, tracks: &[Track]) {
+    let mut canvas = Canvas { buf, w, h, stride, bpp };
     for t in tracks {
         let c = colour_for_track(t.id.as_u64());
         let bb = &t.current.bbox;
@@ -186,9 +188,9 @@ pub fn draw_tracks(buf: &mut [u8], w: u32, h: u32, stride: u32, tracks: &[Track]
 }
 
 /// Draw an FPS counter in the top-left corner.
-pub fn draw_fps(buf: &mut [u8], w: u32, h: u32, stride: u32, fps: f64) {
+pub fn draw_fps(buf: &mut [u8], w: u32, h: u32, stride: u32, bpp: u32, fps: f64) {
     let label = format!("{fps:.1} FPS");
-    let mut canvas = Canvas { buf, w, h, stride };
+    let mut canvas = Canvas { buf, w, h, stride, bpp };
     canvas.draw_text(4, 4, &label, [255, 255, 255]);
 }
 

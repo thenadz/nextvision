@@ -5,7 +5,9 @@
 #
 # Build (natively on the Jetson — recommended, from the repo root):
 #
-#   docker build -t nextvision -f samples/docker/Dockerfile .
+#   docker build \
+#       --build-context tegra=/usr/lib/aarch64-linux-gnu/tegra \
+#       -t nextvision -f samples/docker/Dockerfile .
 #
 # Run:
 #
@@ -27,6 +29,12 @@ ARG ORT_URL=https://github.com/thenadz/onnxruntime4jetpack/releases/download/v1.
 ARG ORT_SHA256=c3db9511005720c3f09f36099a29c275ebdd331a2a74f7c16bb807ae9dfc6c22
 ARG RUST_VERSION=1.92.0
 
+# Tegra link-time stubs — libnvbufsurface.so and its transitive dependencies
+# (libnvrm_mem, libnvrm_surface, libnvos, …) are pulled from the host's
+# tegra directory via the "tegra" named build context (see build command above).
+# At runtime, --runtime nvidia mounts the real tegra libraries.
+COPY --from=tegra . /usr/lib/aarch64-linux-gnu/tegra/
+
 # Build toolchain.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -36,6 +44,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         cmake \
         libssl-dev \
         libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+        # plugins-bad provides the CUDA GStreamer elements (cudaupload,
+        # cudaconvert) and their development headers, which are required
+        # to build the GPU-resident frame pipeline (nv-media cuda feature).
+        # These elements live in "bad" due to GStreamer's plugin maturity
+        # classification, not because of quality — they are stable on
+        # Jetson/L4T and widely deployed in production NVIDIA pipelines.
+        libgstreamer-plugins-bad1.0-dev \
         libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
         libxkbcommon-dev libxkbcommon-x11-dev libgl-dev
 
@@ -81,6 +96,11 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 FROM nvcr.io/nvidia/l4t-tensorrt:r8.5.2-runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        gstreamer1.0-plugins-good \
+        # plugins-bad runtime: provides nvh264dec/nvv4l2decoder for
+        # hardware-accelerated decode. Note: cudaupload/cudaconvert are
+        # NOT available on GStreamer 1.16 (JetPack 5.x / Ubuntu 20.04) —
+        # the library automatically falls back to host-memory frames.
         gstreamer1.0-plugins-bad \
         gstreamer1.0-plugins-ugly \
         gstreamer1.0-libav \

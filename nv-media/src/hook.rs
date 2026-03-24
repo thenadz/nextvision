@@ -7,6 +7,17 @@
 //!
 //! The hook is a callback that inspects the decoded stream characteristics
 //! and optionally returns a GStreamer element name to insert.
+//!
+//! # Interaction with `DeviceResidency::Provider`
+//!
+//! When a [`GpuPipelineProvider`](crate::GpuPipelineProvider) is active
+//! (i.e., `DeviceResidency::Provider`), the pipeline builder **skips**
+//! the post-decode hook entirely — the provider controls the full
+//! decoder → pipeline-tail path.  Hooks are only evaluated for
+//! `DeviceResidency::Host` and `DeviceResidency::Cuda` paths.
+//!
+//! This means hooks can be set unconditionally (e.g., always install an
+//! NVMM bridge hook) without interfering with provider-managed feeds.
 
 use std::sync::Arc;
 

@@ -97,15 +97,17 @@ impl OutputSink for OverlaySink {
         let count = self.frame_count.fetch_add(1, Ordering::Relaxed) + 1;
         let fps = self.update_fps();
 
-        // Extract the frame from FrameInclusion::Always output.
+        // Extract the frame — may be absent when FrameInclusion::Sampled
+        // or Never is in effect. Skip overlay rendering for frameless
+        // outputs (metadata still logged below).
         let Some(frame) = output.frame.as_ref() else {
-            warn!("no frame in output — is frame_inclusion set to Always?");
             return;
         };
 
         let w = frame.width();
         let h = frame.height();
         let stride = frame.stride();
+        let bpp = frame.format().bytes_per_pixel().unwrap_or(3);
 
         // Work on a mutable copy so we can draw on it.
         let mut rgb = match frame.require_host_data() {
@@ -116,10 +118,10 @@ impl OutputSink for OverlaySink {
             }
         };
 
-        overlay::draw_tracks(&mut rgb, w, h, stride, &output.tracks);
-        overlay::draw_fps(&mut rgb, w, h, stride, fps);
+        overlay::draw_tracks(&mut rgb, w, h, stride, bpp, &output.tracks);
+        overlay::draw_fps(&mut rgb, w, h, stride, bpp, fps);
 
-        let buf = rgb_to_packed(&rgb, w, h, stride);
+        let buf = rgb_to_packed(&rgb, w, h, stride, bpp);
 
         // Non-blocking: drop the frame if the UI thread is behind.
         let _ = self.tx.try_send(UiFrame {
@@ -142,13 +144,13 @@ impl OutputSink for OverlaySink {
     }
 }
 
-/// Convert strided RGB8 pixels to packed `0x00RRGGBB` u32 for minifb.
-fn rgb_to_packed(rgb: &[u8], w: u32, h: u32, stride: u32) -> Vec<u32> {
+/// Convert strided pixels (RGB8 or RGBA8) to packed `0x00RRGGBB` u32 for minifb.
+fn rgb_to_packed(rgb: &[u8], w: u32, h: u32, stride: u32, bpp: u32) -> Vec<u32> {
     let mut buf = Vec::with_capacity((w * h) as usize);
     for y in 0..h {
         let row = (y * stride) as usize;
         for x in 0..w {
-            let i = row + (x as usize) * 3;
+            let i = row + (x as usize) * bpp as usize;
             let r = rgb[i] as u32;
             let g = rgb[i + 1] as u32;
             let b = rgb[i + 2] as u32;

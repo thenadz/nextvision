@@ -126,6 +126,16 @@ pub(crate) struct PipelineExecutor {
     pub(super) motion_state_start: Instant,
     /// Whether to include the source frame in output envelopes.
     pub(super) frame_inclusion: FrameInclusion,
+    /// Counter for [`FrameInclusion::Sampled`]: counts outputs since
+    /// last frame inclusion. Reset to 0 on each included frame.
+    pub(super) frame_sample_counter: u64,
+    /// Source-domain timestamp of the first processed frame; used to
+    /// estimate source FPS for [`FrameInclusion::TargetFps`] resolution.
+    ///
+    /// Uses [`FrameEnvelope::ts()`] (monotonic source time) rather than
+    /// wall-clock [`Instant`] so that processing delays (CUDA/TRT JIT,
+    /// compute stalls) do not distort the estimate.
+    pub(super) fps_warmup_start_ts: Option<MonotonicTs>,
     /// Reusable buffer for track-ending: current frame's track IDs.
     pub(super) track_id_buf: HashSet<TrackId>,
     /// Reusable buffer for track-ending: IDs of tracks to end.
@@ -207,6 +217,8 @@ impl PipelineExecutor {
             clock_anchor_ts: MonotonicTs::from_nanos(0),
             motion_state_start: now,
             frame_inclusion,
+            frame_sample_counter: 0,
+            fps_warmup_start_ts: None,
             track_id_buf: HashSet::new(),
             ended_buf: Vec::new(),
             batch_rejection_count: 0,

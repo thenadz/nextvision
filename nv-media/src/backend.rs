@@ -30,7 +30,7 @@
 //! `Drop` calls `stop()` for best-effort cleanup.
 
 use std::collections::VecDeque;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use nv_core::config::SourceSpec;
@@ -42,7 +42,7 @@ use crate::clock::PtsTracker;
 use crate::decode::{DecoderSelection, SelectedDecoderInfo, SelectedDecoderSlot};
 use crate::event::MediaEvent;
 use crate::hook::PostDecodeHook;
-use crate::ingress::{FrameSink, PtzProvider};
+use crate::ingress::{DeviceResidency, FrameSink, PtzProvider};
 use crate::pipeline::{OutputFormat, PipelineBuilder};
 
 /// Thread-safe queue for media events produced asynchronously (e.g., from
@@ -52,6 +52,15 @@ pub(crate) type EventQueue = Arc<Mutex<VecDeque<MediaEvent>>>;
 /// Maximum number of events buffered in the [`EventQueue`] before new events
 /// are dropped. Prevents unbounded memory growth when the bus poller is slow.
 pub(crate) const EVENT_QUEUE_CAPACITY: usize = 64;
+
+/// Number of **consecutive** bridge failures that triggers an escalation via
+/// [`FrameSink::on_error()`]. This surfaces a hard error to the source FSM so
+/// it can attempt recovery (e.g., reconnect) instead of silently dropping
+/// every frame indefinitely.
+///
+/// The threshold fires exactly once (on the crossing frame) to avoid
+/// spamming `on_error` on every subsequent failure.
+const BRIDGE_FAIL_ESCALATION_THRESHOLD: u64 = 30;
 
 /// Configuration for a GStreamer session.
 pub(crate) struct SessionConfig {
@@ -65,6 +74,8 @@ pub(crate) struct SessionConfig {
     pub post_decode_hook: Option<PostDecodeHook>,
     /// Maximum events buffered in the event queue before drops.
     pub event_queue_capacity: usize,
+    /// Where decoded frames reside after the bridge.
+    pub device_residency: DeviceResidency,
 }
 
 impl std::fmt::Debug for SessionConfig {
@@ -113,6 +124,10 @@ pub(crate) struct GstSession {
     /// Monotonic frame sequence counter (shared with appsink callback).
     #[allow(dead_code)] // held to keep Arc alive for appsink callback
     frame_seq: Arc<AtomicU64>,
+    /// Whether the pipeline tail is using device memory (`true`).
+    /// Compared against `config.device_residency` to detect residency
+    /// downgrades (e.g., Cuda requested → Host effective).
+    gpu_resident: bool,
     /// Shared slot that captures the effective video decoder element.
     /// Populated by the pipeline's `element-added` signal callback
     /// (for decodebin) or directly (for named decoders).
@@ -167,10 +182,13 @@ impl GstSession {
             .decoder(config.decoder.clone())
             .output_format(config.output_format)
             .post_decode_hook(config.post_decode_hook.clone())
+            .device_residency(config.device_residency.clone())
             .build()?;
 
         let feed_id = config.feed_id;
         let output_format = built.output_format;
+        let gpu_resident = built.gpu_resident;
+        let gpu_provider = built.gpu_provider.clone();
         let frame_seq = Arc::new(AtomicU64::new(0));
 
         // Shared PTS tracker for discontinuity detection on the appsink thread.
@@ -186,19 +204,65 @@ impl GstSession {
         let pts_clone = Arc::clone(&pts_tracker);
         let eq_clone = Arc::clone(&event_queue);
         let eq_capacity = config.event_queue_capacity;
+        // Rate-limit bridge failure warnings to avoid per-frame log spam.
+        // Log the first 3 failures unconditionally, then every 100th.
+        let bridge_fail_count = Arc::new(AtomicU64::new(0));
+        // Consecutive failure counter — reset on every successful bridge.
+        // After BRIDGE_FAIL_ESCALATION_THRESHOLD consecutive failures,
+        // escalate via `on_error()` so the source FSM can trigger recovery.
+        let consecutive_fails = Arc::new(AtomicU64::new(0));
+        let fail_counter = Arc::clone(&bridge_fail_count);
+        let consec_counter = Arc::clone(&consecutive_fails);
         built.appsink.set_callbacks(
             gstreamer_app::AppSinkCallbacks::builder()
                 .new_sample(move |appsink| {
                     let sample = appsink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                     let ptz_telemetry = ptz.as_ref().and_then(|p| p.latest());
-                    match crate::bridge::bridge_gst_sample(
-                        feed_id,
-                        &seq_counter,
-                        output_format,
-                        &sample,
-                        ptz_telemetry,
-                    ) {
+
+                    let bridge_result = if gpu_resident {
+                        if let Some(ref provider) = gpu_provider {
+                            provider.bridge_sample(
+                                feed_id,
+                                &seq_counter,
+                                output_format.to_pixel_format(),
+                                &sample,
+                                ptz_telemetry,
+                            )
+                        } else {
+                            #[cfg(feature = "cuda")]
+                            {
+                                crate::gpu::bridge_gst_sample_device(
+                                    feed_id,
+                                    &seq_counter,
+                                    output_format,
+                                    &sample,
+                                    ptz_telemetry,
+                                )
+                            }
+                            #[cfg(not(feature = "cuda"))]
+                            {
+                                // Should not reach here — PipelineBuilder already
+                                // falls back to host when the feature is off.
+                                let _ = ptz_telemetry;
+                                Err(nv_core::error::MediaError::Unsupported {
+                                    detail: "CUDA feature not enabled".into(),
+                                })
+                            }
+                        }
+                    } else {
+                        crate::bridge::bridge_gst_sample(
+                            feed_id,
+                            &seq_counter,
+                            output_format,
+                            &sample,
+                            ptz_telemetry,
+                        )
+                    };
+
+                    match bridge_result {
                         Ok(frame) => {
+                            // Reset consecutive failure streak on success.
+                            consec_counter.store(0, Ordering::Relaxed);
                             // Observe PTS for discontinuity detection
                             let pts_ns = frame.ts().as_nanos();
                             if let Ok(mut tracker) = pts_clone.lock() {
@@ -239,11 +303,36 @@ impl GstSession {
                             Ok(gst::FlowSuccess::Ok)
                         }
                         Err(e) => {
-                            tracing::warn!(
-                                feed_id = %feed_id,
-                                error = %e,
-                                "bridge_gst_sample failed, dropping frame"
-                            );
+                            let n = fail_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                            let consecutive = consec_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                            if n <= 3 || n % 100 == 0 {
+                                tracing::warn!(
+                                    feed_id = %feed_id,
+                                    error = %e,
+                                    total_failures = n,
+                                    consecutive,
+                                    "bridge failed, dropping frame{}",
+                                    if n == 3 { " (further warnings throttled, logged every 100)" } else { "" },
+                                );
+                            }
+                            // Escalate after BRIDGE_FAIL_ESCALATION_THRESHOLD
+                            // consecutive failures — surface an error so the
+                            // source FSM can trigger recovery (e.g., reconnect).
+                            // Fire on the exact threshold crossing only to
+                            // avoid spamming on_error on every subsequent frame.
+                            if consecutive == BRIDGE_FAIL_ESCALATION_THRESHOLD {
+                                tracing::error!(
+                                    feed_id = %feed_id,
+                                    consecutive,
+                                    "bridge failure streak reached escalation threshold — \
+                                     reporting error to source FSM for recovery",
+                                );
+                                sink_clone.on_error(nv_core::error::MediaError::DecodeFailed {
+                                    detail: format!(
+                                        "bridge failed on {consecutive} consecutive frames: {e}"
+                                    ),
+                                });
+                            }
                             // Don't propagate as EOS — just drop this frame
                             Ok(gst::FlowSuccess::Ok)
                         }
@@ -305,6 +394,7 @@ impl GstSession {
             feed_id,
             config,
             state: SessionState::Running,
+            gpu_resident,
             frame_seq,
             selected_decoder: built.selected_decoder,
             pipeline: built.pipeline,
@@ -342,6 +432,7 @@ impl GstSession {
             feed_id,
             config,
             state: SessionState::Running,
+            gpu_resident: false,
             frame_seq: Arc::new(AtomicU64::new(0)),
             selected_decoder: Arc::new(Mutex::new(None)),
             #[cfg(feature = "gst-backend")]
@@ -522,6 +613,21 @@ impl GstSession {
     pub fn selected_decoder(&self) -> Option<SelectedDecoderInfo> {
         self.selected_decoder.lock().ok().and_then(|g| g.clone())
     }
+
+    /// Whether the pipeline tail is using device (GPU) memory.
+    ///
+    /// When this returns `false` but the session's `device_residency` was
+    /// `Cuda`, a residency downgrade occurred at pipeline build time
+    /// (e.g., CUDA GStreamer elements were unavailable).
+    pub fn gpu_resident(&self) -> bool {
+        self.gpu_resident
+    }
+
+    /// The device residency originally requested via [`SessionConfig`].
+    #[allow(dead_code)] // useful accessor for diagnostics; emitted fields
+    pub fn requested_residency(&self) -> &DeviceResidency {
+        &self.config.device_residency
+    }
 }
 
 #[cfg(test)]
@@ -574,6 +680,7 @@ mod tests {
             ptz_provider: None,
             post_decode_hook: None,
             event_queue_capacity: EVENT_QUEUE_CAPACITY,
+            device_residency: DeviceResidency::default(),
         }
     }
 

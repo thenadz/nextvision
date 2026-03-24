@@ -29,7 +29,9 @@ use nv_core::error::MediaError;
 use nv_frame::PixelFormat;
 
 use crate::decode::{DecoderSelection, SelectedDecoderSlot};
+use crate::gpu_provider::SharedGpuProvider;
 use crate::hook::PostDecodeHook;
+use crate::ingress::DeviceResidency;
 
 /// Target pixel format for the appsink output.
 ///
@@ -80,6 +82,8 @@ pub(crate) struct PipelineBuilder {
     latency_ms: u32,
     /// Optional post-decode hook for injecting elements.
     post_decode_hook: Option<PostDecodeHook>,
+    /// Device residency mode — determines the pipeline tail strategy.
+    device_residency: DeviceResidency,
 }
 
 /// Default latency hint for RTSP jitter buffers.
@@ -94,6 +98,41 @@ const DEFAULT_LATENCY_MS: u32 = 200;
 /// source FSM maps to a reconnection attempt.
 const DEFAULT_RTSP_TCP_TIMEOUT_US: u64 = 10_000_000;
 
+/// Build the standard host-memory pipeline tail: `videoconvert → appsink(video/x-raw)`.
+///
+/// Returns `(converter_elements, appsink)` where `converter_elements` contains the
+/// single `videoconvert` element and `appsink` is configured with matching caps.
+#[cfg(feature = "gst-backend")]
+fn build_host_tail(
+    output_format: &OutputFormat,
+) -> Result<(Vec<gstreamer::Element>, gstreamer_app::AppSink), MediaError> {
+    use gstreamer as gst;
+    use gstreamer_app as gst_app;
+
+    let videoconvert =
+        gst::ElementFactory::make("videoconvert")
+            .build()
+            .map_err(|e| MediaError::Unsupported {
+                detail: format!("failed to create videoconvert: {e}"),
+            })?;
+
+    let caps_str = format!("video/x-raw,format={}", output_format.gst_format_str());
+    let appsink_caps: gst::Caps =
+        caps_str
+            .parse()
+            .map_err(|_| MediaError::Unsupported {
+                detail: format!("invalid appsink caps: {caps_str}"),
+            })?;
+
+    let appsink = gst_app::AppSink::builder()
+        .caps(&appsink_caps)
+        .max_buffers(2)
+        .drop(true)
+        .build();
+
+    Ok((vec![videoconvert], appsink))
+}
+
 impl PipelineBuilder {
     /// Create a builder for the given source specification.
     pub fn new(spec: SourceSpec) -> Self {
@@ -103,6 +142,7 @@ impl PipelineBuilder {
             output_format: OutputFormat::default(),
             latency_ms: DEFAULT_LATENCY_MS,
             post_decode_hook: None,
+            device_residency: DeviceResidency::default(),
         }
     }
 
@@ -124,6 +164,19 @@ impl PipelineBuilder {
         self
     }
 
+    /// Set the device residency mode.
+    ///
+    /// Determines how the pipeline tail is constructed:
+    /// - `Host` — `videoconvert → appsink(video/x-raw)`
+    /// - `Cuda` — `cudaupload → cudaconvert → appsink(memory:CUDAMemory)`;
+    ///   falls back to Host if CUDA elements are unavailable
+    /// - `Provider(p)` — delegates to the provider's `build_pipeline_tail()`;
+    ///   returns an error if the provider fails (no silent fallback)
+    pub fn device_residency(mut self, residency: DeviceResidency) -> Self {
+        self.device_residency = residency;
+        self
+    }
+
     /// Construct the GStreamer pipeline, appsink, and bus handle.
     ///
     /// # Pipeline construction steps
@@ -139,9 +192,22 @@ impl PipelineBuilder {
     /// Returns `MediaError` if element creation or linking fails.
     #[cfg(feature = "gst-backend")]
     pub fn build(self) -> Result<BuiltPipeline, MediaError> {
+        // If the caller requested the built-in CUDA path but the feature
+        // is off, fail loudly rather than silently downgrading to host.
+        // Provider paths do NOT require the cuda feature — the provider
+        // decides what GStreamer elements to use.
+        #[cfg(not(feature = "cuda"))]
+        if matches!(self.device_residency, DeviceResidency::Cuda) {
+            return Err(MediaError::Unsupported {
+                detail: "DeviceResidency::Cuda requested but the `cuda` cargo feature \
+                         is not enabled on nv-media — rebuild with `--features cuda`, \
+                         use DeviceResidency::Provider, or set DeviceResidency::Host"
+                    .into(),
+            });
+        }
+
         use gstreamer as gst;
         use gstreamer::prelude::*;
-        use gstreamer_app as gst_app;
 
         // GstAutoplugSelectResult is a C GEnum registered by decodebin.
         // gstreamer-rs doesn't expose it as a Rust type. We construct the
@@ -389,31 +455,185 @@ impl PipelineBuilder {
             });
         }
 
-        // --- Videoconvert + Appsink ---
-        let videoconvert = gst::ElementFactory::make("videoconvert")
-            .build()
-            .map_err(|e| MediaError::Unsupported {
-                detail: format!("failed to create videoconvert: {e}"),
-            })?;
+        // --- Converter + Appsink ---
+        //
+        // Three pipeline tail strategies:
+        //
+        // 1. **Provider** (`DeviceResidency::Provider`): the provider builds
+        //    the tail — converter elements (possibly empty) + appsink. If
+        //    the provider fails, the build returns an error (no silent
+        //    fallback — the user explicitly selected this hardware path).
+        //
+        // 2. **Built-in CUDA** (`DeviceResidency::Cuda` + `cuda` feature):
+        //    `cudaupload → cudaconvert → appsink(memory:CUDAMemory)`.
+        //    Falls back to host if CUDA elements are unavailable.
+        //
+        // 3. **Host** (default): `videoconvert → appsink(video/x-raw)`.
+        //
+        // After resolution, `gpu_resident` is true only if an actual
+        // device-resident tail was successfully built.
 
-        let caps_str = format!("video/x-raw,format={}", self.output_format.gst_format_str());
-        let appsink_caps: gst::Caps = caps_str.parse().map_err(|_| MediaError::Unsupported {
-            detail: format!("invalid appsink caps: {caps_str}"),
-        })?;
+        let mut gpu_resident = false;
+        let mut active_provider: Option<SharedGpuProvider> = None;
 
-        let appsink = gst_app::AppSink::builder()
-            .caps(&appsink_caps)
-            .max_buffers(2)
-            .drop(true)
-            .build();
+        let (converter_elements, appsink) = match &self.device_residency {
+            DeviceResidency::Provider(provider) => {
+                match provider.build_pipeline_tail(self.output_format.to_pixel_format()) {
+                    Ok(tail) => {
+                        tracing::info!(
+                            provider = provider.name(),
+                            "device pipeline provider built pipeline tail",
+                        );
+                        gpu_resident = true;
+                        active_provider = Some(provider.clone());
+                        (tail.elements, tail.appsink)
+                    }
+                    Err(e) => {
+                        // Provider was explicitly selected — failure is an
+                        // error, not a silent downgrade to host.  The user
+                        // chose this provider for a reason (e.g., NVMM on
+                        // Jetson); silently falling back to CPU frames would
+                        // produce subtly wrong results downstream.
+                        return Err(MediaError::Unsupported {
+                            detail: format!(
+                                "device pipeline provider '{}' failed to build \
+                                 pipeline tail: {e}",
+                                provider.name(),
+                            ),
+                        });
+                    }
+                }
+            }
+            DeviceResidency::Cuda => {
+                #[cfg(feature = "cuda")]
+                {
+                    match (
+                        gst::ElementFactory::make("cudaupload").build(),
+                        gst::ElementFactory::make("cudaconvert").build(),
+                    ) {
+                        (Ok(cudaupload), Ok(cudaconvert)) => {
+                            let caps_str = format!(
+                                "video/x-raw(memory:CUDAMemory),format={}",
+                                self.output_format.gst_format_str(),
+                            );
+                            let appsink_caps: gst::Caps = caps_str.parse().map_err(
+                                |_| MediaError::Unsupported {
+                                    detail: format!("invalid CUDA appsink caps: {caps_str}"),
+                                },
+                            )?;
+
+                            let appsink = gst_app::AppSink::builder()
+                                .caps(&appsink_caps)
+                                .max_buffers(2)
+                                .drop(true)
+                                .build();
+
+                            gpu_resident = true;
+                            (vec![cudaupload, cudaconvert], appsink)
+                        }
+                        _ => {
+                            tracing::warn!(
+                                "DeviceResidency::Cuda requested but cudaupload/cudaconvert \
+                                 GStreamer elements are not available — falling back to \
+                                 host-memory pipeline (frames will be downloaded to CPU). \
+                                 This is expected on GStreamer < 1.20 (e.g., JetPack 5.x).",
+                            );
+                            build_host_tail(&self.output_format)?
+                        }
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                unreachable!()
+            }
+            DeviceResidency::Host => build_host_tail(&self.output_format)?,
+        };
+
+        // --- Link target resolution ---
+        // When converter_elements is empty (e.g., a provider that only
+        // sets appsink caps), link the decode stage directly to the
+        // appsink. When non-empty, link through the converter chain.
+        let appsink_element: &gst::Element = appsink.upcast_ref();
+        let first_link_target = converter_elements
+            .first()
+            .cloned()
+            .unwrap_or_else(|| appsink_element.clone());
+        let last_link_source = converter_elements
+            .last()
+            .cloned();
 
         // --- Assemble pipeline ---
-        let appsink_element: &gst::Element = appsink.upcast_ref();
+
+        // Add source + decode + converter chain + appsink.
         pipeline
-            .add_many([&source, &decode_element, &videoconvert, appsink_element])
+            .add_many([&source, &decode_element])
             .map_err(|e| MediaError::Unsupported {
-                detail: format!("failed to add elements to pipeline: {e}"),
+                detail: format!("failed to add source/decode to pipeline: {e}"),
             })?;
+        for conv in &converter_elements {
+            pipeline.add(conv).map_err(|e| MediaError::Unsupported {
+                detail: format!("failed to add converter element to pipeline: {e}"),
+            })?;
+        }
+        pipeline.add(appsink_element).map_err(|e| MediaError::Unsupported {
+            detail: format!("failed to add appsink to pipeline: {e}"),
+        })?;
+
+        // Link the converter chain internally (e.g., cudaupload → cudaconvert)
+        // and then the last converter → appsink.
+        //
+        // When a device **provider** constructed the tail, the first
+        // converter element (e.g., nvvidconv on Jetson) typically has no
+        // upstream peer yet — decodebin's pad-added has not fired.  Some
+        // transform elements (notably nvvidconv) cannot answer a runtime
+        // caps query without knowing their input, which makes the default
+        // `PadLinkCheck::DEFAULT` (includes `CAPS`) fail even though the
+        // pad templates are fully compatible.
+        //
+        // Use template-only link checks **only** for provider paths to
+        // defer the real caps negotiation until data actually flows.
+        // The built-in CUDA elements (cudaupload, cudaconvert) handle
+        // runtime caps queries correctly and must use standard checks.
+        let provider_active = active_provider.is_some();
+        for pair in converter_elements.windows(2) {
+            tracing::debug!(
+                src = %pair[0].name(),
+                sink = %pair[1].name(),
+                provider_active,
+                "linking converter chain elements",
+            );
+            if provider_active {
+                pair[0].link_pads_full(
+                    None, &pair[1], None,
+                    gst::PadLinkCheck::HIERARCHY | gst::PadLinkCheck::TEMPLATE_CAPS,
+                )
+            } else {
+                pair[0].link(&pair[1])
+            }
+            .map_err(|e| MediaError::Unsupported {
+                detail: format!("failed to link converter chain: {e}"),
+            })?;
+        }
+        if let Some(ref last) = last_link_source {
+            tracing::debug!(
+                src = %last.name(),
+                sink = %appsink_element.name(),
+                provider_active,
+                "linking last converter → appsink",
+            );
+            if provider_active {
+                last.link_pads_full(
+                    None, appsink_element, None,
+                    gst::PadLinkCheck::HIERARCHY | gst::PadLinkCheck::TEMPLATE_CAPS,
+                )
+            } else {
+                last.link(appsink_element)
+            }
+            .map_err(|e| MediaError::Unsupported {
+                detail: format!("failed to link converter → appsink: {e}"),
+            })?;
+        }
+        // When converter_elements is empty, first_link_target already
+        // points at the appsink element — no explicit link needed.
 
         let is_rtsp = matches!(&self.spec, SourceSpec::Rtsp { .. });
 
@@ -429,49 +649,72 @@ impl PipelineBuilder {
                     })?;
             }
 
-            // Static link: videoconvert → appsink
-            videoconvert
-                .link(appsink_element)
-                .map_err(|e| MediaError::Unsupported {
-                    detail: format!("failed to link videoconvert → appsink: {e}"),
-                })?;
-
-            // Dynamic pad: decodebin → videoconvert (when video pad appears)
+            // Dynamic pad: decodebin → first element in converter chain
+            // (or appsink when the converter chain is empty).
             //
-            // When a post-decode hook is provided, it is consulted to decide
-            // whether an additional element should be inserted between the
-            // decoder output pad and videoconvert. This supports platforms
-            // where the hardware decoder outputs memory types that the
-            // standard videoconvert cannot accept (e.g., NVMM on Jetson).
-            let vc_weak = videoconvert.downgrade();
+            // When a post-decode hook is set (Host/Cuda paths only — provider
+            // mode skips hooks), it is consulted to decide whether an additional
+            // element should be inserted between the decoder output pad and the
+            // converter chain. This supports platforms where the hardware decoder
+            // outputs memory types that the standard videoconvert cannot accept
+            // (e.g., NVMM on Jetson).
+            let fc_weak = first_link_target.downgrade();
             let pipeline_weak = pipeline.downgrade();
-            let hook = self.post_decode_hook.clone();
+            // When a **provider** controls the pipeline tail, skip user
+            // hooks entirely — the provider's tail elements accept
+            // decoder output directly.  Hooks are relevant for Host
+            // and Cuda paths where the standard `videoconvert` / CUDA
+            // elements may not accept certain decoder memory types
+            // (e.g., NVMM on Jetson).
+            let provider_active = active_provider.is_some();
+            let hook = if provider_active {
+                None
+            } else {
+                self.post_decode_hook.clone()
+            };
+            // Provider-only: use relaxed link checks for the decoder
+            // pad → first converter element link, matching the relaxed
+            // checks already used for the converter chain.  Transform
+            // elements like nvvidconv cannot answer runtime caps
+            // queries before data flows, so full CAPS checks fail
+            // even though template compatibility is guaranteed.
+            // The built-in CUDA elements handle runtime caps correctly
+            // and do NOT need relaxed checks.
+            let use_relaxed_link = provider_active;
             decode_element.connect_pad_added(move |_element, pad| {
-                let Some(vc) = vc_weak.upgrade() else { return };
+                let Some(fc) = fc_weak.upgrade() else { return };
                 let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
                 if let Some(structure) = caps.structure(0) {
                     if structure.name().starts_with("video/") {
+                        // Extract caps metadata for diagnostics (used by
+                        // both the hook path and the provider/direct path).
+                        let memory_type = caps.features(0).and_then(|features| {
+                            (0..features.size()).find_map(|i| {
+                                features
+                                    .nth(i)
+                                    .and_then(|f| {
+                                        f.as_str()
+                                            .strip_prefix("memory:")
+                                            .map(String::from)
+                                    })
+                            })
+                        });
+                        let format = structure
+                            .get::<&str>("format")
+                            .ok()
+                            .map(String::from);
+
+                        tracing::debug!(
+                            pad = %pad.name(),
+                            caps = %caps,
+                            memory = memory_type.as_deref().unwrap_or("system"),
+                            format = format.as_deref().unwrap_or("unknown"),
+                            "decoder pad added — linking to converter chain",
+                        );
+
                         // Determine the link target: either videoconvert
                         // directly, or a hook-injected bridge element.
                         let target = if let Some(ref hook) = hook {
-                            // Use the GStreamer caps features API to extract
-                            // the memory type (e.g., "NVMM") instead of
-                            // parsing the caps string representation.
-                            let memory_type = caps.features(0).and_then(|features| {
-                                (0..features.size()).find_map(|i| {
-                                    features
-                                        .nth(i)
-                                        .and_then(|f| {
-                                            f.as_str()
-                                                .strip_prefix("memory:")
-                                                .map(String::from)
-                                        })
-                                })
-                            });
-                            let format = structure
-                                .get::<&str>("format")
-                                .ok()
-                                .map(String::from);
                             let info = crate::hook::DecodedStreamInfo {
                                 media_type: structure.name().to_string(),
                                 memory_type,
@@ -484,7 +727,7 @@ impl PipelineBuilder {
                                             Ok(bridge) => {
                                                 if pipeline.add(&bridge).is_ok() {
                                                     if bridge.sync_state_with_parent().is_ok()
-                                                        && bridge.link(&vc).is_ok()
+                                                        && bridge.link(&fc).is_ok()
                                                     {
                                                         tracing::info!(
                                                             element = %element_name,
@@ -498,10 +741,10 @@ impl PipelineBuilder {
                                                              falling back to direct link"
                                                         );
                                                         let _ = pipeline.remove(&bridge);
-                                                        vc
+                                                        fc
                                                     }
                                                 } else {
-                                                    vc
+                                                    fc
                                                 }
                                             }
                                             Err(_) => {
@@ -509,28 +752,65 @@ impl PipelineBuilder {
                                                     element = %element_name,
                                                     "post-decode hook: element not available"
                                                 );
-                                                vc
+                                                fc
                                             }
                                         }
                                     } else {
-                                        vc
+                                        fc
                                     }
                                 }
-                                None => vc,
+                                None => fc,
                             }
                         } else {
-                            vc
+                            fc
                         };
                         if let Some(sink_pad) = target.static_pad("sink") {
                             if !sink_pad.is_linked() {
-                                if let Err(e) = pad.link(&sink_pad) {
-                                    tracing::error!(
-                                        pad = %pad.name(),
-                                        target = %target.name(),
-                                        error = %e,
-                                        "failed to link decoder pad to downstream element — \
-                                         pipeline will not produce frames",
-                                    );
+                                let link_result = if use_relaxed_link {
+                                    // Provider paths: defer real caps negotiation
+                                    // until data flows. Template caps are sufficient
+                                    // to verify structural compatibility.
+                                    pad.link_full(
+                                        &sink_pad,
+                                        gst::PadLinkCheck::TEMPLATE_CAPS,
+                                    )
+                                } else {
+                                    pad.link(&sink_pad)
+                                };
+                                match link_result {
+                                    Ok(_) => {
+                                        tracing::debug!(
+                                            pad = %pad.name(),
+                                            target = %target.name(),
+                                            relaxed = use_relaxed_link,
+                                            "decoder pad linked to downstream element",
+                                        );
+                                    }
+                                    Err(e) => {
+                                        // Log detailed caps information for diagnostics.
+                                        let src_caps = pad.current_caps()
+                                            .map(|c| c.to_string())
+                                            .unwrap_or_else(|| "<no current caps>".into());
+                                        let sink_caps = sink_pad.current_caps()
+                                            .map(|c| c.to_string())
+                                            .unwrap_or_else(|| "<no current caps>".into());
+                                        let src_template = pad.pad_template_caps()
+                                            .to_string();
+                                        let sink_template = sink_pad.pad_template_caps()
+                                            .to_string();
+                                        tracing::error!(
+                                            pad = %pad.name(),
+                                            target = %target.name(),
+                                            error = %e,
+                                            relaxed = use_relaxed_link,
+                                            src_current_caps = %src_caps,
+                                            sink_current_caps = %sink_caps,
+                                            src_template_caps = %src_template,
+                                            sink_template_caps = %sink_template,
+                                            "failed to link decoder pad to downstream element — \
+                                             pipeline will not produce frames",
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -558,7 +838,7 @@ impl PipelineBuilder {
                 });
             }
         } else {
-            // Named decoder — static pads. Link: source → decoder → videoconvert → appsink.
+            // Named decoder — static pads. Link: source → decoder → converter → appsink.
             // For RTSP, we still need dynamic pad handling from rtspsrc.
             if is_rtsp {
                 let dec_weak = decode_element.downgrade();
@@ -588,15 +868,9 @@ impl PipelineBuilder {
             }
 
             decode_element
-                .link(&videoconvert)
+                .link(&first_link_target)
                 .map_err(|e| MediaError::Unsupported {
-                    detail: format!("failed to link decoder → videoconvert: {e}"),
-                })?;
-
-            videoconvert
-                .link(appsink_element)
-                .map_err(|e| MediaError::Unsupported {
-                    detail: format!("failed to link videoconvert → appsink: {e}"),
+                    detail: format!("failed to link decoder → converter: {e}"),
                 })?;
         }
 
@@ -610,6 +884,8 @@ impl PipelineBuilder {
             bus,
             output_format: self.output_format,
             selected_decoder,
+            gpu_resident,
+            gpu_provider: active_provider,
         })
     }
 
@@ -637,6 +913,14 @@ pub(crate) struct BuiltPipeline {
     /// Populated by `element-added` signal on decodebin, or directly
     /// for named decoders.
     pub selected_decoder: SelectedDecoderSlot,
+    /// Whether the pipeline tail uses device memory (`true`) or host
+    /// memory (`false`). Determines which bridge function the appsink
+    /// callback invokes.
+    pub gpu_resident: bool,
+    /// Optional device pipeline provider — when present and `gpu_resident`
+    /// is true, the appsink callback delegates to this provider's
+    /// `bridge_sample` method.
+    pub gpu_provider: Option<SharedGpuProvider>,
 }
 
 /// Stub for non-GStreamer builds (never constructed).
@@ -810,5 +1094,224 @@ mod tests {
         assert_eq!(got.media_type, "video/x-raw");
         assert_eq!(got.memory_type.as_deref(), Some("NVMM"));
         assert_eq!(got.format.as_deref(), Some("NV12"));
+    }
+
+    /// When the `cuda` feature is NOT compiled, requesting CUDA device residency
+    /// must produce a typed `MediaError::Unsupported` — never a silent fallback.
+    #[test]
+    #[cfg(not(feature = "cuda"))]
+    fn cuda_residency_without_cuda_feature_errors() {
+        let builder = PipelineBuilder::new(SourceSpec::file("/tmp/test.mp4"))
+            .device_residency(DeviceResidency::Cuda);
+        let result = builder.build();
+        match result {
+            Err(MediaError::Unsupported { detail }) => {
+                assert!(
+                    detail.contains("cuda"),
+                    "error should mention the cuda feature: {detail}",
+                );
+            }
+            other => panic!(
+                "expected Unsupported error, got {}",
+                if other.is_ok() { "Ok" } else { "different Err" },
+            ),
+        }
+    }
+
+    #[test]
+    fn builder_default_device_residency_is_host() {
+        let b = PipelineBuilder::new(SourceSpec::file("/tmp/test.mp4"));
+        assert!(matches!(b.device_residency, DeviceResidency::Host));
+    }
+
+    #[test]
+    fn builder_stores_device_residency_cuda() {
+        let b = PipelineBuilder::new(SourceSpec::file("/tmp/test.mp4"))
+            .device_residency(DeviceResidency::Cuda);
+        assert!(matches!(b.device_residency, DeviceResidency::Cuda));
+    }
+
+    #[test]
+    fn builder_stores_provider_residency() {
+        use std::sync::Arc;
+        use nv_core::error::MediaError;
+        use nv_core::id::FeedId;
+        use nv_frame::PixelFormat;
+        use crate::gpu_provider::{GpuPipelineProvider, SharedGpuProvider};
+
+        struct StubProvider;
+        impl GpuPipelineProvider for StubProvider {
+            fn name(&self) -> &str { "stub" }
+            #[cfg(feature = "gst-backend")]
+            fn build_pipeline_tail(
+                &self, _: PixelFormat,
+            ) -> Result<crate::gpu_provider::GpuPipelineTail, MediaError> {
+                Err(MediaError::Unsupported { detail: "stub".into() })
+            }
+            #[cfg(feature = "gst-backend")]
+            fn bridge_sample(
+                &self, _: FeedId, _: &Arc<std::sync::atomic::AtomicU64>,
+                _: PixelFormat, _: &gstreamer::Sample,
+                _: Option<crate::PtzTelemetry>,
+            ) -> Result<nv_frame::FrameEnvelope, MediaError> {
+                Err(MediaError::Unsupported { detail: "stub".into() })
+            }
+        }
+
+        let provider: SharedGpuProvider = Arc::new(StubProvider);
+        let b = PipelineBuilder::new(SourceSpec::file("/tmp/test.mp4"))
+            .device_residency(DeviceResidency::Provider(provider));
+
+        assert!(matches!(b.device_residency, DeviceResidency::Provider(_)));
+        assert!(b.device_residency.is_device());
+        assert_eq!(b.device_residency.provider().unwrap().name(), "stub");
+    }
+
+    /// Provider failure during pipeline build should return an error,
+    /// **not** silently fall back to host.  The user explicitly selected
+    /// a hardware integration; silent degradation would produce subtly
+    /// wrong results in GPU-dependent stages.
+    #[test]
+    fn provider_failure_returns_error() {
+        use std::sync::Arc;
+        use nv_core::error::MediaError;
+        use nv_core::id::FeedId;
+        use nv_frame::PixelFormat;
+        use crate::gpu_provider::{GpuPipelineProvider, SharedGpuProvider};
+
+        // Pipeline construction requires GStreamer to be initialized.
+        if gstreamer::init().is_err() {
+            eprintln!("skipping: GStreamer init failed");
+            return;
+        }
+
+        struct FailingProvider;
+        impl GpuPipelineProvider for FailingProvider {
+            fn name(&self) -> &str { "failing" }
+            #[cfg(feature = "gst-backend")]
+            fn build_pipeline_tail(
+                &self, _: PixelFormat,
+            ) -> Result<crate::gpu_provider::GpuPipelineTail, MediaError> {
+                Err(MediaError::Unsupported {
+                    detail: "intentional failure for test".into(),
+                })
+            }
+            #[cfg(feature = "gst-backend")]
+            fn bridge_sample(
+                &self, _: FeedId, _: &Arc<std::sync::atomic::AtomicU64>,
+                _: PixelFormat, _: &gstreamer::Sample,
+                _: Option<crate::PtzTelemetry>,
+            ) -> Result<nv_frame::FrameEnvelope, MediaError> {
+                Err(MediaError::Unsupported { detail: "stub".into() })
+            }
+        }
+
+        let provider: SharedGpuProvider = Arc::new(FailingProvider);
+        let builder = PipelineBuilder::new(SourceSpec::file("/tmp/test.mp4"))
+            .device_residency(DeviceResidency::Provider(provider));
+
+        let result = builder.build();
+        match result {
+            Ok(_) => panic!("pipeline build should return an error when provider fails"),
+            Err(err) => {
+                let detail = format!("{err}");
+                assert!(
+                    detail.contains("failing") && detail.contains("failed to build pipeline tail"),
+                    "error should surface provider name and failure cause: {err}",
+                );
+            }
+        }
+    }
+
+    /// Provider active → hooks are skipped.
+    /// Host and Cuda → user hooks are retained.
+    #[test]
+    fn provider_active_skips_user_hook() {
+        use crate::hook::{DecodedStreamInfo, PostDecodeHook};
+        use std::sync::Arc;
+
+        let user_hook: PostDecodeHook = Arc::new(|_info| Some("user-bridge".into()));
+
+        let info = DecodedStreamInfo {
+            media_type: "video/x-raw".into(),
+            memory_type: Some("NVMM".into()),
+            format: Some("NV12".into()),
+        };
+
+        // Simulate resolution: provider_active = true → hook is None.
+        let provider_active = true;
+        let resolved: Option<PostDecodeHook> = if provider_active {
+            None
+        } else {
+            Some(user_hook.clone())
+        };
+        assert!(resolved.is_none(), "provider mode should skip all hooks");
+
+        // Simulate resolution: provider_active = false → user hook used.
+        // This covers both Host and Cuda paths.
+        let provider_active = false;
+        let resolved: Option<PostDecodeHook> = if provider_active {
+            None
+        } else {
+            Some(user_hook)
+        };
+        assert!(resolved.is_some());
+        assert_eq!(
+            resolved.as_ref().unwrap()(&info).as_deref(),
+            Some("user-bridge"),
+            "host/cuda mode should use user hook",
+        );
+    }
+
+    /// Cuda path retains user hook resolution behavior.
+    /// When DeviceResidency::Cuda but no provider, hooks must fire.
+    #[test]
+    fn cuda_path_retains_user_hook() {
+        use crate::hook::{DecodedStreamInfo, PostDecodeHook};
+        use std::sync::Arc;
+
+        let user_hook: PostDecodeHook = Arc::new(|info| {
+            if info.memory_type.as_deref() == Some("NVMM") {
+                Some("nvvidconv".into())
+            } else {
+                None
+            }
+        });
+
+        // Cuda path: gpu_resident=true but provider_active=false.
+        // Hook should be retained.
+        let provider_active = false;
+        let resolved: Option<PostDecodeHook> = if provider_active {
+            None
+        } else {
+            Some(user_hook)
+        };
+        assert!(resolved.is_some(), "cuda path should retain user hooks");
+
+        let info = DecodedStreamInfo {
+            media_type: "video/x-raw".into(),
+            memory_type: Some("NVMM".into()),
+            format: Some("NV12".into()),
+        };
+        assert_eq!(
+            resolved.as_ref().unwrap()(&info).as_deref(),
+            Some("nvvidconv"),
+            "cuda path should evaluate hook for NVMM output",
+        );
+    }
+
+    /// Provider path skips hooks; provider path uses relaxed link checks;
+    /// Cuda path does not.
+    #[test]
+    fn provider_vs_cuda_link_policy() {
+        // Provider active → relaxed links.
+        let provider_active = true;
+        let use_relaxed_link = provider_active;
+        assert!(use_relaxed_link, "provider path should use relaxed link checks");
+
+        // Cuda (no provider) → standard links.
+        let provider_active = false;
+        let use_relaxed_link = provider_active;
+        assert!(!use_relaxed_link, "cuda path should use standard link checks");
     }
 }

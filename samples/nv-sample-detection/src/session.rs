@@ -18,6 +18,14 @@ use crate::config::DetectorConfig;
 const EXPECTED_OUTPUT_COLS: i64 = 6;
 
 /// Register the CUDA execution provider on the session builder.
+///
+/// Uses [`Heuristic`](ort::ep::cuda::ConvAlgorithmSearch::Heuristic) cuDNN
+/// convolution algorithm search instead of the default `Exhaustive`.
+/// `Exhaustive` benchmarks every cuDNN implementation on first inference
+/// (causing multi-second latency spikes) and on some GPU architectures
+/// (notably Jetson Xavier SM 7.2) selects algorithms that produce
+/// numerically divergent results, systematically suppressing confidence
+/// values by 10–20×.
 #[cfg(feature = "gpu")]
 fn configure_gpu(
     mut builder: ort::session::builder::SessionBuilder,
@@ -33,8 +41,10 @@ fn configure_gpu(
     );
 
     if cuda_available {
-        match ep::CUDA::default().register(&mut builder) {
-            Ok(()) => info!(stage = %stage_id, "CUDA EP registered"),
+        let ep = ep::CUDA::default()
+            .with_conv_algorithm_search(ep::cuda::ConvAlgorithmSearch::Heuristic);
+        match ep.register(&mut builder) {
+            Ok(()) => info!(stage = %stage_id, "CUDA EP registered (conv search: heuristic)"),
             Err(e) => warn!(
                 stage = %stage_id,
                 error = %e,

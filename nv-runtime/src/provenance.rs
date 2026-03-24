@@ -31,6 +31,12 @@ pub struct Provenance {
     pub pipeline_complete_ts: MonotonicTs,
     /// Total pipeline latency (receive → complete).
     pub total_latency: Duration,
+    /// Whether this output includes the source frame.
+    ///
+    /// Always `true` for [`FrameInclusion::Always`], always `false` for
+    /// [`FrameInclusion::Never`], and periodic for
+    /// [`FrameInclusion::Sampled`].
+    pub frame_included: bool,
 }
 
 /// Per-stage provenance record.

@@ -1805,6 +1805,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "gstreamer-allocators"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92b9867fab2889baa59250d600bceee3dea56e5a28631d88bf1bd9f43e0b2549"
+dependencies = [
+ "glib",
+ "gstreamer",
+ "gstreamer-allocators-sys",
+ "libc",
+]
+
+[[package]]
+name = "gstreamer-allocators-sys"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ea44ee4a86b39bcdcfd260179b7dbfdd5f81955d6fee35f11264934caf65230c"
+dependencies = [
+ "glib-sys",
+ "gobject-sys",
+ "gstreamer-sys",
+ "libc",
+ "system-deps",
+]
+
+[[package]]
 name = "gstreamer-app"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2869,6 +2894,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nv-jetson"
+version = "0.1.0"
+dependencies = [
+ "gstreamer",
+ "gstreamer-allocators",
+ "gstreamer-app",
+ "gstreamer-video",
+ "nv-core",
+ "nv-frame",
+ "nv-media",
+ "tracing",
+]
+
+[[package]]
 name = "nv-media"
 version = "0.1.0"
 dependencies = [
@@ -2932,6 +2971,8 @@ dependencies = [
  "hostname",
  "minifb",
  "nv-core",
+ "nv-jetson",
+ "nv-media",
  "nv-metrics",
  "nv-perception",
  "nv-runtime",

@@ -528,3 +528,222 @@ fn lag_throttling_bounds_event_count() {
 
     runtime.shutdown().unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// FrameInclusion::Sampled
+// ---------------------------------------------------------------------------
+
+use crate::output::{FrameInclusion, OutputSink};
+use nv_core::config::{CameraMode, SourceSpec};
+use nv_perception::Stage;
+
+/// Helper: build a config with explicit frame inclusion policy and no restarts.
+fn build_config_with_inclusion(
+    stages: Vec<Box<dyn Stage>>,
+    sink: Box<dyn OutputSink>,
+    inclusion: FrameInclusion,
+) -> FeedConfig {
+    FeedConfig::builder()
+        .source(SourceSpec::rtsp("rtsp://mock/stream"))
+        .camera_mode(CameraMode::Fixed)
+        .stages(stages)
+        .output_sink(sink)
+        .frame_inclusion(inclusion)
+        .restart(RestartPolicy {
+            max_restarts: 0,
+            restart_on: RestartTrigger::Never,
+            ..RestartPolicy::default()
+        })
+        .build()
+        .expect("valid config")
+}
+
+/// Collect all outputs from a broadcast receiver until the channel closes.
+fn collect_outputs(
+    rx: &mut broadcast::Receiver<SharedOutput>,
+    handle: &FeedHandle,
+    timeout: std::time::Duration,
+) -> Vec<SharedOutput> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut outputs = Vec::new();
+    loop {
+        match rx.try_recv() {
+            Ok(o) => outputs.push(o),
+            Err(broadcast::error::TryRecvError::Empty) => {
+                if !handle.is_alive() {
+                    while let Ok(o) = rx.try_recv() {
+                        outputs.push(o);
+                    }
+                    break;
+                }
+                if std::time::Instant::now() > deadline {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+            Err(_) => break,
+        }
+    }
+    outputs
+}
+
+#[test]
+fn sampled_inclusion_delivers_frame_periodically() {
+    let frame_count = 30u64;
+    let interval = 6u32;
+    let runtime = Runtime::builder()
+        .ingress_factory(Box::new(MockFactory::new(frame_count)))
+        .output_capacity(64)
+        .build()
+        .unwrap();
+
+    let mut rx = runtime.output_subscribe();
+    let (sink, _) = CountingSink::new();
+    let handle = runtime
+        .add_feed(build_config_with_inclusion(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+            FrameInclusion::Sampled { interval },
+        ))
+        .unwrap();
+
+    let outputs = collect_outputs(&mut rx, &handle, std::time::Duration::from_secs(5));
+
+    // All outputs carry full metadata.
+    assert_eq!(
+        outputs.len(),
+        frame_count as usize,
+        "should receive all {frame_count} outputs"
+    );
+
+    // Only every `interval`-th output should have a frame.
+    let with_frame: Vec<_> = outputs.iter().filter(|o| o.frame.is_some()).collect();
+    let without_frame: Vec<_> = outputs.iter().filter(|o| o.frame.is_none()).collect();
+
+    let expected_with_frame = frame_count / interval as u64;
+    assert_eq!(
+        with_frame.len() as u64, expected_with_frame,
+        "expected {expected_with_frame} outputs with frame, got {}",
+        with_frame.len()
+    );
+    assert_eq!(
+        without_frame.len() as u64,
+        frame_count - expected_with_frame,
+        "remaining outputs should lack frame"
+    );
+
+    // Provenance should agree with actual frame presence.
+    for output in &outputs {
+        assert_eq!(
+            output.provenance.frame_included,
+            output.frame.is_some(),
+            "provenance.frame_included should match frame presence for seq {}",
+            output.frame_seq,
+        );
+    }
+
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn sampled_interval_zero_behaves_like_never() {
+    let frame_count = 10u64;
+    let runtime = Runtime::builder()
+        .ingress_factory(Box::new(MockFactory::new(frame_count)))
+        .output_capacity(32)
+        .build()
+        .unwrap();
+
+    let mut rx = runtime.output_subscribe();
+    let (sink, _) = CountingSink::new();
+    let handle = runtime
+        .add_feed(build_config_with_inclusion(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+            FrameInclusion::Sampled { interval: 0 },
+        ))
+        .unwrap();
+
+    let outputs = collect_outputs(&mut rx, &handle, std::time::Duration::from_secs(5));
+
+    assert!(!outputs.is_empty(), "should receive outputs");
+    for output in &outputs {
+        assert!(
+            output.frame.is_none(),
+            "interval=0 should never include frames"
+        );
+        assert!(
+            !output.provenance.frame_included,
+            "provenance should report no frame"
+        );
+    }
+
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn sampled_interval_one_behaves_like_always() {
+    let frame_count = 10u64;
+    let runtime = Runtime::builder()
+        .ingress_factory(Box::new(MockFactory::new(frame_count)))
+        .output_capacity(32)
+        .build()
+        .unwrap();
+
+    let mut rx = runtime.output_subscribe();
+    let (sink, _) = CountingSink::new();
+    let handle = runtime
+        .add_feed(build_config_with_inclusion(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+            FrameInclusion::Sampled { interval: 1 },
+        ))
+        .unwrap();
+
+    let outputs = collect_outputs(&mut rx, &handle, std::time::Duration::from_secs(5));
+
+    assert_eq!(outputs.len(), frame_count as usize);
+    for output in &outputs {
+        assert!(
+            output.frame.is_some(),
+            "interval=1 should always include frames"
+        );
+        assert!(
+            output.provenance.frame_included,
+            "provenance should report frame included"
+        );
+    }
+
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn frame_inclusion_always_includes_every_frame() {
+    let frame_count = 10u64;
+    let runtime = Runtime::builder()
+        .ingress_factory(Box::new(MockFactory::new(frame_count)))
+        .output_capacity(32)
+        .build()
+        .unwrap();
+
+    let mut rx = runtime.output_subscribe();
+    let (sink, _) = CountingSink::new();
+    let handle = runtime
+        .add_feed(build_config_with_inclusion(
+            vec![Box::new(NoOpStage::new("noop"))],
+            Box::new(sink),
+            FrameInclusion::Always,
+        ))
+        .unwrap();
+
+    let outputs = collect_outputs(&mut rx, &handle, std::time::Duration::from_secs(5));
+
+    assert_eq!(outputs.len(), frame_count as usize);
+    for output in &outputs {
+        assert!(output.frame.is_some(), "Always should include every frame");
+        assert!(output.provenance.frame_included);
+    }
+
+    runtime.shutdown().unwrap();
+}

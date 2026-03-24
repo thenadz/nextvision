@@ -15,9 +15,11 @@ path = "src/main.rs"
 nv-core.workspace = true
 nv-perception.workspace = true
 nv-runtime.workspace = true
+nv-media.workspace = true
 nv-metrics.workspace = true
 nv-sample-detection.workspace = true
 nv-sample-tracking.workspace = true
+nv-jetson = { workspace = true, optional = true }
 
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
@@ -33,8 +35,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 default = ["nv-sample-detection/download-ort"]
 system-ort = ["nv-sample-detection/system-ort"]
 link-ort = ["nv-sample-detection/link-ort"]
-gpu = ["nv-sample-detection/gpu"]
-jetson = ["link-ort", "gpu"]
+gpu = ["nv-sample-detection/gpu", "nv-media/cuda"]
+cuda = ["nv-media/cuda"]
+jetson = ["link-ort", "nv-sample-detection/gpu", "jetson-nvmm"]
+jetson-nvmm = ["dep:nv-jetson"]
 
 [dev-dependencies]
 nv-test-util.workspace = true

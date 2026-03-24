@@ -1,6 +1,6 @@
 //! Pre-processing: letterbox resize with aspect-ratio preservation.
 //!
-//! The input RGB8 pixel buffer is resized to `target_size × target_size`,
+//! The input RGB8 or RGBA8 pixel buffer is resized to `target_size × target_size`,
 //! centered with gray (114/255) padding, and converted to a float32
 //! NCHW tensor with values normalised to the 0–1 range.
 
@@ -50,21 +50,23 @@ impl LetterboxInfo {
 /// allocations.
 ///
 /// # Arguments
-/// - `rgb_data` — pixel buffer in row-major RGB8 order.
+/// - `rgb_data` — pixel buffer in row-major RGB8 or RGBA8 order.
 /// - `src_w`, `src_h` — original frame dimensions in pixels.
 /// - `src_stride` — byte stride per row (may include padding).
+/// - `bpp` — bytes per pixel (3 for RGB8, 4 for RGBA8).
 /// - `target` — target square size for the model input.
 pub fn letterbox_preprocess(
     rgb_data: &[u8],
     src_w: u32,
     src_h: u32,
     src_stride: u32,
+    bpp: u32,
     target: u32,
 ) -> (Vec<f32>, LetterboxInfo) {
     let t = target as usize;
     let pixels = t * t;
     let mut tensor = vec![114.0_f32 / 255.0; pixels * 3];
-    let info = letterbox_preprocess_into(rgb_data, src_w, src_h, src_stride, target, &mut tensor);
+    let info = letterbox_preprocess_into(rgb_data, src_w, src_h, src_stride, bpp, target, &mut tensor);
     (tensor, info)
 }
 
@@ -86,6 +88,7 @@ pub fn letterbox_preprocess_into(
     src_w: u32,
     src_h: u32,
     src_stride: u32,
+    bpp: u32,
     target: u32,
     output: &mut [f32],
 ) -> LetterboxInfo {
@@ -115,7 +118,7 @@ pub fn letterbox_preprocess_into(
         let out_y = (dst_y + pad_y_int) as usize;
         for dst_x in 0..new_w {
             let src_x = ((dst_x as f32 / scale) as u32).min(src_w.saturating_sub(1));
-            let src_idx = (src_y * src_stride + src_x * 3) as usize;
+            let src_idx = (src_y * src_stride + src_x * bpp) as usize;
             let out_x = (dst_x + pad_x_int) as usize;
             if src_idx + 2 < rgb_data.len() {
                 let r = rgb_data[src_idx] as f32 / 255.0;
@@ -187,7 +190,20 @@ mod tests {
         let stride = w * 3;
         let data = [255u8, 0, 0].repeat((w * h) as usize);
         let target = 8;
-        let (tensor, info) = letterbox_preprocess(&data, w, h, stride, target);
+        let (tensor, info) = letterbox_preprocess(&data, w, h, stride, 3, target);
+        assert_eq!(tensor.len(), 3 * 8 * 8);
+        assert!(info.scale > 0.0);
+    }
+
+    #[test]
+    fn letterbox_output_shape_rgba() {
+        // 4×2 RGBA image, solid red.
+        let w = 4u32;
+        let h = 2u32;
+        let stride = w * 4;
+        let data = [255u8, 0, 0, 255].repeat((w * h) as usize);
+        let target = 8;
+        let (tensor, info) = letterbox_preprocess(&data, w, h, stride, 4, target);
         assert_eq!(tensor.len(), 3 * 8 * 8);
         assert!(info.scale > 0.0);
     }

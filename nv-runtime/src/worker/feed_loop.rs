@@ -99,6 +99,7 @@ pub(crate) fn spawn_feed_worker(
                 sink_shutdown_timeout: config.sink_shutdown_timeout,
                 decode_preference: config.decode_preference,
                 post_decode_hook: config.post_decode_hook,
+                device_residency: config.device_residency,
             };
             worker.run();
         })
@@ -143,6 +144,8 @@ struct FeedWorker {
     decode_preference: nv_media::DecodePreference,
     /// Optional post-decode hook — plumbed through to the media ingress.
     post_decode_hook: Option<nv_media::PostDecodeHook>,
+    /// Device residency mode — plumbed through to the media ingress.
+    device_residency: nv_media::DeviceResidency,
 }
 
 /// Drop guard that ensures `FeedSharedState::alive` is set to `false`
@@ -212,7 +215,8 @@ impl FeedWorker {
                 self.source_spec.clone(),
                 self.reconnect_policy.clone(),
             )
-            .with_decode_preference(self.decode_preference);
+            .with_decode_preference(self.decode_preference)
+            .with_device_residency(self.device_residency.clone());
             if let Some(ref ptz) = self.ptz_provider {
                 options = options.with_ptz_provider(Arc::clone(ptz));
             }

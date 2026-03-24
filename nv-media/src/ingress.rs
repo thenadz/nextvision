@@ -19,7 +19,103 @@ use nv_frame::FrameEnvelope;
 
 use crate::bridge::PtzTelemetry;
 use crate::decode::DecodePreference;
+use crate::gpu_provider::SharedGpuProvider;
 use crate::hook::PostDecodeHook;
+
+/// Where decoded frames reside after the media bridge.
+///
+/// Controls whether the pipeline tail maps frames to host memory
+/// (default), uses the built-in CUDA path, or delegates to a custom
+/// [`GpuPipelineProvider`](crate::GpuPipelineProvider).
+///
+/// # Resolution order
+///
+/// The pipeline builder resolves the device residency strategy in this
+/// order:
+///
+/// 1. **`Provider`** — the provider builds the pipeline tail and bridges
+///    frames.  No built-in CUDA elements are needed.  **If the provider
+///    fails, pipeline construction returns an error** — there is no
+///    silent fallback to Host, because the user explicitly selected a
+///    specific hardware integration.
+/// 2. **`Cuda`** — the built-in upstream CUDA path (`cudaupload`,
+///    `cudaconvert`).  Requires the `cuda` cargo feature and GStreamer
+///    ≥ 1.20.  Falls back to `Host` with a warning if the elements are
+///    not available.
+/// 3. **`Host`** — standard `videoconvert → appsink` path.  Frames
+///    arrive in CPU-accessible mapped memory.
+///
+/// # Feature gating
+///
+/// - `Cuda` requires the `cuda` cargo feature on `nv-media`.  Without
+///   it, requesting `Cuda` returns `MediaError::Unsupported`.
+/// - `Provider` does **not** require the `cuda` feature — the provider
+///   decides which GStreamer elements to use.
+///
+/// # Hardware extension
+///
+/// To add support for a new hardware backend (e.g., AMD ROCm), implement
+/// [`GpuPipelineProvider`](crate::GpuPipelineProvider) in a new crate
+/// and pass `DeviceResidency::Provider(Arc::new(MyProvider::new()))`.
+/// No changes to the core library are needed.
+#[derive(Clone, Default)]
+pub enum DeviceResidency {
+    /// Frames are mapped to CPU-accessible memory (zero-copy GStreamer
+    /// buffer mapping). This is the standard path.
+    #[default]
+    Host,
+    /// Frames remain on the GPU as CUDA device memory via the built-in
+    /// upstream GStreamer CUDA elements (`cudaupload`, `cudaconvert`).
+    ///
+    /// Requires the `cuda` cargo feature. On GStreamer < 1.20 (where the
+    /// CUDA elements are unavailable), falls back to `Host` with a
+    /// warning.
+    ///
+    /// Stages access the device pointer via
+    /// [`FrameEnvelope::accelerated_handle::<CudaBufferHandle>()`](nv_frame::FrameEnvelope::accelerated_handle).
+    /// CPU consumers can still call
+    /// [`FrameEnvelope::require_host_data()`](nv_frame::FrameEnvelope::require_host_data)
+    /// — the materializer downloads device data on first access and
+    /// caches the result.
+    Cuda,
+    /// Frames remain on a device managed by the supplied provider.
+    ///
+    /// The provider controls pipeline tail construction and frame
+    /// bridging.  This variant does **not** require the `cuda` cargo
+    /// feature — the provider decides which GStreamer elements and
+    /// memory model to use.
+    ///
+    /// See [`GpuPipelineProvider`](crate::GpuPipelineProvider) for the
+    /// trait contract.
+    Provider(SharedGpuProvider),
+}
+
+impl std::fmt::Debug for DeviceResidency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Host => write!(f, "Host"),
+            Self::Cuda => write!(f, "Cuda"),
+            Self::Provider(p) => write!(f, "Provider({})", p.name()),
+        }
+    }
+}
+
+impl DeviceResidency {
+    /// Whether this residency requests device-resident frames (non-host).
+    #[inline]
+    pub fn is_device(&self) -> bool {
+        !matches!(self, Self::Host)
+    }
+
+    /// Extract the provider reference, if this is the `Provider` variant.
+    #[inline]
+    pub fn provider(&self) -> Option<&SharedGpuProvider> {
+        match self {
+            Self::Provider(p) => Some(p),
+            _ => None,
+        }
+    }
+}
 
 /// Reported lifecycle state of a media source after a [`tick()`](MediaIngress::tick).
 ///
@@ -275,14 +371,15 @@ pub trait FrameSink: Send + Sync + 'static {
 /// ```
 /// use nv_core::config::{ReconnectPolicy, SourceSpec};
 /// use nv_core::id::FeedId;
-/// use nv_media::{DecodePreference, IngressOptions};
+/// use nv_media::{DecodePreference, DeviceResidency, IngressOptions};
 ///
 /// let options = IngressOptions::new(
 ///         FeedId::new(1),
 ///         SourceSpec::rtsp("rtsp://cam/stream"),
 ///         ReconnectPolicy::default(),
 ///     )
-///     .with_decode_preference(DecodePreference::CpuOnly);
+///     .with_decode_preference(DecodePreference::CpuOnly)
+///     .with_device_residency(DeviceResidency::Host);
 /// ```
 #[non_exhaustive]
 pub struct IngressOptions {
@@ -298,10 +395,22 @@ pub struct IngressOptions {
     pub decode_preference: DecodePreference,
     /// Optional post-decode hook — can inject a pipeline element between
     /// the decoder and the color-space converter.
+    ///
+    /// **Ignored when `device_residency` is `Provider`** — the provider
+    /// controls the full decoder-to-tail path. Hooks are only evaluated
+    /// for `Host` and `Cuda` residency modes.
     pub post_decode_hook: Option<PostDecodeHook>,
     /// Maximum number of media events buffered before new events are
     /// dropped. Default: 64.
     pub event_queue_capacity: usize,
+    /// Where decoded frames reside after the bridge.
+    ///
+    /// [`DeviceResidency::Host`] (default) maps frames to CPU memory.
+    /// [`DeviceResidency::Cuda`] uses the built-in CUDA path.
+    /// [`DeviceResidency::Provider`] delegates to a custom provider.
+    ///
+    /// See [`DeviceResidency`] for resolution semantics.
+    pub device_residency: DeviceResidency,
 }
 
 impl IngressOptions {
@@ -320,6 +429,7 @@ impl IngressOptions {
             decode_preference: DecodePreference::default(),
             post_decode_hook: None,
             event_queue_capacity: 64,
+            device_residency: DeviceResidency::default(),
         }
     }
 
@@ -348,6 +458,21 @@ impl IngressOptions {
     #[must_use]
     pub fn with_event_queue_capacity(mut self, capacity: usize) -> Self {
         self.event_queue_capacity = capacity;
+        self
+    }
+
+    /// Set the device residency mode for decoded frames.
+    ///
+    /// [`DeviceResidency::Host`] (default) maps frames to CPU memory.
+    /// [`DeviceResidency::Cuda`] uses the built-in CUDA path.
+    /// [`DeviceResidency::Provider`] delegates to a custom
+    /// [`GpuPipelineProvider`](crate::GpuPipelineProvider).
+    ///
+    /// See [`DeviceResidency`] for resolution semantics and feature
+    /// gating details.
+    #[must_use]
+    pub fn with_device_residency(mut self, residency: DeviceResidency) -> Self {
+        self.device_residency = residency;
         self
     }
 }
@@ -392,4 +517,103 @@ pub trait HealthSink: Send + Sync + 'static {
 pub trait PtzProvider: Send + Sync + 'static {
     /// Return the latest PTZ telemetry, or `None` if unavailable.
     fn latest(&self) -> Option<PtzTelemetry>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_residency_default_is_host() {
+        assert!(matches!(DeviceResidency::default(), DeviceResidency::Host));
+    }
+
+    #[test]
+    fn device_residency_host_is_not_device() {
+        assert!(!DeviceResidency::Host.is_device());
+    }
+
+    #[test]
+    fn device_residency_cuda_is_device() {
+        assert!(DeviceResidency::Cuda.is_device());
+    }
+
+    #[test]
+    fn device_residency_host_has_no_provider() {
+        assert!(DeviceResidency::Host.provider().is_none());
+    }
+
+    #[test]
+    fn device_residency_cuda_has_no_provider() {
+        assert!(DeviceResidency::Cuda.provider().is_none());
+    }
+
+    #[test]
+    fn device_residency_debug_variants() {
+        assert_eq!(format!("{:?}", DeviceResidency::Host), "Host");
+        assert_eq!(format!("{:?}", DeviceResidency::Cuda), "Cuda");
+    }
+
+    #[test]
+    fn device_residency_provider_is_device() {
+        use std::sync::Arc;
+        use nv_core::error::MediaError;
+        use nv_core::id::FeedId;
+        use nv_frame::PixelFormat;
+        use crate::gpu_provider::GpuPipelineProvider;
+
+        struct StubProvider;
+        impl GpuPipelineProvider for StubProvider {
+            fn name(&self) -> &str { "stub" }
+            #[cfg(feature = "gst-backend")]
+            fn build_pipeline_tail(
+                &self, _: PixelFormat,
+            ) -> Result<crate::gpu_provider::GpuPipelineTail, MediaError> {
+                unimplemented!()
+            }
+            #[cfg(feature = "gst-backend")]
+            fn bridge_sample(
+                &self, _: FeedId, _: &Arc<std::sync::atomic::AtomicU64>,
+                _: PixelFormat, _: &gstreamer::Sample,
+                _: Option<crate::PtzTelemetry>,
+            ) -> Result<nv_frame::FrameEnvelope, MediaError> {
+                unimplemented!()
+            }
+        }
+
+        let p = DeviceResidency::Provider(Arc::new(StubProvider));
+        assert!(p.is_device());
+        assert!(p.provider().is_some());
+        assert_eq!(p.provider().unwrap().name(), "stub");
+        assert_eq!(format!("{p:?}"), "Provider(stub)");
+    }
+
+    fn test_feed_id() -> nv_core::id::FeedId {
+        nv_core::id::FeedId::new(1)
+    }
+
+    fn test_reconnect() -> nv_core::config::ReconnectPolicy {
+        nv_core::config::ReconnectPolicy::default()
+    }
+
+    #[test]
+    fn ingress_options_default_residency_is_host() {
+        let opts = IngressOptions::new(
+            test_feed_id(),
+            SourceSpec::file("/tmp/test.mp4"),
+            test_reconnect(),
+        );
+        assert!(matches!(opts.device_residency, DeviceResidency::Host));
+    }
+
+    #[test]
+    fn ingress_options_with_device_residency() {
+        let opts = IngressOptions::new(
+            test_feed_id(),
+            SourceSpec::file("/tmp/test.mp4"),
+            test_reconnect(),
+        )
+            .with_device_residency(DeviceResidency::Cuda);
+        assert!(matches!(opts.device_residency, DeviceResidency::Cuda));
+    }
 }

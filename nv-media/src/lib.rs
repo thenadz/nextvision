@@ -38,6 +38,11 @@
 //!   compile without it, which allows development, testing, and downstream
 //!   integration without GStreamer development libraries.
 //!
+//! - **`cuda`** — Enables the CUDA-resident pipeline path. Decoded frames
+//!   stay on the GPU as CUDA device memory, bypassing the host-memory copy.
+//!   Implies `gst-backend`. Requires GStreamer CUDA development libraries
+//!   at build time. See the [`gpu`] module for details.
+//!
 //! ## Module overview
 //!
 //! | Module | Visibility | Purpose |
@@ -45,6 +50,7 @@
 //! | [`ingress`] | **public** | Trait contracts (`MediaIngress`, `FrameSink`, `MediaIngressFactory`) |
 //! | [`source`] | **public** | `MediaSource` — concrete implementation with reconnection |
 //! | [`decode`] | **public** | `DecodePreference`, capability discovery (`pub(crate)` internals) |
+//! | [`gpu`] | **public** | CUDA-resident frame bridge (`cuda` feature) |
 //! | `backend` | `pub(crate)` | `GstSession` — safe adapter around GStreamer pipeline |
 //! | `bridge` | `pub(crate)` | GstSample → `FrameEnvelope` conversion |
 //! | `bus` | `pub(crate)` | Bus message types and mapping to `MediaEvent` |
@@ -54,9 +60,18 @@
 
 // -- Public modules --
 pub mod factory;
+pub mod gpu_provider;
 pub mod hook;
 pub mod ingress;
 pub mod source;
+
+// -- Feature-gated public modules --
+/// CUDA-resident frame bridge.
+///
+/// Enabled by the `cuda` cargo feature. Provides [`CudaBufferHandle`](gpu::CudaBufferHandle)
+/// for stages that consume device-resident frames.
+#[cfg(feature = "cuda")]
+pub mod gpu;
 
 // -- Internal modules --
 pub(crate) mod backend;
@@ -76,6 +91,7 @@ pub use decode::{
 };
 pub use factory::{DefaultMediaFactory, GstMediaIngressFactory};
 pub use ingress::IngressOptions;
+pub use ingress::DeviceResidency;
 pub use ingress::PtzProvider;
 pub use ingress::SourceStatus;
 pub use ingress::TickOutcome;
@@ -84,3 +100,8 @@ pub use source::MediaSource;
 
 // Post-decode hook types (platform-specific pipeline element injection).
 pub use hook::{DecodedStreamInfo, PostDecodeHook};
+
+// GPU pipeline provider extension point.
+pub use gpu_provider::{GpuPipelineProvider, SharedGpuProvider};
+#[cfg(feature = "gst-backend")]
+pub use gpu_provider::{GpuPipelineTail, SampleInfo};

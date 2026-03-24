@@ -467,6 +467,10 @@ impl HealthCounters {
                     KeyValue::new("processor_id", processor_id.as_str().to_owned()),
                 ]);
             }
+            HealthEvent::ResidencyDowngrade { .. } => {
+                // Informational — no counter needed. Operators observe this
+                // via health event subscribers or logs.
+            }
         }
     }
 }

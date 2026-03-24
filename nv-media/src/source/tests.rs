@@ -486,6 +486,7 @@ fn factory_creates_source() {
         decode_preference: DecodePreference::Auto,
             post_decode_hook: None,
             event_queue_capacity: 64,
+            device_residency: Default::default(),
     });
     let source = result.unwrap();
     assert_eq!(source.feed_id(), FeedId::new(42));
@@ -504,6 +505,7 @@ fn factory_wires_health_sink() {
             decode_preference: DecodePreference::Auto,
             post_decode_hook: None,
             event_queue_capacity: 64,
+            device_residency: Default::default(),
         })
         .unwrap();
 
@@ -551,6 +553,7 @@ fn factory_wires_ptz_provider() {
             decode_preference: DecodePreference::Auto,
             post_decode_hook: None,
             event_queue_capacity: 64,
+            device_residency: Default::default(),
         })
         .unwrap();
 
@@ -570,6 +573,7 @@ fn factory_default_is_equivalent_to_new() {
             decode_preference: DecodePreference::Auto,
             post_decode_hook: None,
             event_queue_capacity: 64,
+            device_residency: Default::default(),
         })
         .unwrap();
     let s2 = f2
@@ -581,6 +585,7 @@ fn factory_default_is_equivalent_to_new() {
             decode_preference: DecodePreference::Auto,
             post_decode_hook: None,
             event_queue_capacity: 64,
+            device_residency: Default::default(),
         })
         .unwrap();
     assert_eq!(s1.feed_id(), FeedId::new(1));
@@ -959,6 +964,7 @@ fn factory_creates_source_with_cpu_only() {
             decode_preference: DecodePreference::CpuOnly,
             post_decode_hook: None,
             event_queue_capacity: 64,
+            device_residency: Default::default(),
         })
         .unwrap();
     assert_eq!(source.feed_id(), FeedId::new(99));
@@ -977,6 +983,7 @@ fn factory_creates_source_with_prefer_hardware() {
             decode_preference: DecodePreference::PreferHardware,
             post_decode_hook: None,
             event_queue_capacity: 64,
+            device_residency: Default::default(),
         })
         .unwrap();
     assert_eq!(source.feed_id(), FeedId::new(100));
@@ -1789,5 +1796,59 @@ fn require_hardware_exhausts_reconnect_budget() {
         src.source_state(),
         SourceState::Stopped,
         "source should stop when reconnect budget is exhausted",
+    );
+}
+
+// ===========================================================================
+// Residency downgrade observation (Finding 4)
+// ===========================================================================
+
+/// When DeviceResidency::Cuda was requested but the stub session reports
+/// gpu_resident=false, StreamStarted must emit ResidencyDowngrade.
+#[test]
+fn residency_downgrade_emitted_for_cuda_to_host_fallback() {
+    let (mut src, _, _, _, health) = started_source_with_health(test_spec(), test_reconnect());
+    // Simulate Cuda residency requested.
+    src.device_residency = DeviceResidency::Cuda;
+    // Stub session has gpu_resident=false by default, so a downgrade
+    // should be detected.
+    src.state = SourceState::Reconnecting;
+    health.drain(); // clear any events from setup
+
+    src.handle_event(MediaEvent::StreamStarted);
+
+    let events = health.drain();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HealthEvent::ResidencyDowngrade {
+                requested,
+                effective,
+                ..
+            } if requested == "Cuda" && effective == "Host"
+        )),
+        "should emit ResidencyDowngrade when Cuda requested but gpu_resident is false; got: {:?}",
+        events,
+    );
+}
+
+/// When DeviceResidency::Host is requested (default), no downgrade is emitted.
+#[test]
+fn no_residency_downgrade_for_host_residency() {
+    let (mut src, _, _, _, health) = started_source_with_health(test_spec(), test_reconnect());
+    // Default is Host.
+    assert!(matches!(src.device_residency, DeviceResidency::Host));
+    src.state = SourceState::Reconnecting;
+    health.drain();
+
+    src.handle_event(MediaEvent::StreamStarted);
+
+    let events = health.drain();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, HealthEvent::ResidencyDowngrade { .. })),
+        "Host residency should NOT emit ResidencyDowngrade; got: {:?}",
+        events,
     );
 }

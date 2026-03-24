@@ -67,6 +67,7 @@ impl MediaIngressFactory for GstMediaIngressFactory {
             source.set_post_decode_hook(hook);
         }
         source.event_queue_capacity = options.event_queue_capacity;
+        source.device_residency = options.device_residency;
         Ok(Box::new(source))
     }
 }

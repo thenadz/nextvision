@@ -23,6 +23,10 @@ use super::{
     instant_to_ts_impl,
 };
 
+/// Number of frames to observe before resolving [`FrameInclusion::TargetFps`]
+/// to a concrete interval. Must be ≥ 2 for a meaningful FPS estimate.
+const TARGET_FPS_WARMUP_FRAMES: u64 = 30;
+
 impl PipelineExecutor {
     /// Flush any accumulated batch rejection count as a final
     /// [`HealthEvent::BatchSubmissionRejected`].
@@ -89,6 +93,57 @@ impl PipelineExecutor {
     // ------------------------------------------------------------------
     // Frame processing
     // ------------------------------------------------------------------
+
+    /// Attempt to resolve [`FrameInclusion::TargetFps`] to a concrete
+    /// [`FrameInclusion::Sampled`] interval using observed source cadence.
+    ///
+    /// Called once per frame when the inclusion policy is `TargetFps`.
+    /// Records the source-domain timestamp ([`FrameEnvelope::ts()`]) of
+    /// the first frame, then after [`TARGET_FPS_WARMUP_FRAMES`] frames
+    /// computes:
+    ///   `source_fps = (frames − 1) / (ts_last − ts_first)`
+    /// and resolves in-place with
+    /// [`FrameInclusion::resolve_with_source_fps`].
+    ///
+    /// Using source timestamps rather than wall-clock [`Instant`] ensures
+    /// that processing delays (CUDA/TRT JIT compilation, transient compute
+    /// stalls) do not distort the FPS estimate.
+    fn try_resolve_target_fps(&mut self, frame_ts: MonotonicTs) {
+        if self.fps_warmup_start_ts.is_none() {
+            self.fps_warmup_start_ts = Some(frame_ts);
+            return;
+        }
+
+        if self.frames_processed < TARGET_FPS_WARMUP_FRAMES {
+            return;
+        }
+
+        // Compute observed FPS from source-domain timestamps.
+        let start_nanos = self.fps_warmup_start_ts.unwrap().as_nanos();
+        let end_nanos = frame_ts.as_nanos();
+        if end_nanos <= start_nanos {
+            return; // Clock glitch or non-monotonic — try again next frame.
+        }
+
+        let elapsed_secs = (end_nanos - start_nanos) as f64 / 1_000_000_000.0;
+        if elapsed_secs <= 0.0 {
+            return;
+        }
+
+        let source_fps = (self.frames_processed - 1) as f64 / elapsed_secs;
+        let resolved = self.frame_inclusion.resolve_with_source_fps(source_fps as f32);
+
+        tracing::info!(
+            feed = %self.feed_id,
+            observed_source_fps = format!("{source_fps:.1}"),
+            resolved = %format!("{resolved:?}"),
+            "resolved TargetFps frame inclusion from observed source rate",
+        );
+
+        // Reset sample counter to avoid stale state from the fallback window.
+        self.frame_sample_counter = 0;
+        self.frame_inclusion = resolved;
+    }
 
     /// Process a single frame through the pipeline.
     ///
@@ -444,6 +499,49 @@ impl PipelineExecutor {
         let pipeline_complete_ts = self.instant_to_ts(t_pipeline_end);
         let total_latency = Duration::from_nanos(t_pipeline_start.elapsed().as_nanos() as u64);
 
+        // --- TargetFps resolution ---
+        //
+        // If the frame inclusion policy is TargetFps, estimate the source
+        // FPS from source-domain timestamps and resolve to a concrete
+        // Sampled interval. Uses frame timestamps (not wall-clock) so
+        // that CUDA/TRT startup stalls don't distort the estimate.
+        if let FrameInclusion::TargetFps { .. } = self.frame_inclusion {
+            self.try_resolve_target_fps(frame.ts());
+        }
+
+        // Determine frame inclusion for this output.
+        let include_frame = match self.frame_inclusion {
+            FrameInclusion::Always => true,
+            FrameInclusion::Never => false,
+            FrameInclusion::Sampled { interval } => {
+                if interval == 0 {
+                    false
+                } else {
+                    self.frame_sample_counter += 1;
+                    if self.frame_sample_counter >= interval as u64 {
+                        self.frame_sample_counter = 0;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+            // Before resolution, use fallback_interval.
+            FrameInclusion::TargetFps { fallback_interval, .. } => {
+                if fallback_interval == 0 {
+                    false
+                } else {
+                    self.frame_sample_counter += 1;
+                    if self.frame_sample_counter >= fallback_interval as u64 {
+                        self.frame_sample_counter = 0;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+        };
+
         let output = OutputEnvelope {
             feed_id: self.feed_id,
             frame_seq: frame.seq(),
@@ -467,12 +565,10 @@ impl PipelineExecutor {
                 frame_receive_ts,
                 pipeline_complete_ts,
                 total_latency,
+                frame_included: include_frame,
             },
             metadata: artifacts.stage_artifacts,
-            frame: match self.frame_inclusion {
-                FrameInclusion::Always => Some(frame.clone()),
-                FrameInclusion::Never => None,
-            },
+            frame: if include_frame { Some(frame.clone()) } else { None },
             admission,
         };
 

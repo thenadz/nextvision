@@ -174,12 +174,14 @@ nv-temporal      ← nv-core, nv-perception, nv-view
 nv-view          ← nv-core
 nv-runtime       ← nv-core, nv-frame, nv-media, nv-perception, nv-temporal, nv-view
 nv-metrics       ← nv-runtime, opentelemetry, opentelemetry-otlp (optional, standalone)
+nv-jetson        ← nv-core, nv-frame, nv-media, gstreamer-rs (leaf crate, Jetson-specific)
 nv-test-util     ← nv-core, nv-frame, nv-perception (dev-dependency only)
 ```
 
 Key rules:
-- `gstreamer-rs` appears **only** in `nv-media`'s `Cargo.toml`. No other crate transitively depends on it.
+- `gstreamer-rs` appears **only** in `nv-media`'s and platform crates' `Cargo.toml`. Core crates never depend on it.
 - `opentelemetry` / `opentelemetry-otlp` appear **only** in `nv-metrics`'s `Cargo.toml`. Users who do not depend on `nv-metrics` incur no OTel compile cost.
+- Platform crates like `nv-jetson` are leaf crates — the core library must not depend on them.
 
 ---
 
@@ -571,6 +573,59 @@ pub enum RtspTransport {
 6. When the last `Arc<FrameInner>` drops, the `PinGuard` drops, releasing the GStreamer buffer back to its pool.
 
 This achieves **zero pixel-data copies** from decode → stage processing, while keeping `gstreamer-rs` types fully invisible to downstream crates.
+
+### Device-resident pipeline (optional)
+
+Device residency is controlled by `DeviceResidency`, which has three variants:
+
+- **`Host`** (default) — frames are mapped to CPU memory (`videoconvert → appsink`).
+- **`Cuda`** — built-in upstream CUDA path using `cudaupload → cudaconvert → appsink(memory:CUDAMemory)`. Requires the `cuda` cargo feature and GStreamer ≥ 1.20.
+- **`Provider(Arc<dyn GpuPipelineProvider>)`** — delegates pipeline tail construction and frame bridging to an external provider (e.g., `nv-jetson` for NVMM, a future AMD ROCm crate). Does **not** require the `cuda` feature.
+
+When `DeviceResidency::Cuda` is selected and the `cuda` feature is enabled, the pipeline tail changes:
+
+```text
+decode → [post-decode hook*] → cudaupload → cudaconvert → appsink(memory:CUDAMemory)
+```
+
+*The post-decode hook is only evaluated for **Host** and **Cuda** paths. When
+`DeviceResidency::Provider` is active, hooks are skipped — the provider's
+pipeline tail accepts decoder output directly.
+
+Instead of mapping the buffer to host memory, `gpu::bridge_gst_sample_device()`
+extracts the CUDA device pointer from `GstCudaMemory` and wraps it in a
+`CudaBufferHandle` stored inside a `PixelData::Device` frame. The GStreamer
+buffer reference is held to prevent pool reclamation.
+
+When `DeviceResidency::Provider` is selected, the provider builds the pipeline
+tail (converter elements + appsink) and bridges each sample into a device-resident
+`FrameEnvelope`. If the provider fails during pipeline construction, the pipeline
+build returns a `MediaError::Unsupported` error — there is no silent fallback to
+host memory.  This is deliberate: the user explicitly selected a hardware
+integration, and silently degrading to CPU frames would produce subtly wrong
+results in GPU-dependent stages.
+
+Every device frame carries a `HostMaterializeFn` that maps the GStreamer buffer
+readable (triggering a device→host copy). CPU-only stages call
+`frame.require_host_data()` as usual — the materializer runs once and the
+result is cached.
+
+GPU-aware stages access the device pointer via
+`frame.accelerated_handle::<CudaBufferHandle>()` (CUDA) or the provider's
+handle type (e.g., `NvmmBufferHandle`).
+
+When the `cuda` feature is not enabled, requesting `DeviceResidency::Cuda` returns
+a `MediaError::Unsupported` error at pipeline build time — there is no silent
+fallback.
+
+#### Adding a new hardware backend
+
+To add support for a new device (e.g., AMD ROCm):
+
+1. Create a new crate (`nv-amd` or similar) that depends on `nv-media` and `nv-frame`.
+2. Implement `GpuPipelineProvider` — define `build_pipeline_tail()` (GStreamer elements) and `bridge_sample()` (sample → `FrameEnvelope`).
+3. Users select the new backend via `DeviceResidency::Provider(Arc::new(AmdProvider::new()))`.
+4. No changes to the core library are needed — the provider trait is the extension surface.
 
 ### Reconnection
 
@@ -1300,7 +1355,8 @@ pub struct OutputEnvelope {
     pub view: ViewState,
     pub provenance: Provenance,
     pub metadata: TypedMetadata,
-    /// Present only when `FrameInclusion::Always` is set on the feed.
+    /// Present when `FrameInclusion::Always` or on sampled outputs
+    /// when `FrameInclusion::Sampled` is set on the feed.
     pub frame: Option<FrameEnvelope>,
 }
 ```
@@ -1314,6 +1370,8 @@ pub struct Provenance {
     pub frame_receive_ts: MonotonicTs,
     pub pipeline_complete_ts: MonotonicTs,
     pub total_latency: Duration,
+    /// Whether this output includes the source frame.
+    pub frame_included: bool,
 }
 
 pub struct StageProvenance {

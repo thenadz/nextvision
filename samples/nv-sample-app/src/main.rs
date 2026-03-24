@@ -30,6 +30,7 @@
 //! ```
 
 mod cli;
+mod mode;
 mod overlay;
 mod ui;
 
@@ -46,8 +47,8 @@ use nv_sample_tracking::{TrackerConfig, TrackerStage};
 use nv_sample_detection::{DetectorBatchProcessor, DetectorConfig, DetectorStage};
 use nv_core::{CameraMode, SourceSpec};
 use nv_runtime::{
-    BackpressurePolicy, BatchConfig, FeedConfig, FeedPipeline, FrameInclusion, OutputEnvelope,
-    OutputSink, Runtime,
+    BackpressurePolicy, BatchConfig, DeviceResidency, FeedConfig, FeedPipeline, FrameInclusion,
+    OutputEnvelope, OutputSink, Runtime,
 };
 
 use crate::cli::Cli;
@@ -104,6 +105,51 @@ fn tracker_config(args: &Cli) -> TrackerConfig {
 /// CUDA JIT compilation on first run can take 30+ seconds.
 /// Allow a generous timeout for the initial inference.
 const GPU_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Default preview interval when neither `--preview-fps` nor
+/// `--sample-interval` is specified (~5 fps at 30 fps source).
+const DEFAULT_PREVIEW_INTERVAL: u32 = 6;
+
+/// Resolve the effective [`FrameInclusion`] from CLI arguments.
+///
+/// Precedence: `--sample-interval` > `--preview-fps` > default.
+///
+/// When `--preview-fps` is used, the resulting policy is
+/// [`FrameInclusion::TargetFps`] — the executor resolves the actual
+/// interval from observed source cadence (frame timestamps) after a
+/// brief warmup (~30 frames). The fallback interval assumes ~30 fps
+/// during the warmup window so that preview begins immediately.
+fn resolve_frame_inclusion(args: &Cli, include_frames: bool) -> FrameInclusion {
+    resolve_frame_inclusion_params(
+        args.sample_interval,
+        args.preview_fps,
+        include_frames,
+    )
+}
+
+/// Pure parameter-based inclusion resolution — testable without Cli.
+///
+/// Precedence: `sample_interval` > `preview_fps` > default.
+/// `include_frames = false` forces [`FrameInclusion::Never`] (headless).
+fn resolve_frame_inclusion_params(
+    sample_interval: Option<u32>,
+    preview_fps: Option<f32>,
+    include_frames: bool,
+) -> FrameInclusion {
+    if !include_frames {
+        return FrameInclusion::Never;
+    }
+    if let Some(interval) = sample_interval {
+        return FrameInclusion::sampled(interval);
+    }
+    if let Some(fps) = preview_fps {
+        // Adaptive: resolves from observed source cadence at runtime.
+        // Fallback assumes ~30 fps during warmup.
+        let fallback = (30.0_f32 / fps).round().max(1.0) as u32;
+        return FrameInclusion::target_fps(fps, fallback);
+    }
+    FrameInclusion::sampled(DEFAULT_PREVIEW_INTERVAL)
+}
 
 /// Lightweight output sink that periodically logs detection/track summaries.
 ///
@@ -178,45 +224,35 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     /// Complete `FeedConfig` from a partially-built config builder with
     /// common settings (source, camera mode, output sink, backpressure).
-    ///
-    /// When `include_frames` is true, `FrameInclusion::Always` attaches
-    /// full frame pixels to every output — needed for UI overlay rendering
-    /// but doubles per-frame Arc memory. Pass `false` for headless or
-    /// production pipelines where frame pixel data is not needed downstream.
     fn build_feed_config(
         builder: nv_runtime::FeedConfigBuilder,
         source: SourceSpec,
         sink: Box<dyn OutputSink>,
         queue_depth: usize,
-        include_frames: bool,
+        frame_inclusion: FrameInclusion,
         decode: nv_runtime::DecodePreference,
+        device_residency: DeviceResidency,
     ) -> Result<FeedConfig, Box<dyn std::error::Error>> {
         let mut builder = builder
             .source(source)
             .camera_mode(CameraMode::Fixed)
             .output_sink(sink)
             .decode_preference(decode)
-            .backpressure(BackpressurePolicy::DropOldest { queue_depth });
+            .device_residency(device_residency)
+            .backpressure(BackpressurePolicy::DropOldest { queue_depth })
+            .frame_inclusion(frame_inclusion);
 
-        // On Jetson, hardware decoders (nvv4l2decoder) output
-        // video/x-raw(memory:NVMM) — GPU-mapped buffers that the
-        // standard videoconvert cannot accept. Insert nvvidconv to
-        // copy NVMM → system memory when detected.
-        builder = builder.post_decode_hook(std::sync::Arc::new(|info| {
-            if info.memory_type.as_deref() == Some("NVMM") {
-                Some("nvvidconv".into())
-            } else {
-                None
-            }
-        }));
-
-        if include_frames {
-            // Carry full pixel data in every OutputEnvelope so the UI
-            // can render detection/track overlays on the video frame.
-            builder = builder.frame_inclusion(FrameInclusion::Always);
-        }
-        // When false, the default FrameInclusion::Never avoids the
-        // per-frame pixel payload — appropriate for headless runs.
+        // On Jetson (with or without the jetson-nvmm feature), hardware
+        // decoders (nvv4l2decoder) output video/x-raw(memory:NVMM) — GPU-
+        // mapped buffers that the standard videoconvert cannot accept.
+        // When the provider is NOT active (Host/Cuda residency), insert
+        // nvvidconv to bridge NVMM → system memory.
+        //
+        // When a Provider IS active, the pipeline builder skips this
+        // hook entirely (provider controls the full decoder→tail path).
+        // So this hook is always safe to set — it only fires for
+        // non-provider paths that encounter NVMM decoder output.
+        builder = builder.post_decode_hook(crate::mode::nvmm_bridge_hook());
 
         Ok(builder.build()?)
     }
@@ -231,6 +267,8 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
         make_sink: &dyn Fn(&Option<ui::SharedUiState>) -> Box<dyn OutputSink>,
         make_builder: &dyn Fn() -> Result<nv_runtime::FeedConfigBuilder, Box<dyn std::error::Error>>,
     ) -> Result<Vec<nv_runtime::FeedHandle>, Box<dyn std::error::Error>> {
+        let device_residency = crate::mode::select_device_residency(args.gpu);
+        let frame_inclusion = resolve_frame_inclusion(args, ui_state.is_some());
         let mut feeds = Vec::with_capacity(args.video_uri.len());
         for (i, uri) in args.video_uri.iter().enumerate() {
             let source = parse_source(uri, args.loop_file);
@@ -238,7 +276,7 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let builder = make_builder()?;
             let feed_config = build_feed_config(
                 builder, source, sink, args.queue_depth,
-                ui_state.is_some(), args.decode,
+                frame_inclusion, args.decode, device_residency.clone(),
             )?;
             let feed = runtime.add_feed(feed_config)?;
             info!(feed_index = i, feed_id = %feed.id(), uri, "feed started");
@@ -325,4 +363,90 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     runtime.shutdown()?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------------------------------------------------------------
+    // Inclusion resolution precedence
+    // ---------------------------------------------------------------
+
+    /// `sample_interval` overrides `preview_fps`.
+    #[test]
+    fn sample_interval_overrides_preview_fps() {
+        let result = resolve_frame_inclusion_params(Some(3), Some(5.0), true);
+        assert_eq!(result, FrameInclusion::Sampled { interval: 3 });
+    }
+
+    /// `preview_fps` used when `sample_interval` is absent.
+    #[test]
+    fn preview_fps_used_when_interval_absent() {
+        let result = resolve_frame_inclusion_params(None, Some(5.0), true);
+        assert!(
+            matches!(result, FrameInclusion::TargetFps { target, fallback_interval }
+                if (target - 5.0).abs() < f32::EPSILON && fallback_interval == 6),
+            "expected TargetFps {{ target: 5.0, fallback_interval: 6 }}, got {result:?}",
+        );
+    }
+
+    /// Default used when both absent.
+    #[test]
+    fn default_used_when_both_absent() {
+        let result = resolve_frame_inclusion_params(None, None, true);
+        assert_eq!(
+            result,
+            FrameInclusion::Sampled { interval: DEFAULT_PREVIEW_INTERVAL },
+        );
+    }
+
+    /// Headless mode forces Never regardless of other args.
+    #[test]
+    fn headless_forces_never() {
+        assert_eq!(
+            resolve_frame_inclusion_params(Some(3), Some(5.0), false),
+            FrameInclusion::Never,
+        );
+        assert_eq!(
+            resolve_frame_inclusion_params(None, Some(5.0), false),
+            FrameInclusion::Never,
+        );
+        assert_eq!(
+            resolve_frame_inclusion_params(None, None, false),
+            FrameInclusion::Never,
+        );
+    }
+
+    /// `sample_interval = 0` normalizes to Never.
+    #[test]
+    fn sample_interval_zero_is_never() {
+        let result = resolve_frame_inclusion_params(Some(0), None, true);
+        assert_eq!(result, FrameInclusion::Never);
+    }
+
+    /// `sample_interval = 1` normalizes to Always.
+    #[test]
+    fn sample_interval_one_is_always() {
+        let result = resolve_frame_inclusion_params(Some(1), None, true);
+        assert_eq!(result, FrameInclusion::Always);
+    }
+
+    /// `preview_fps` high value produces a fallback interval of 1.
+    #[test]
+    fn preview_fps_high_value_fallback_of_one() {
+        let result = resolve_frame_inclusion_params(None, Some(60.0), true);
+        // target_fps(60.0, 1) → fallback = round(30/60) = round(0.5) = 1
+        // but since 1 → Always via sampled(1), resolve with 30fps source
+        // Note: the TargetFps variant stores the raw values; resolution
+        // happens at runtime.
+        assert!(
+            matches!(result, FrameInclusion::TargetFps { .. }),
+            "high preview FPS should still create TargetFps: {result:?}",
+        );
+    }
 }

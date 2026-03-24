@@ -5,6 +5,7 @@ use nv_core::health::{DecodeOutcome, HealthEvent};
 
 use crate::decode::DecodePreferenceExt;
 use crate::event::MediaEvent;
+use crate::ingress::DeviceResidency;
 
 use super::{MediaSource, SourceState};
 
@@ -205,6 +206,22 @@ impl MediaSource {
             fallback_reason: self.session_fallback_reason.clone(),
             detail: detail_string,
         });
+
+        // Check for residency downgrade: Cuda requested → Host effective.
+        if let Some(ref session) = self.session {
+            if matches!(self.device_residency, DeviceResidency::Cuda) && !session.gpu_resident() {
+                tracing::warn!(
+                    feed_id = %self.feed_id,
+                    "DeviceResidency::Cuda requested but effective residency is Host — \
+                     CUDA GStreamer elements were unavailable at pipeline build time",
+                );
+                self.emit_health(HealthEvent::ResidencyDowngrade {
+                    feed_id: self.feed_id,
+                    requested: "Cuda".into(),
+                    effective: "Host".into(),
+                });
+            }
+        }
 
         None
     }

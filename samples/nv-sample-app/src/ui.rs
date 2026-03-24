@@ -69,8 +69,14 @@ struct FeedTelemetry {
 
 /// Shared state between all sinks and the UI thread.
 pub struct UiState {
-    /// Latest snapshot per feed, consumed by the UI thread.
+    /// Latest snapshot per feed (only updated when frame pixels arrive).
     snapshots: HashMap<FeedId, FeedSnapshot>,
+    /// Latest analytics output per feed (updated on every output).
+    ///
+    /// Decoupled from `snapshots` so track overlays and detection counts
+    /// stay current even when frame delivery is throttled by
+    /// `FrameInclusion::Sampled`.
+    latest_analytics: HashMap<FeedId, Arc<OutputEnvelope>>,
     /// Telemetry per feed.
     telemetry: HashMap<FeedId, FeedTelemetry>,
     /// Feed ordering (insertion order).
@@ -81,6 +87,7 @@ impl UiState {
     fn new() -> Self {
         Self {
             snapshots: HashMap::new(),
+            latest_analytics: HashMap::new(),
             telemetry: HashMap::new(),
             feed_order: Vec::new(),
         }
@@ -180,35 +187,42 @@ impl OutputSink for UiSink {
             .map(|sp| (format!("{}", sp.stage_id), sp.latency.as_nanos() / 1000))
             .collect();
 
-        // Build snapshot if frame is available (zero-copy: just Arc-clone).
-        if output.frame.is_some() {
-            let snapshot = FeedSnapshot {
-                output: Arc::clone(&output),
-            };
-
-            if let Ok(mut s) = self.state.lock() {
-                // Register feed on first emit.
-                if !s.feed_order.contains(&feed_id) {
-                    s.feed_order.push(feed_id);
-                }
-                s.snapshots.insert(feed_id, snapshot);
-                let t = s.telemetry.entry(feed_id).or_insert(FeedTelemetry {
-                    frame_count: 0,
-                    fps_ema: 0.0,
-                    last_detection_count: 0,
-                    last_track_count: 0,
-                    last_pipeline_latency_us: 0,
-                    last_stage_latencies: Vec::new(),
-                    last_bridge_wall_us: 0,
-                });
-                t.frame_count = count;
-                t.fps_ema = fps;
-                t.last_detection_count = detection_count;
-                t.last_track_count = track_count;
-                t.last_pipeline_latency_us = pipeline_latency_us;
-                t.last_bridge_wall_us = bridge_wall_us;
-                t.last_stage_latencies = stage_latencies;
+        // Update shared state: telemetry and analytics always flow at full
+        // rate; the frame snapshot only updates when pixel data is present
+        // (which may be throttled by FrameInclusion::Sampled).
+        if let Ok(mut s) = self.state.lock() {
+            // Register feed on first emit.
+            if !s.feed_order.contains(&feed_id) {
+                s.feed_order.push(feed_id);
             }
+
+            // Analytics: always current (tracks, detections, provenance).
+            s.latest_analytics.insert(feed_id, Arc::clone(&output));
+
+            // Snapshot: only replace when we have a new frame.
+            if output.frame.is_some() {
+                let snapshot = FeedSnapshot {
+                    output: Arc::clone(&output),
+                };
+                s.snapshots.insert(feed_id, snapshot);
+            }
+
+            let t = s.telemetry.entry(feed_id).or_insert(FeedTelemetry {
+                frame_count: 0,
+                fps_ema: 0.0,
+                last_detection_count: 0,
+                last_track_count: 0,
+                last_pipeline_latency_us: 0,
+                last_stage_latencies: Vec::new(),
+                last_bridge_wall_us: 0,
+            });
+            t.frame_count = count;
+            t.fps_ema = fps;
+            t.last_detection_count = detection_count;
+            t.last_track_count = track_count;
+            t.last_pipeline_latency_us = pipeline_latency_us;
+            t.last_bridge_wall_us = bridge_wall_us;
+            t.last_stage_latencies = stage_latencies;
         }
 
         // Periodic log.
@@ -251,16 +265,20 @@ fn colour_for_track(track_id: u64) -> egui::Color32 {
 // rgb_to_rgba — convert strided RGB8 to RGBA for egui::ColorImage
 // ---------------------------------------------------------------------------
 
-fn rgb_to_rgba(rgb: &[u8], w: u32, h: u32, stride: u32) -> Vec<u8> {
+fn rgb_to_rgba(rgb: &[u8], w: u32, h: u32, stride: u32, bpp: u32) -> Vec<u8> {
     let mut rgba = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h {
         let row_start = (y * stride) as usize;
         for x in 0..w {
-            let i = row_start + (x as usize) * 3;
+            let i = row_start + (x as usize) * bpp as usize;
             rgba.push(rgb[i]);
             rgba.push(rgb[i + 1]);
             rgba.push(rgb[i + 2]);
-            rgba.push(255);
+            if bpp >= 4 {
+                rgba.push(rgb[i + 3]);
+            } else {
+                rgba.push(255);
+            }
         }
     }
     rgba
@@ -277,6 +295,8 @@ pub struct NvApp {
     textures: HashMap<FeedId, egui::TextureHandle>,
     /// Persisted last-good frame per feed (survives across repaints).
     last_frames: HashMap<FeedId, FeedSnapshot>,
+    /// Latest analytics per feed — always current regardless of frame sampling.
+    latest_analytics: HashMap<FeedId, Arc<OutputEnvelope>>,
     /// When each feed last delivered a frame.
     last_frame_times: HashMap<FeedId, Instant>,
     /// Feed handles for live telemetry queries.
@@ -301,6 +321,7 @@ impl NvApp {
             state,
             textures: HashMap::new(),
             last_frames: HashMap::new(),
+            latest_analytics: HashMap::new(),
             last_frame_times: HashMap::new(),
             feed_handles,
             batch_handle,
@@ -563,6 +584,11 @@ impl eframe::App for NvApp {
         {
             let mut state = self.state.lock().unwrap();
             for fid in &feed_order {
+                // Always pull latest analytics (tracks, detections, provenance).
+                if let Some(analytics) = state.latest_analytics.remove(fid) {
+                    self.latest_analytics.insert(*fid, analytics);
+                }
+                // Pull frame snapshot only when new pixels arrived.
                 if let Some(snap) = state.snapshots.remove(fid) {
                     self.last_frames.insert(*fid, snap);
                     self.last_frame_times.insert(*fid, Instant::now());
@@ -664,13 +690,23 @@ impl NvApp {
             let width = frame.width();
             let height = frame.height();
             let stride = frame.stride();
+            let bpp = frame.format().bytes_per_pixel().unwrap_or(3);
 
             // Upload / update texture.
-            let rgba = rgb_to_rgba(&rgb, width, height, stride);
-            let image = egui::ColorImage::from_rgba_unmultiplied(
-                [width as usize, height as usize],
-                &rgba,
-            );
+            // Fast path: when data is already tightly-packed RGBA, pass it
+            // directly to egui without an intermediate allocation + copy.
+            let image = if bpp == 4 && stride == width * 4 {
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [width as usize, height as usize],
+                    &rgb,
+                )
+            } else {
+                let rgba = rgb_to_rgba(&rgb, width, height, stride, bpp);
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [width as usize, height as usize],
+                    &rgba,
+                )
+            };
 
             let tex = self
                 .textures
@@ -702,8 +738,13 @@ impl NvApp {
                 egui::Color32::WHITE,
             );
 
-            // Draw track overlays.
-            for t in &snap.output.tracks {
+            // Draw track overlays from latest analytics (always current,
+            // not gated by frame sampling).
+            let analytics = self.latest_analytics.get(&feed_id);
+            let overlay_tracks = analytics
+                .map(|a| a.tracks.as_slice())
+                .unwrap_or(&snap.output.tracks);
+            for t in overlay_tracks {
                 let bb = &t.current.bbox;
                 let x0 = rect.min.x + bb.x_min * disp_w;
                 let y0 = rect.min.y + bb.y_min * disp_h;
@@ -730,13 +771,24 @@ impl NvApp {
                 );
             }
 
-            // Frame age overlay — top-right of video, always visible.
-            let age_us = WallTs::now().as_micros()
+            // Freshness overlay — top-right of video.
+            // Shows both frame pixel age and analytics age so the user
+            // can distinguish stale pixels from stale perception results.
+            let now_wall = WallTs::now().as_micros();
+            let frame_age_us = now_wall
                 .saturating_sub(snap.output.wall_ts.as_micros());
-            let delay_text = format!("behind: {}", format_delay(age_us));
+            let analytics_age_us = analytics
+                .map(|a| now_wall.saturating_sub(a.wall_ts.as_micros()))
+                .unwrap_or(frame_age_us);
+
+            let delay_text = format!(
+                "frame:{} analytics:{}",
+                format_delay(frame_age_us),
+                format_delay(analytics_age_us),
+            );
             let delay_galley = ui.painter().layout_no_wrap(
                 delay_text.clone(),
-                egui::FontId::proportional(13.0),
+                egui::FontId::proportional(11.0),
                 egui::Color32::WHITE,
             );
             let delay_pos = egui::pos2(
@@ -747,7 +799,8 @@ impl NvApp {
                 delay_pos - egui::vec2(3.0, 1.0),
                 delay_galley.size() + egui::vec2(6.0, 2.0),
             );
-            let dc = delay_colour(age_us);
+            // Colour based on whichever is worse.
+            let dc = delay_colour(frame_age_us.max(analytics_age_us));
             ui.painter().rect_filled(
                 delay_bg,
                 3.0,
@@ -757,17 +810,19 @@ impl NvApp {
                 delay_pos,
                 egui::Align2::LEFT_TOP,
                 &delay_text,
-                egui::FontId::proportional(13.0),
+                egui::FontId::proportional(11.0),
                 dc,
             );
 
-            // Detection count + seq overlay in bottom-left.
+            // Detection count + seq overlay in bottom-left — sourced from
+            // latest analytics for accuracy under sampled frames.
+            let info_src = analytics.unwrap_or(&snap.output);
             let info_text = format!(
                 "seq:{} det:{} trk:{} pipeline:{:.1}ms",
-                snap.output.frame_seq,
-                snap.output.detections.len(),
-                snap.output.tracks.len(),
-                snap.output.provenance.total_latency.as_nanos() as f64 / 1_000_000.0,
+                info_src.frame_seq,
+                info_src.detections.len(),
+                info_src.tracks.len(),
+                info_src.provenance.total_latency.as_nanos() as f64 / 1_000_000.0,
             );
             ui.painter().text(
                 egui::pos2(rect.min.x + 4.0, rect.max.y - 4.0),

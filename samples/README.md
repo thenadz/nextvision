@@ -95,6 +95,10 @@ Key flags:
 | `--batch` | `false` | Enable cross-feed batch inference |
 | `--batch-size` | `8` | Max frames per batch |
 | `--batch-latency-ms` | `50` | Max wait before dispatching partial batch |
+| `--gpu` | `false` | Enable GPU-resident frame pipeline + CUDA EP inference (build with `--features gpu`; needs NVIDIA drivers + GStreamer CUDA plugins at runtime) |
+| `--decode` | `auto` | Decode preference: `auto`, `software`, `prefer-hw`, `require-hw` |
+| `--preview-fps` | — | Target preview FPS for sampled frame delivery (UI mode only). Computed against an assumed 30 FPS source. E.g., `--preview-fps 10` includes one frame every 3 outputs |
+| `--sample-interval` | — | Explicit frame sample interval (include every N-th frame). Takes precedence over `--preview-fps`. E.g., `--sample-interval 3` delivers one frame every 3 outputs |
 | `--loop-file` | `false` | Loop file sources |
 | `--headless` | `false` | Disable GUI, use log-only sinks |
 

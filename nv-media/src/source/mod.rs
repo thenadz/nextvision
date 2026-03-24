@@ -52,7 +52,7 @@ use nv_core::id::FeedId;
 use crate::backend::{EventQueue, GstSession, SessionConfig};
 use crate::decode::{DecodePreference, DecodePreferenceExt, HwFailureTracker};
 use crate::hook::PostDecodeHook;
-use crate::ingress::{FrameSink, HealthSink, PtzProvider};
+use crate::ingress::{DeviceResidency, FrameSink, HealthSink, PtzProvider};
 use crate::pipeline::OutputFormat;
 use crate::reconnect::ReconnectTracker;
 
@@ -148,6 +148,8 @@ pub struct MediaSource {
     pub(super) post_decode_hook: Option<PostDecodeHook>,
     /// Maximum events buffered in the event queue before drops.
     pub(super) event_queue_capacity: usize,
+    /// Device residency mode — determines pipeline tail strategy.
+    pub(super) device_residency: DeviceResidency,
 }
 
 impl MediaSource {
@@ -179,6 +181,7 @@ impl MediaSource {
             session_fallback_reason: None,
             post_decode_hook: None,
             event_queue_capacity: crate::backend::EVENT_QUEUE_CAPACITY,
+            device_residency: DeviceResidency::default(),
         }
     }
 
@@ -317,6 +320,7 @@ impl MediaSource {
             ptz_provider: self.ptz_provider.clone(),
             post_decode_hook: self.post_decode_hook.clone(),
             event_queue_capacity: self.event_queue_capacity,
+            device_residency: self.device_residency.clone(),
         };
         let sink = self
             .sink
@@ -351,6 +355,7 @@ impl MediaSource {
             ptz_provider: None,
             post_decode_hook: None,
             event_queue_capacity: self.event_queue_capacity,
+            device_residency: self.device_residency.clone(),
         };
         self.session = Some(GstSession::start_stub(config));
         self.decoder_verified = false;

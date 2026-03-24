@@ -16,7 +16,7 @@ NextVision ingests live or recorded video, normalizes frames into a library-owne
 |---|---|
 | `nv-core` | Shared types: IDs, timestamps, geometry, errors, metadata, health events, metrics |
 | `nv-frame` | Frame abstraction — zero-copy, ref-counted `FrameEnvelope` |
-| `nv-media` | GStreamer backend — the only crate that depends on `gstreamer-rs` |
+| `nv-media`     | GStreamer backend — the only crate that depends on `gstreamer-rs`. Optional `cuda` feature for GPU-resident frames |
 | `nv-perception` | Stage trait, detection/track types, perception artifacts, derived signals |
 | `nv-temporal` | Temporal state: trajectories, motion features, continuity, retention |
 | `nv-view` | PTZ/view-state, camera motion modeling, epoch policy, context validity |

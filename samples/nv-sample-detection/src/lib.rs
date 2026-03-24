@@ -49,11 +49,16 @@ mod config;
 mod inference;
 mod letterbox;
 mod postprocess;
+pub mod preprocess;
 pub mod session;
 mod stage;
 
 pub use batch::DetectorBatchProcessor;
 pub use config::DetectorConfig;
+pub use preprocess::{
+    BatchFramePreprocessor, FramePreprocessor, HostBatchPreprocessor, HostFallbackPolicy,
+    HostPreprocessor, PreprocessedFrame,
+};
 pub use stage::DetectorStage;
 
 // Re-export helpers for testing and advanced use.

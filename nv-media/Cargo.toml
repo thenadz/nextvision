@@ -27,3 +27,7 @@ default = ["gst-backend"]
 ## Enable the GStreamer backend. Requires GStreamer development libraries at build time.
 ## Runtime compatible with GStreamer >= 1.16 (e.g. Jetson / Ubuntu 20.04).
 gst-backend = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
+## Enable CUDA-accelerated pipeline path. Decoded frames remain on the GPU
+## as CUDA device memory, bypassing the host-memory copy. Requires the
+## `gst-backend` feature and GStreamer CUDA plugins at runtime.
+cuda = ["gst-backend"]

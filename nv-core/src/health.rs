@@ -350,6 +350,25 @@ pub enum HealthEvent {
         /// Number of submissions rejected in this throttle window.
         rejected_count: u64,
     },
+    /// The effective device residency is lower than what was requested.
+    ///
+    /// This occurs when `DeviceResidency::Cuda` was requested but the
+    /// required GStreamer CUDA elements (`cudaupload`, `cudaconvert`)
+    /// are not available at runtime — the backend silently falls back to
+    /// host-memory decoding.
+    ///
+    /// Emitted once per session start alongside [`DecodeDecision`].
+    ///
+    /// **Action:** install GStreamer >= 1.20 CUDA plugins, or switch to
+    /// a platform-specific provider (`DeviceResidency::Provider`) for
+    /// guaranteed GPU residency.
+    ResidencyDowngrade {
+        feed_id: FeedId,
+        /// What was requested (e.g., "Cuda").
+        requested: String,
+        /// What is actually in effect (e.g., "Host").
+        effective: String,
+    },
 }
 
 /// Reason a feed stopped permanently.
