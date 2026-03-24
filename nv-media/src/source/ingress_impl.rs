@@ -143,7 +143,18 @@ impl MediaIngress for MediaSource {
                         }
                     }
 
-                    self.disconnect_and_reconnect(MediaError::Timeout);
+                    if let Some(delay) = self.disconnect_and_reconnect(MediaError::Timeout) {
+                        // Give the camera hardware time to release the
+                        // failed TLS session before the plain-RTSP attempt.
+                        // Many cameras (e.g. Hikvision) throttle or reject
+                        // rapid successive RTSP DESCRIBE requests.
+                        let cooldown = if self.tls_fallback_active {
+                            delay.max(Duration::from_secs(3))
+                        } else {
+                            delay
+                        };
+                        self.reconnect_deadline = Some(Instant::now() + cooldown);
+                    }
                     // Re-poll to pick up the reconnection state.
                     let _delay = self.poll_bus();
                 }

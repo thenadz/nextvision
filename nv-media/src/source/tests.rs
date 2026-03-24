@@ -350,15 +350,17 @@ fn health_emits_connected_on_stream_started() {
     src.state = SourceState::Reconnecting;
     src.handle_event(MediaEvent::StreamStarted);
     let events = health.drain();
-    // Phase 2A: StreamStarted now emits DecodeDecision + SourceConnected.
+    // StreamStarted emits DecodeDecision + SourceConnected + InsecureRtspSource
+    // (because test_spec() is an explicit rtsp:// URL → AllowInsecure).
     assert_eq!(
         events.len(),
-        2,
-        "expected DecodeDecision + SourceConnected; got: {:?}",
+        3,
+        "expected DecodeDecision + SourceConnected + InsecureRtspSource; got: {:?}",
         events
     );
     assert!(matches!(events[0], HealthEvent::DecodeDecision { .. }));
     assert!(matches!(events[1], HealthEvent::SourceConnected { .. }));
+    assert!(matches!(events[2], HealthEvent::InsecureRtspSource { .. }));
 }
 
 #[test]
@@ -1863,7 +1865,9 @@ fn no_residency_downgrade_for_host_residency() {
 fn liveness_expiry_activates_tls_fallback_for_prefer_tls() {
     use nv_core::security::RtspSecurityPolicy;
 
-    let spec = SourceSpec::rtsp("rtsp://cam/stream");
+    // Use rtsp_tls to force PreferTls (rtsp() now infers AllowInsecure
+    // for explicit rtsp:// URLs).
+    let spec = SourceSpec::rtsp_tls("rtsp://cam/stream");
     // Verify the spec has PreferTls.
     if let SourceSpec::Rtsp { ref security, .. } = spec {
         assert_eq!(*security, RtspSecurityPolicy::PreferTls);
@@ -1903,7 +1907,7 @@ fn liveness_expiry_does_not_activate_tls_fallback_for_allow_insecure() {
 /// health event should be emitted.
 #[test]
 fn tls_fallback_emits_insecure_health_event() {
-    let spec = SourceSpec::rtsp("rtsp://cam/stream");
+    let spec = SourceSpec::rtsp_tls("rtsp://cam/stream");
     let (mut src, _, _, _, health) = started_source_with_health(spec, test_reconnect());
 
     // Simulate TLS fallback having been activated.

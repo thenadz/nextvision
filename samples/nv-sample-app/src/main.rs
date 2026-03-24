@@ -48,7 +48,7 @@ use nv_sample_detection::{DetectorBatchProcessor, DetectorConfig, DetectorStage}
 use nv_core::{CameraMode, SourceSpec};
 use nv_runtime::{
     BackpressurePolicy, BatchConfig, DeviceResidency, FeedConfig, FeedPipeline, FrameInclusion,
-    OutputEnvelope, OutputSink, Runtime,
+    HealthEvent, OutputEnvelope, OutputSink, Runtime,
 };
 
 use crate::cli::Cli;
@@ -274,12 +274,13 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let source = parse_source(uri, args.loop_file);
             let sink = make_sink(ui_state);
             let builder = make_builder()?;
+            let redacted_source = format!("{source:?}");
             let feed_config = build_feed_config(
                 builder, source, sink, args.queue_depth,
                 frame_inclusion, args.decode, device_residency.clone(),
             )?;
             let feed = runtime.add_feed(feed_config)?;
-            info!(feed_index = i, feed_id = %feed.id(), uri, "feed started");
+            info!(feed_index = i, feed_id = %feed.id(), source = redacted_source, "feed started");
             feeds.push(feed);
         }
         Ok(feeds)
@@ -328,6 +329,44 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
             ]))
         })?;
     }
+
+    // Health event logger — logs all health events to tracing so they
+    // appear in Docker logs / stdout without needing an OTel collector.
+    let mut health_rx = runtime_handle.health_subscribe();
+    std::thread::Builder::new()
+        .name("health-logger".into())
+        .spawn(move || {
+            while let Ok(event) = health_rx.blocking_recv() {
+                match &event {
+                    HealthEvent::FrameLag { feed_id, frame_age_ms, frames_lagged } => {
+                        warn!(
+                            feed_id = %feed_id,
+                            frame_age_ms,
+                            frames_lagged,
+                            "frame lag detected"
+                        );
+                    }
+                    HealthEvent::BackpressureDrop { feed_id, frames_dropped } => {
+                        warn!(feed_id = %feed_id, frames_dropped, "backpressure drop");
+                    }
+                    HealthEvent::SourceDisconnected { feed_id, reason } => {
+                        warn!(feed_id = %feed_id, %reason, "source disconnected");
+                    }
+                    HealthEvent::SourceConnected { feed_id } => {
+                        info!(feed_id = %feed_id, "source connected");
+                    }
+                    HealthEvent::FeedStopped { feed_id, reason } => {
+                        info!(feed_id = %feed_id, ?reason, "feed stopped");
+                    }
+                    HealthEvent::FeedRestarting { feed_id, restart_count } => {
+                        warn!(feed_id = %feed_id, restart_count, "feed restarting");
+                    }
+                    _ => {
+                        info!(?event, "health");
+                    }
+                }
+            }
+        })?;
 
     if let Some(state) = ui_state {
         // UI mode: egui window blocks the main thread.

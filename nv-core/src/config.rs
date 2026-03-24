@@ -4,15 +4,16 @@
 //! backoff strategies live here so downstream crates can reference
 //! them without depending on the media or runtime crates.
 
+use std::fmt;
 use std::path::PathBuf;
 
-use crate::security::RtspSecurityPolicy;
+use crate::security::{RtspSecurityPolicy, redact_url};
 
 /// Specification of a video source.
 ///
 /// Defined in `nv-core` (not `nv-media`) to prevent downstream crates
 /// from transitively depending on GStreamer.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum SourceSpec {
     /// An RTSP stream.
     ///
@@ -52,25 +53,53 @@ pub enum SourceSpec {
 impl SourceSpec {
     /// Convenience constructor for an RTSP source with TCP transport.
     ///
-    /// Under the default [`RtspSecurityPolicy::PreferTls`], bare `rtsp://`
-    /// URLs are promoted to `rtsps://` at pipeline construction time.
-    /// Pass an explicit `rtsps://` URL to guarantee TLS, or use
-    /// [`rtsp_insecure`](Self::rtsp_insecure) for cameras without TLS
-    /// support.
+    /// The security policy is inferred from the URL scheme:
+    ///
+    /// - `rtsps://` or no recognized scheme → [`PreferTls`](RtspSecurityPolicy::PreferTls)
+    /// - `rtsp://` → [`AllowInsecure`](RtspSecurityPolicy::AllowInsecure)
+    ///
+    /// An explicit `rtsp://` scheme is treated as a deliberate choice by
+    /// the caller and is **not** promoted to `rtsps://`. Use
+    /// [`rtsp_tls`](Self::rtsp_tls) to force TLS promotion on a bare
+    /// `rtsp://` URL.
     #[must_use]
     pub fn rtsp(url: impl Into<String>) -> Self {
+        let url = url.into();
+        // Explicit rtsp:// means the caller chose plaintext.
+        let security = if url.starts_with("rtsp://") {
+            RtspSecurityPolicy::AllowInsecure
+        } else {
+            // rtsps://, scheme-less, or unknown → try TLS.
+            RtspSecurityPolicy::PreferTls
+        };
+        Self::Rtsp {
+            url,
+            transport: RtspTransport::Tcp,
+            security,
+        }
+    }
+
+    /// Convenience constructor that forces [`PreferTls`](RtspSecurityPolicy::PreferTls).
+    ///
+    /// Unlike [`rtsp()`](Self::rtsp), this promotes bare `rtsp://` URLs to
+    /// `rtsps://` at pipeline construction time. Use this when you know
+    /// the camera supports TLS but the URL was provided without the
+    /// `rtsps://` scheme.
+    #[must_use]
+    pub fn rtsp_tls(url: impl Into<String>) -> Self {
         Self::Rtsp {
             url: url.into(),
             transport: RtspTransport::Tcp,
-            security: RtspSecurityPolicy::default(),
+            security: RtspSecurityPolicy::PreferTls,
         }
     }
 
     /// Convenience constructor for an RTSP source with explicit insecure
-    /// transport (`AllowInsecure`).
+    /// transport ([`AllowInsecure`](RtspSecurityPolicy::AllowInsecure)).
     ///
-    /// Use this for cameras that do not support TLS behind trusted networks.
-    /// A health warning will be emitted when the source starts.
+    /// Equivalent to [`rtsp()`](Self::rtsp) for `rtsp://` URLs. Useful
+    /// when constructing a spec from a variable where you want to
+    /// guarantee `AllowInsecure` regardless of the scheme.
     #[must_use]
     pub fn rtsp_insecure(url: impl Into<String>) -> Self {
         Self::Rtsp {
@@ -108,6 +137,32 @@ impl SourceSpec {
     #[must_use]
     pub fn is_file_nonloop(&self) -> bool {
         matches!(self, Self::File { loop_: false, .. })
+    }
+}
+
+impl fmt::Debug for SourceSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rtsp { url, transport, security } => f
+                .debug_struct("Rtsp")
+                .field("url", &redact_url(url))
+                .field("transport", transport)
+                .field("security", security)
+                .finish(),
+            Self::File { path, loop_ } => f
+                .debug_struct("File")
+                .field("path", path)
+                .field("loop_", loop_)
+                .finish(),
+            Self::V4l2 { device } => f
+                .debug_struct("V4l2")
+                .field("device", device)
+                .finish(),
+            Self::Custom { .. } => f
+                .debug_struct("Custom")
+                .field("pipeline_fragment", &"<redacted>")
+                .finish(),
+        }
     }
 }
 
@@ -200,12 +255,48 @@ mod tests {
     }
 
     #[test]
-    fn rtsp_creates_tcp_spec_with_prefer_tls() {
+    fn rtsp_plain_scheme_infers_allow_insecure() {
         let spec = SourceSpec::rtsp("rtsp://example.com/stream");
         match &spec {
             SourceSpec::Rtsp { url, transport, security } => {
                 assert_eq!(url, "rtsp://example.com/stream");
                 assert_eq!(*transport, RtspTransport::Tcp);
+                assert_eq!(*security, RtspSecurityPolicy::AllowInsecure);
+            }
+            _ => panic!("expected Rtsp variant"),
+        }
+    }
+
+    #[test]
+    fn rtsp_tls_scheme_infers_prefer_tls() {
+        let spec = SourceSpec::rtsp("rtsps://example.com/stream");
+        match &spec {
+            SourceSpec::Rtsp { url, transport, security } => {
+                assert_eq!(url, "rtsps://example.com/stream");
+                assert_eq!(*transport, RtspTransport::Tcp);
+                assert_eq!(*security, RtspSecurityPolicy::PreferTls);
+            }
+            _ => panic!("expected Rtsp variant"),
+        }
+    }
+
+    #[test]
+    fn rtsp_no_scheme_infers_prefer_tls() {
+        let spec = SourceSpec::rtsp("example.com/stream");
+        match &spec {
+            SourceSpec::Rtsp { security, .. } => {
+                assert_eq!(*security, RtspSecurityPolicy::PreferTls);
+            }
+            _ => panic!("expected Rtsp variant"),
+        }
+    }
+
+    #[test]
+    fn rtsp_tls_forces_prefer_tls() {
+        let spec = SourceSpec::rtsp_tls("rtsp://example.com/stream");
+        match &spec {
+            SourceSpec::Rtsp { url, security, .. } => {
+                assert_eq!(url, "rtsp://example.com/stream");
                 assert_eq!(*security, RtspSecurityPolicy::PreferTls);
             }
             _ => panic!("expected Rtsp variant"),
