@@ -306,7 +306,9 @@ pub fn redact_urls_in_string(s: &str) -> String {
     let mut result = s.to_string();
     // Find URL-like patterns and redact them inline.
     for scheme in &["rtsp://", "rtsps://", "http://", "https://"] {
-        while let Some(start) = result.find(scheme) {
+        let mut search_from = 0;
+        while let Some(offset) = result[search_from..].find(scheme) {
+            let start = search_from + offset;
             // Find end of URL: next space or end of string.
             let url_end = result[start..]
                 .find(|c: char| c.is_whitespace() || c == '\'' || c == '"' || c == '>' || c == ')')
@@ -314,7 +316,10 @@ pub fn redact_urls_in_string(s: &str) -> String {
                 .unwrap_or(result.len());
             let url = &result[start..url_end];
             let redacted = redact_url(url);
+            let redacted_len = redacted.len();
             result.replace_range(start..url_end, &redacted);
+            // Advance past the replacement to avoid re-matching the same scheme.
+            search_from = start + redacted_len;
         }
     }
     result
