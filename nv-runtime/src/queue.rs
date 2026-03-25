@@ -35,8 +35,9 @@ pub(crate) enum PushOutcome {
 /// Result from a [`FrameQueue::pop`] call with deadline support.
 #[derive(Debug)]
 pub(crate) enum PopResult {
-    /// A frame was available and returned.
-    Frame(FrameEnvelope),
+    /// A frame was available and returned, along with the time it spent
+    /// waiting in the queue (from push to pop).
+    Frame(FrameEnvelope, std::time::Duration),
     /// The queue was closed or shutdown was requested.
     Closed,
     /// The deadline elapsed with no frame available.
@@ -49,7 +50,7 @@ pub(crate) enum PopResult {
 
 /// Internal mutable state behind the lock.
 struct QueueInner {
-    buf: VecDeque<FrameEnvelope>,
+    buf: VecDeque<(Instant, FrameEnvelope)>,
     closed: bool,
     /// Set by [`wake_consumer()`](FrameQueue::wake_consumer) to signal a
     /// control-plane wake. Cleared by [`pop()`](FrameQueue::pop) when it
@@ -109,9 +110,11 @@ impl FrameQueue {
         }
         inner.total_received += 1;
 
+        let now = Instant::now();
+
         // Fast path: space available.
         if inner.buf.len() < self.depth {
-            inner.buf.push_back(frame);
+            inner.buf.push_back((now, frame));
             self.not_empty.notify_one();
             return PushOutcome::Accepted;
         }
@@ -121,7 +124,7 @@ impl FrameQueue {
             BackpressurePolicy::DropOldest { .. } => {
                 inner.buf.pop_front();
                 inner.total_dropped += 1;
-                inner.buf.push_back(frame);
+                inner.buf.push_back((now, frame));
                 self.not_empty.notify_one();
                 PushOutcome::DroppedOldest
             }
@@ -137,7 +140,7 @@ impl FrameQueue {
                 if inner.closed {
                     return PushOutcome::Rejected;
                 }
-                inner.buf.push_back(frame);
+                inner.buf.push_back((now, frame));
                 self.not_empty.notify_one();
                 PushOutcome::Accepted
             }
@@ -158,9 +161,10 @@ impl FrameQueue {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             // Highest priority: deliver any buffered frame.
-            if let Some(frame) = inner.buf.pop_front() {
+            if let Some((push_time, frame)) = inner.buf.pop_front() {
                 self.not_full.notify_one();
-                return PopResult::Frame(frame);
+                let hold_time = push_time.elapsed();
+                return PopResult::Frame(frame, hold_time);
             }
             // Terminal: closed or shutdown.
             if inner.closed || shutdown.load(Ordering::Relaxed) {
@@ -290,7 +294,7 @@ mod tests {
         assert_eq!(q.len(), 2);
 
         let shutdown = AtomicBool::new(false);
-        let PopResult::Frame(f) = q.pop(&shutdown, None) else {
+        let PopResult::Frame(f, _hold) = q.pop(&shutdown, None) else {
             panic!("expected frame");
         };
         assert_eq!(f.seq(), 0);
@@ -307,7 +311,7 @@ mod tests {
 
         let shutdown = AtomicBool::new(false);
         // Frame 0 was evicted; first available is frame 1.
-        let PopResult::Frame(f) = q.pop(&shutdown, None) else {
+        let PopResult::Frame(f, _hold) = q.pop(&shutdown, None) else {
             panic!("expected frame");
         };
         assert_eq!(f.seq(), 1);
@@ -327,7 +331,7 @@ mod tests {
 
         let shutdown = AtomicBool::new(false);
         // Frame 2 was rejected; queue still has 0 and 1.
-        let PopResult::Frame(f) = q.pop(&shutdown, None) else {
+        let PopResult::Frame(f, _hold) = q.pop(&shutdown, None) else {
             panic!("expected frame");
         };
         assert_eq!(f.seq(), 0);
@@ -392,7 +396,7 @@ mod tests {
 
         // Consumer pops, freeing space.
         let shutdown = AtomicBool::new(false);
-        let PopResult::Frame(_) = q.pop(&shutdown, None) else {
+        let PopResult::Frame(_, _) = q.pop(&shutdown, None) else {
             panic!("expected frame");
         };
 
@@ -465,5 +469,23 @@ mod tests {
         let _ = q.pop(&shutdown, None);
         let _ = q.pop(&shutdown, None);
         assert_eq!(q.depth(), 0);
+    }
+
+    #[test]
+    fn pop_returns_nonzero_hold_time() {
+        let q = FrameQueue::new(BackpressurePolicy::DropOldest { queue_depth: 4 });
+        q.push(test_frame(0));
+
+        // Small delay so the hold time is measurably > 0.
+        std::thread::sleep(Duration::from_millis(5));
+
+        let shutdown = AtomicBool::new(false);
+        let PopResult::Frame(_f, hold) = q.pop(&shutdown, None) else {
+            panic!("expected frame");
+        };
+        assert!(
+            hold >= Duration::from_millis(4),
+            "hold time should be >= 4ms, got {hold:?}"
+        );
     }
 }

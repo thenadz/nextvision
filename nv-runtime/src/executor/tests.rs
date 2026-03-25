@@ -208,7 +208,7 @@ fn admission_rejection_emits_health_event() {
         2,
         128,
     );
-    let (_output, health_events) = exec.process_frame(&frame);
+    let (_output, health_events) = exec.process_frame(&frame, std::time::Duration::ZERO);
 
     // 5 tracks, cap 3: first 3 admitted, last 2 rejected (coalesced into one event).
     let rejection_events: Vec<_> = health_events
@@ -275,7 +275,7 @@ fn process_frame_propagates_stage_metadata_to_output() {
         2,
         128,
     );
-    let (output, _health) = exec.process_frame(&frame);
+    let (output, _health) = exec.process_frame(&frame, std::time::Duration::ZERO);
     let out = output.expect("should produce output");
 
     // The stage's typed artifact should appear in the output metadata.
@@ -472,7 +472,7 @@ fn missing_track_from_authoritative_set_triggers_track_ended() {
         2,
         128,
     );
-    let (out1, _) = exec.process_frame(&frame1);
+    let (out1, _) = exec.process_frame(&frame1, std::time::Duration::ZERO);
     assert!(out1.is_some());
     assert_eq!(exec.temporal.track_count(), 2);
 
@@ -489,7 +489,7 @@ fn missing_track_from_authoritative_set_triggers_track_ended() {
         2,
         128,
     );
-    let (out2, _) = exec.process_frame(&frame2);
+    let (out2, _) = exec.process_frame(&frame2, std::time::Duration::ZERO);
     assert!(out2.is_some());
     // B should have been removed via end_track.
     assert_eq!(
@@ -548,7 +548,7 @@ fn no_false_track_ended_when_no_stage_produced_tracks() {
         2,
         128,
     );
-    let (out, _) = exec.process_frame(&frame);
+    let (out, _) = exec.process_frame(&frame, std::time::Duration::ZERO);
     assert!(out.is_some());
     // Both tracks should survive — no stage claimed authoritativeness.
     assert_eq!(
@@ -587,7 +587,7 @@ fn explicit_lost_uses_track_lost_not_track_ended() {
         2,
         128,
     );
-    let (out, _) = exec.process_frame(&frame);
+    let (out, _) = exec.process_frame(&frame, std::time::Duration::ZERO);
     assert!(out.is_some());
 
     // Track A was committed as Lost — commit_track closes segment
@@ -659,7 +659,7 @@ fn fixed_camera_provenance_shows_stable() {
         2,
         128,
     );
-    let (output, health) = exec.process_frame(&frame);
+    let (output, health) = exec.process_frame(&frame, std::time::Duration::ZERO);
     assert!(health.is_empty());
     let out = output.expect("should produce output");
 
@@ -713,7 +713,7 @@ fn observed_camera_with_provider_populates_provenance() {
         2,
         128,
     );
-    let (output, _) = exec.process_frame(&frame);
+    let (output, _) = exec.process_frame(&frame, std::time::Duration::ZERO);
     let out = output.expect("should produce output");
 
     let vp = &out.provenance.view_provenance;
@@ -772,7 +772,7 @@ fn view_degradation_reflected_in_output() {
         2,
         128,
     );
-    exec.process_frame(&f1);
+    exec.process_frame(&f1, std::time::Duration::ZERO);
 
     // Second frame: the policy now has prev_ptz and current_ptz, and
     // the delta (2.0) is small → Degrade.
@@ -784,7 +784,7 @@ fn view_degradation_reflected_in_output() {
         2,
         128,
     );
-    let (output, _) = exec.process_frame(&f2);
+    let (output, _) = exec.process_frame(&f2, std::time::Duration::ZERO);
     let out = output.expect("should produce output");
 
     // Stability score should have decreased from initial.
@@ -852,7 +852,7 @@ fn stages_execute_in_declared_order() {
         2,
         128,
     );
-    let (output, _) = exec.process_frame(&frame);
+    let (output, _) = exec.process_frame(&frame, std::time::Duration::ZERO);
     let out = output.expect("should produce output");
 
     // Signals are appended in execution order.
@@ -889,7 +889,7 @@ fn detector_output_visible_to_tracker() {
         4,
         128,
     );
-    let (output, _) = exec.process_frame(&frame);
+    let (output, _) = exec.process_frame(&frame, std::time::Duration::ZERO);
     let out = output.expect("should produce output");
 
     assert_eq!(
@@ -964,7 +964,7 @@ fn full_pipeline_detector_tracker_temporal_sink() {
         4,
         128,
     );
-    let (output, _) = exec.process_frame(&frame);
+    let (output, _) = exec.process_frame(&frame, std::time::Duration::ZERO);
     let out = output.expect("should produce output");
 
     // Detections and tracks should propagate to output.
@@ -1065,7 +1065,7 @@ fn stage_failure_drops_frame_skips_remaining() {
         4,
         128,
     );
-    let (output, health) = exec.process_frame(&frame);
+    let (output, health) = exec.process_frame(&frame, std::time::Duration::ZERO);
 
     // Frame should be dropped.
     assert!(output.is_none(), "failed stage should drop the frame");
@@ -1109,7 +1109,7 @@ fn stage_error_provenance_records_failure() {
         4,
         128,
     );
-    let (output, _) = exec.process_frame(&frame);
+    let (output, _) = exec.process_frame(&frame, std::time::Duration::ZERO);
     // Output is None (frame dropped), but we can verify through
     // health events that the executor processed both stages.
     assert!(output.is_none());
@@ -1146,7 +1146,7 @@ fn output_propagation_across_frames() {
             4,
             128,
         );
-        let (output, _) = exec.process_frame(&frame);
+        let (output, _) = exec.process_frame(&frame, std::time::Duration::ZERO);
         let out = output.expect("should produce output");
         assert_eq!(
             out.detections.len(),
@@ -1207,7 +1207,7 @@ fn feed_local_state_preserved_across_frames() {
             2,
             128,
         );
-        let (output, _) = exec.process_frame(&frame);
+        let (output, _) = exec.process_frame(&frame, std::time::Duration::ZERO);
         let out = output.expect("should produce output");
         let signal = out.signals.iter().find(|s| s.name == "call_count").unwrap();
         match signal.value {
@@ -1274,8 +1274,8 @@ fn two_independent_executors_have_isolated_state() {
         128,
     );
 
-    let (out_a, _) = exec_a.process_frame(&frame_a);
-    let (out_b, _) = exec_b.process_frame(&frame_b);
+    let (out_a, _) = exec_a.process_frame(&frame_a, std::time::Duration::ZERO);
+    let (out_b, _) = exec_b.process_frame(&frame_b, std::time::Duration::ZERO);
 
     let a = out_a.expect("feed A output");
     let b = out_b.expect("feed B output");
@@ -1330,7 +1330,7 @@ fn pipeline_with_stage_pipeline_builder() {
         4,
         128,
     );
-    let (output, _) = exec.process_frame(&frame);
+    let (output, _) = exec.process_frame(&frame, std::time::Duration::ZERO);
     let out = output.expect("should produce output");
     assert_eq!(out.detections.len(), 4);
     assert_eq!(out.tracks.len(), 4);
@@ -1353,7 +1353,7 @@ fn frame_inclusion_never_produces_no_frame() {
         2,
         128,
     );
-    let (output, _) = exec.process_frame(&frame);
+    let (output, _) = exec.process_frame(&frame, std::time::Duration::ZERO);
     let out = output.expect("should produce output");
     assert!(out.frame.is_none());
 }
@@ -1382,7 +1382,7 @@ fn frame_inclusion_always_includes_frame() {
         2,
         128,
     );
-    let (output, _) = exec.process_frame(&frame);
+    let (output, _) = exec.process_frame(&frame, std::time::Duration::ZERO);
     let out = output.expect("should produce output");
     assert!(out.frame.is_some());
     // Zero-copy: same backing data (Arc bump, not pixel copy).
@@ -1614,7 +1614,7 @@ fn coordinator_shutdown_expected_emits_no_health() {
         2,
         128,
     );
-    let (_output, health_events) = exec.process_frame(&frame);
+    let (_output, health_events) = exec.process_frame(&frame, std::time::Duration::ZERO);
 
     let stage_errors: Vec<_> = health_events
         .iter()
@@ -1685,7 +1685,7 @@ fn coordinator_shutdown_unexpected_emits_one_stage_error() {
         2,
         128,
     );
-    let (_output, health_events) = exec.process_frame(&frame);
+    let (_output, health_events) = exec.process_frame(&frame, std::time::Duration::ZERO);
 
     let stage_errors: Vec<_> = health_events
         .iter()
@@ -1783,7 +1783,7 @@ fn coordinator_shutdown_unexpected_deduplicates() {
     );
 
     // First frame: should emit the StageError.
-    let (_, h1) = exec.process_frame(&frame1);
+    let (_, h1) = exec.process_frame(&frame1, std::time::Duration::ZERO);
     let errs1: Vec<_> = h1
         .iter()
         .filter(|e| matches!(e, HealthEvent::StageError { .. }))
@@ -1791,7 +1791,7 @@ fn coordinator_shutdown_unexpected_deduplicates() {
     assert_eq!(errs1.len(), 1, "first frame should emit one StageError");
 
     // Second frame: should NOT emit a duplicate.
-    let (_, h2) = exec.process_frame(&frame2);
+    let (_, h2) = exec.process_frame(&frame2, std::time::Duration::ZERO);
     let errs2: Vec<_> = h2
         .iter()
         .filter(|e| matches!(e, HealthEvent::StageError { .. }))
@@ -1965,7 +1965,7 @@ fn timeout_coalescing_through_process_frame() {
     };
 
     // --- Frame 1: first timeout, should emit BatchTimeout immediately ---
-    let (_, h1) = exec.process_frame(&make_frame(0));
+    let (_, h1) = exec.process_frame(&make_frame(0), std::time::Duration::ZERO);
     let timeout_events_1: Vec<_> = h1
         .iter()
         .filter(|e| matches!(e, HealthEvent::BatchTimeout { .. }))
@@ -1990,7 +1990,7 @@ fn timeout_coalescing_through_process_frame() {
 
     // --- Frame 2: rapid second timeout within throttle window ---
     // Should NOT emit an event (coalesced into accumulator).
-    let (_, h2) = exec.process_frame(&make_frame(1));
+    let (_, h2) = exec.process_frame(&make_frame(1), std::time::Duration::ZERO);
     let timeout_events_2: Vec<_> = h2
         .iter()
         .filter(|e| matches!(e, HealthEvent::BatchTimeout { .. }))
@@ -2012,7 +2012,7 @@ fn timeout_coalescing_through_process_frame() {
     // (timed-out items from above may still be processing).
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    let (output, h3) = exec.process_frame(&make_frame(2));
+    let (output, h3) = exec.process_frame(&make_frame(2), std::time::Duration::ZERO);
     assert!(
         output.is_some(),
         "frame should succeed after processor speeds up"
@@ -2083,7 +2083,7 @@ fn target_fps_resolves_from_source_cadence_not_wall_clock() {
     // Process all frames. Even though we're not inserting any wall-clock
     // delay, the source timestamps carry the cadence information.
     for f in &frames {
-        let _ = exec.process_frame(f);
+        let _ = exec.process_frame(f, std::time::Duration::ZERO);
     }
 
     // After 35 frames (>30 warmup), TargetFps should be resolved.
@@ -2130,7 +2130,7 @@ fn target_fps_unaffected_by_processing_stall() {
         if i == 0 {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        let _ = exec.process_frame(f);
+        let _ = exec.process_frame(f, std::time::Duration::ZERO);
     }
 
     // round(25/5) = 5
@@ -2164,7 +2164,7 @@ fn target_fps_uses_fallback_during_warmup() {
     );
 
     for f in &frames {
-        let _ = exec.process_frame(f);
+        let _ = exec.process_frame(f, std::time::Duration::ZERO);
     }
 
     // Should still be TargetFps (unresolved).
@@ -2173,4 +2173,195 @@ fn target_fps_uses_fallback_during_warmup() {
         "should remain TargetFps during warmup, got {:?}",
         exec.frame_inclusion,
     );
+}
+
+// ------------------------------------------------------------------
+// Frame-lag instrumentation tests
+// ------------------------------------------------------------------
+
+/// Create a frame with a specific wall-clock timestamp (for lag tests).
+fn frame_with_wall_ts(feed_id: FeedId, seq: u64, wall_ts: nv_core::WallTs) -> nv_frame::FrameEnvelope {
+    nv_frame::FrameEnvelope::new_owned(
+        feed_id,
+        seq,
+        nv_core::timestamp::MonotonicTs::from_nanos(seq * 33_333_333),
+        wall_ts,
+        2,
+        2,
+        nv_frame::PixelFormat::Gray8,
+        2,
+        vec![128; 4],
+        nv_core::TypedMetadata::new(),
+    )
+}
+
+#[test]
+fn frame_lag_emitted_when_frame_is_stale() {
+    let mut exec = PipelineExecutor::new(
+        FeedId::new(42),
+        Vec::new(),
+        None,
+        Vec::new(),
+        RetentionPolicy::default(),
+        CameraMode::Fixed,
+        None,
+        Box::new(DefaultEpochPolicy::default()),
+        FrameInclusion::Never,
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    // Create a frame stamped 5 seconds in the past (well above the 2s threshold).
+    let stale_wall = nv_core::WallTs::from_micros(
+        nv_core::WallTs::now().as_micros() - 5_000_000,
+    );
+    let frame = frame_with_wall_ts(FeedId::new(42), 0, stale_wall);
+
+    let (_output, health) = exec.process_frame(&frame, std::time::Duration::ZERO);
+
+    let lag_events: Vec<_> = health
+        .iter()
+        .filter(|e| matches!(e, HealthEvent::FrameLag { .. }))
+        .collect();
+    assert_eq!(lag_events.len(), 1, "expected one FrameLag event, got {lag_events:?}");
+
+    match &lag_events[0] {
+        HealthEvent::FrameLag { feed_id, frame_age_ms, frames_lagged } => {
+            assert_eq!(*feed_id, FeedId::new(42));
+            assert!(*frame_age_ms >= 4_000, "frame_age_ms should be >= 4000, got {frame_age_ms}");
+            assert_eq!(*frames_lagged, 1);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn no_frame_lag_for_fresh_frame() {
+    let mut exec = PipelineExecutor::new(
+        FeedId::new(42),
+        Vec::new(),
+        None,
+        Vec::new(),
+        RetentionPolicy::default(),
+        CameraMode::Fixed,
+        None,
+        Box::new(DefaultEpochPolicy::default()),
+        FrameInclusion::Never,
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    // Create a frame stamped right now — should NOT trigger FrameLag.
+    let fresh_wall = nv_core::WallTs::now();
+    let frame = frame_with_wall_ts(FeedId::new(42), 0, fresh_wall);
+
+    let (_output, health) = exec.process_frame(&frame, std::time::Duration::ZERO);
+
+    let lag_events: Vec<_> = health
+        .iter()
+        .filter(|e| matches!(e, HealthEvent::FrameLag { .. }))
+        .collect();
+    assert!(lag_events.is_empty(), "fresh frame should not trigger FrameLag, got {lag_events:?}");
+}
+
+#[test]
+fn no_frame_lag_for_zero_wall_ts() {
+    let mut exec = PipelineExecutor::new(
+        FeedId::new(42),
+        Vec::new(),
+        None,
+        Vec::new(),
+        RetentionPolicy::default(),
+        CameraMode::Fixed,
+        None,
+        Box::new(DefaultEpochPolicy::default()),
+        FrameInclusion::Never,
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    // Frame with wall_ts=0 sentinel — should NOT trigger FrameLag.
+    let frame = nv_test_util::synthetic::solid_gray(
+        FeedId::new(42), 0, nv_core::timestamp::MonotonicTs::from_nanos(1_000_000), 2, 2, 128,
+    );
+
+    let (_output, health) = exec.process_frame(&frame, std::time::Duration::ZERO);
+    let lag_events: Vec<_> = health
+        .iter()
+        .filter(|e| matches!(e, HealthEvent::FrameLag { .. }))
+        .collect();
+    assert!(lag_events.is_empty(), "zero wall_ts sentinel should not trigger FrameLag");
+}
+
+#[test]
+fn frame_lag_coalesced_within_throttle_window() {
+    let mut exec = PipelineExecutor::new(
+        FeedId::new(42),
+        Vec::new(),
+        None,
+        Vec::new(),
+        RetentionPolicy::default(),
+        CameraMode::Fixed,
+        None,
+        Box::new(DefaultEpochPolicy::default()),
+        FrameInclusion::Never,
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    let stale_wall = nv_core::WallTs::from_micros(
+        nv_core::WallTs::now().as_micros() - 5_000_000,
+    );
+
+    // First stale frame — should emit FrameLag.
+    let f1 = frame_with_wall_ts(FeedId::new(42), 0, stale_wall);
+    let (_, h1) = exec.process_frame(&f1, std::time::Duration::ZERO);
+    assert_eq!(
+        h1.iter().filter(|e| matches!(e, HealthEvent::FrameLag { .. })).count(),
+        1,
+        "first stale frame should emit FrameLag"
+    );
+
+    // Second stale frame immediately after — should be coalesced (no event).
+    let f2 = frame_with_wall_ts(FeedId::new(42), 1, stale_wall);
+    let (_, h2) = exec.process_frame(&f2, std::time::Duration::ZERO);
+    assert_eq!(
+        h2.iter().filter(|e| matches!(e, HealthEvent::FrameLag { .. })).count(),
+        0,
+        "second stale frame within throttle window should be coalesced"
+    );
+
+    // Verify the accumulator tracked it.
+    assert_eq!(exec.frame_lag_count, 1, "one coalesced lag in accumulator");
+}
+
+#[test]
+fn provenance_includes_frame_age_and_queue_hold_time() {
+    let mut exec = PipelineExecutor::new(
+        FeedId::new(42),
+        Vec::new(),
+        None,
+        Vec::new(),
+        RetentionPolicy::default(),
+        CameraMode::Fixed,
+        None,
+        Box::new(DefaultEpochPolicy::default()),
+        FrameInclusion::Never,
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    // Frame stamped 100ms ago — under the 2s lag threshold but has a
+    // measurable frame_age.
+    let wall = nv_core::WallTs::from_micros(
+        nv_core::WallTs::now().as_micros() - 100_000,
+    );
+    let frame = frame_with_wall_ts(FeedId::new(42), 0, wall);
+
+    // Simulate 5ms queue hold time.
+    let hold = std::time::Duration::from_millis(5);
+    let (output, _) = exec.process_frame(&frame, hold);
+    let out = output.expect("should produce output");
+
+    // frame_age should be present and ~100ms.
+    let age = out.provenance.frame_age.expect("frame_age should be Some for non-zero wall_ts");
+    assert!(age.as_nanos() >= 50_000_000, "frame_age should be >= 50ms, got {:?}", age);
+
+    // queue_hold_time should match what we passed in.
+    assert_eq!(out.provenance.queue_hold_time, hold);
 }

@@ -2971,6 +2971,7 @@ dependencies = [
  "hostname",
  "minifb",
  "nv-core",
+ "nv-frame",
  "nv-jetson",
  "nv-media",
  "nv-metrics",

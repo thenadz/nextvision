@@ -102,6 +102,47 @@ fn tracker_config(args: &Cli) -> TrackerConfig {
     }
 }
 
+/// Create a batch processor, using NVMM-native preprocessing on Jetson
+/// when the `jetson-nvmm` feature is active and GPU inference is enabled.
+///
+/// On Jetson, NVMM frames arrive as device-resident unified memory
+/// buffers. The default host preprocessor would trigger a full GPU→CPU
+/// DMA copy per frame, pinning NVMM surfaces and starving the hardware
+/// decoder's output buffer pool. The NVMM preprocessor reads directly
+/// from unified memory, eliminating that bottleneck.
+fn create_batch_processor(args: &Cli) -> DetectorBatchProcessor {
+    let config = detector_config(args);
+
+    #[cfg(feature = "jetson-nvmm")]
+    if args.gpu {
+        info!("using NVMM-native batch preprocessor (zero-copy unified memory)");
+        let policy = config.effective_host_fallback();
+        let preprocessor = Box::new(crate::mode::NvmmBatchPreprocessor::new(
+            nv_core::id::StageId("sample-detector-batch"),
+            policy,
+        ));
+        return DetectorBatchProcessor::with_preprocessor(config, preprocessor);
+    }
+
+    DetectorBatchProcessor::new(config)
+}
+
+/// Create a detector stage, using NVMM-native preprocessing on Jetson
+/// when the `jetson-nvmm` feature is active and GPU inference is enabled.
+fn create_detector_stage(config: &DetectorConfig) -> DetectorStage {
+    #[cfg(feature = "jetson-nvmm")]
+    if config.gpu {
+        let policy = config.effective_host_fallback();
+        let preprocessor = Box::new(crate::mode::NvmmPreprocessor::new(
+            nv_core::id::StageId("sample-detector"),
+            policy,
+        ));
+        return DetectorStage::with_preprocessor(config.clone(), preprocessor);
+    }
+
+    DetectorStage::new(config.clone())
+}
+
 /// CUDA JIT compilation on first run can take 30+ seconds.
 /// Allow a generous timeout for the initial inference.
 const GPU_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
@@ -298,7 +339,7 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let gpu_timeout = if args.gpu { Some(GPU_STARTUP_TIMEOUT) } else { None };
 
         let batch_hdl = runtime.create_batch(
-            Box::new(DetectorBatchProcessor::new(detector_config(&args))),
+            Box::new(create_batch_processor(&args)),
             BatchConfig {
                 max_batch_size: args.batch_size,
                 max_latency: Duration::from_millis(args.batch_latency_ms),
@@ -323,8 +364,9 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let det_cfg = detector_config(&args);
         let trk_cfg = tracker_config(&args);
         feeds = register_feeds(&runtime, &args, &ui_state, &make_sink, &|| {
+            let detector = create_detector_stage(&det_cfg);
             Ok(FeedConfig::builder().stages(vec![
-                Box::new(DetectorStage::new(det_cfg.clone())),
+                Box::new(detector),
                 Box::new(TrackerStage::new(trk_cfg.clone())),
             ]))
         })?;

@@ -19,8 +19,8 @@ use crate::provenance::{
 };
 
 use super::{
-    BATCH_IN_FLIGHT_THROTTLE, BATCH_REJECTION_THROTTLE, BATCH_TIMEOUT_THROTTLE, PipelineExecutor,
-    instant_to_ts_impl,
+    BATCH_IN_FLIGHT_THROTTLE, BATCH_REJECTION_THROTTLE, BATCH_TIMEOUT_THROTTLE,
+    FRAME_LAG_THRESHOLD_MS, FRAME_LAG_THROTTLE, PipelineExecutor, instant_to_ts_impl,
 };
 
 /// Number of frames to observe before resolving [`FrameInclusion::TargetFps`]
@@ -164,11 +164,52 @@ impl PipelineExecutor {
     pub fn process_frame(
         &mut self,
         frame: &FrameEnvelope,
+        queue_hold_time: std::time::Duration,
     ) -> (Option<OutputEnvelope>, Vec<HealthEvent>) {
         let t_pipeline_start = Instant::now();
         let frame_receive_ts = self.instant_to_ts(t_pipeline_start);
 
+        // Compute wall-clock age: how stale is this frame?
+        // Skip if wall_ts is zero (sentinel for "no wall timestamp").
+        let frame_wall_micros = frame.wall_ts().as_micros();
+        let frame_age = if frame_wall_micros > 0 {
+            let wall_now = nv_core::timestamp::WallTs::now();
+            let age_micros = wall_now.as_micros().saturating_sub(frame_wall_micros);
+            if age_micros > 0 {
+                Some(Duration::from_nanos(age_micros as u64 * 1_000))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let mut health_events = Vec::new();
+
+        // --- Frame lag detection ---
+        if let Some(age) = frame_age {
+            let age_ms = age.as_nanos() / 1_000_000;
+            if age_ms >= FRAME_LAG_THRESHOLD_MS as u64 {
+                self.frame_lag_count += 1;
+                self.frame_lag_peak_age_ms = self.frame_lag_peak_age_ms.max(age_ms);
+                let now = Instant::now();
+                let should_emit = self
+                    .last_frame_lag_event
+                    .is_none_or(|t| now.duration_since(t) >= FRAME_LAG_THROTTLE);
+                if should_emit {
+                    let count = self.frame_lag_count;
+                    let peak = self.frame_lag_peak_age_ms;
+                    self.frame_lag_count = 0;
+                    self.frame_lag_peak_age_ms = 0;
+                    self.last_frame_lag_event = Some(now);
+                    health_events.push(HealthEvent::FrameLag {
+                        feed_id: self.feed_id,
+                        frame_age_ms: peak,
+                        frames_lagged: count,
+                    });
+                }
+            }
+        }
 
         // --- View orchestration (Issue 5) ---
         let (motion_source, epoch_decision) = self.update_view(frame, &mut health_events);
@@ -565,6 +606,8 @@ impl PipelineExecutor {
                 frame_receive_ts,
                 pipeline_complete_ts,
                 total_latency,
+                frame_age,
+                queue_hold_time,
                 frame_included: include_frame,
             },
             metadata: artifacts.stage_artifacts,

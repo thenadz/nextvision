@@ -162,6 +162,26 @@ pub enum HealthEvent {
         frames_dropped: u64,
     },
 
+    /// Frames are being processed with significant wall-clock staleness.
+    ///
+    /// Emitted when the age of a frame at processing time (wall-clock
+    /// now minus the wall-clock timestamp assigned at media bridge)
+    /// exceeds a threshold, indicating the consumer is falling behind
+    /// the source — typically due to buffer-pool starvation,
+    /// inference backlog, or TCP accumulation.
+    ///
+    /// Events are coalesced: under sustained lag, the executor emits
+    /// one event per throttle window (1 second) with `frames_lagged`
+    /// reflecting the number of stale frames in that window.
+    FrameLag {
+        feed_id: FeedId,
+        /// Frame age of the most recent stale frame, in milliseconds.
+        frame_age_ms: u64,
+        /// Number of frames exceeding the threshold since the last
+        /// `FrameLag` event (per-event delta).
+        frames_lagged: u64,
+    },
+
     /// The view epoch changed (camera discontinuity detected).
     ViewEpochChanged {
         feed_id: FeedId,

@@ -310,6 +310,7 @@ pub(crate) struct HealthCounters {
     batch_submission_rejected: Counter<u64>,
     batch_timeouts: Counter<u64>,
     batch_in_flight_exceeded: Counter<u64>,
+    frame_lag_events: Counter<u64>,
 }
 
 impl HealthCounters {
@@ -386,6 +387,10 @@ impl HealthCounters {
             batch_in_flight_exceeded: meter
                 .u64_counter("nv.health.batch_in_flight_exceeded")
                 .with_description("Batch submissions rejected (in-flight cap)")
+                .build(),
+            frame_lag_events: meter
+                .u64_counter("nv.health.frame_lag_events")
+                .with_description("Frames processed with excessive wall-clock staleness")
                 .build(),
         }
     }
@@ -470,6 +475,9 @@ impl HealthCounters {
             HealthEvent::ResidencyDowngrade { .. } | HealthEvent::InsecureRtspSource { .. } => {
                 // Informational — no counter needed. Operators observe this
                 // via health event subscribers or logs.
+            }
+            HealthEvent::FrameLag { feed_id, frames_lagged, .. } => {
+                self.frame_lag_events.add(*frames_lagged, &[KeyValue::new("feed_id", feed_id.to_string())]);
             }
         }
     }

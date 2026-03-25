@@ -93,6 +93,16 @@ const BATCH_TIMEOUT_THROTTLE: std::time::Duration = std::time::Duration::from_se
 /// in a single coalesced event per window.
 const BATCH_IN_FLIGHT_THROTTLE: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// Minimum interval between `FrameLag` health events per feed.
+/// Under sustained frame staleness, lagging frames are accumulated
+/// and reported in a single coalesced event per window.
+const FRAME_LAG_THROTTLE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Frame age threshold (in milliseconds) above which a frame is
+/// considered stale and a `FrameLag` health event is accumulated.
+/// Frames younger than this are not flagged.
+const FRAME_LAG_THRESHOLD_MS: u64 = 2_000;
+
 /// Per-feed pipeline executor.
 ///
 /// Owns stages, temporal store, view state, and (optionally) the
@@ -166,6 +176,14 @@ pub(crate) struct PipelineExecutor {
     /// Whether we've already emitted a health event for unexpected
     /// coordinator loss. Prevents per-frame storms.
     pub(super) coordinator_loss_emitted: bool,
+    /// Throttle state for FrameLag health events:
+    /// accumulated stale-frame count since last emission.
+    pub(super) frame_lag_count: u64,
+    /// Frame age of the most recent stale frame (for the current throttle
+    /// window). Reported in the coalesced event.
+    pub(super) frame_lag_peak_age_ms: u64,
+    /// Last time a FrameLag event was emitted.
+    pub(super) last_frame_lag_event: Option<Instant>,
 }
 
 impl PipelineExecutor {
@@ -230,6 +248,9 @@ impl PipelineExecutor {
             last_batch_in_flight_rejection_event: None,
             feed_shutdown,
             coordinator_loss_emitted: false,
+            frame_lag_count: 0,
+            frame_lag_peak_age_ms: 0,
+            last_frame_lag_event: None,
         }
     }
 

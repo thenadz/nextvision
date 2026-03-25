@@ -508,8 +508,8 @@ impl FeedWorker {
             // the source's tick hint. None → wait indefinitely.
             let deadline = next_tick_hint.map(|d| Instant::now() + d);
             let pop_result = queue.pop(&self.shared.shutdown, deadline);
-            let frame = match pop_result {
-                PopResult::Frame(f) => f,
+            let (frame, queue_hold_time) = match pop_result {
+                PopResult::Frame(f, hold) => (f, hold),
                 PopResult::Closed => {
                     // Queue closed (EOS) or shutdown.
                     if self.shared.shutdown.load(Ordering::Relaxed) {
@@ -535,7 +535,7 @@ impl FeedWorker {
             };
 
             // Run the pipeline.
-            let (maybe_output, health_events) = self.executor.process_frame(&frame);
+            let (maybe_output, health_events) = self.executor.process_frame(&frame, queue_hold_time);
 
             // Check if any stage panicked.
             let had_panic = health_events

@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 nv-core.workspace = true
+nv-frame.workspace = true
 nv-perception.workspace = true
 nv-runtime.workspace = true
 nv-media.workspace = true

@@ -575,6 +575,8 @@ mod tests {
                 frame_receive_ts: MonotonicTs::from_nanos(0),
                 pipeline_complete_ts: MonotonicTs::from_nanos(0),
                 total_latency: nv_core::Duration::from_nanos(0),
+                frame_age: None,
+                queue_hold_time: std::time::Duration::ZERO,
                 frame_included: false,
             },
             metadata: TypedMetadata::new(),

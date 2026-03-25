@@ -396,11 +396,31 @@ impl MediaSource {
     /// Returns `Ok(delay)` if another attempt is allowed, or `Err` if the
     /// reconnection budget is exhausted.
     pub(super) fn initiate_reconnect(&mut self) -> Result<Duration, MediaError> {
-        // Tear down current session.
-        if let Some(ref mut session) = self.session {
-            let _ = session.stop();
+        // Move the old session to a background thread for teardown.
+        // GStreamer's set_state(Null) can block for tens of seconds when
+        // the RTSP TCP connection is dead (rtspsrc sends TEARDOWN and
+        // waits for TCP retransmission timeouts). Doing this off-thread
+        // keeps the feed loop responsive so reconnection can proceed.
+        if let Some(session) = self.session.take() {
+            let feed_id = self.feed_id;
+            if std::thread::Builder::new()
+                .name(format!("nv-teardown-{feed_id}"))
+                .spawn(move || {
+                    // Explicit stop + implicit Drop both happen off-thread.
+                    drop(session);
+                })
+                .is_err()
+            {
+                // Thread spawn failed (extremely rare). The session is
+                // already moved into the closure that was never started,
+                // so it was dropped in-place — stop() runs here on the
+                // current thread as a fallback (may block).
+                tracing::warn!(
+                    feed_id = %feed_id,
+                    "failed to spawn teardown thread — session dropped in-place",
+                );
+            }
         }
-        self.session = None;
 
         if !self.reconnect.can_retry() {
             return Err(MediaError::Unsupported {

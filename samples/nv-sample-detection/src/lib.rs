@@ -62,5 +62,5 @@ pub use preprocess::{
 pub use stage::DetectorStage;
 
 // Re-export helpers for testing and advanced use.
-pub use letterbox::{LetterboxInfo, letterbox_preprocess};
+pub use letterbox::{LetterboxInfo, letterbox_preprocess, letterbox_preprocess_into};
 pub use postprocess::decode_end2end_output;

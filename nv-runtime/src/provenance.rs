@@ -31,6 +31,23 @@ pub struct Provenance {
     pub pipeline_complete_ts: MonotonicTs,
     /// Total pipeline latency (receive → complete).
     pub total_latency: Duration,
+    /// Wall-clock age of the frame at processing time.
+    ///
+    /// Computed as `WallTs::now() - frame.wall_ts()` when the frame
+    /// enters pipeline processing. A large value indicates the frame
+    /// was stale before the executor even touched it — typically due
+    /// to buffer-pool starvation, TCP backlog, or slow decode.
+    ///
+    /// `None` if wall-clock age could not be determined (e.g., if the
+    /// frame's wall timestamp is in the future due to clock skew).
+    pub frame_age: Option<Duration>,
+    /// Time the frame spent waiting in the bounded queue.
+    ///
+    /// Measured from `push()` to `pop()` using `Instant`. A
+    /// consistently low value combined with high `frame_age` proves
+    /// that staleness originates upstream of the queue (e.g., in the
+    /// decoder or TCP receive buffer), not from queue backlog.
+    pub queue_hold_time: std::time::Duration,
     /// Whether this output includes the source frame.
     ///
     /// Always `true` for [`FrameInclusion::Always`], always `false` for

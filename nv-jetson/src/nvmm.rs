@@ -58,12 +58,28 @@ use crate::ffi;
 /// the same pointer is accessible from both CPU and GPU contexts.
 /// However, explicit mapping via `NvBufSurfaceMap` is still required
 /// for portable correctness.
+///
+/// # Decoder-pool pressure
+///
+/// Each live `NvmmBufferHandle` pins one GStreamer buffer
+/// (`_gst_buffer`) and one `NvBufSurface` mapping (`_mapped_surface`).
+/// On Jetson, `nvv4l2decoder` allocates a fixed pool of output NVMM
+/// surfaces (typically 4–8).  If the perception pipeline holds frames
+/// longer than the decoder can tolerate (e.g., deep batch queues under
+/// sustained overload), the decoder stalls waiting for a free surface.
+///
+/// The NVMM preprocessor eliminates the *host-materialization*
+/// bottleneck (the dominant cause of surface retention), but does not
+/// change the fact that each in-flight frame consumes one pool slot.
+/// For full protection, combine with bounded queue depths and
+/// [`DropOldest`](nv_runtime::OverflowPolicy::DropOldest) to ensure
+/// stale frames are released promptly.
 pub struct NvmmBufferHandle {
-    /// GPU-accessible pointer to the frame's pixel data.
+    /// CPU-accessible pointer to the frame's pixel data.
     ///
-    /// On Xavier's unified memory, this pointer is also CPU-accessible
-    /// after `NvBufSurfaceMap`, but should be treated as a device
-    /// pointer for downstream CUDA kernel launches.
+    /// Valid for the lifetime of this handle because the underlying
+    /// `NvBufSurface` is kept mapped (see `_mapped_surface`).
+    /// Also usable as a GPU address on Xavier's unified memory.
     pub data_ptr: u64,
     /// Byte length of the pixel data.
     pub len: usize,
@@ -82,11 +98,35 @@ pub struct NvmmBufferHandle {
     pub dmabuf_fd: i32,
     /// Pin the GStreamer buffer to keep the NVMM allocation alive.
     _gst_buffer: gstreamer::Buffer,
+    /// Keep the NvBufSurface mapped so `data_ptr` remains CPU-accessible.
+    ///
+    /// On `NVBUF_MEM_SURFACE_ARRAY` (the default on Jetson Xavier),
+    /// `NvBufSurfaceMap` establishes CPU page-table entries for the
+    /// underlying surface-array allocation.  After `NvBufSurfaceUnMap`,
+    /// those entries are torn down and `data_ptr` becomes invalid —
+    /// accessing it causes a segfault.  Keeping the surface mapped for
+    /// the lifetime of this handle ensures `data_ptr` is always safe to
+    /// dereference from CPU code (e.g., the NVMM preprocessor).
+    _mapped_surface: *mut ffi::NvBufSurface,
 }
 
-// SAFETY: The data pointer is a numeric GPU address (unified memory on
-// Xavier) that does not alias host data.  The GStreamer buffer is
-// internally ref-counted and safe to send across threads.
+impl Drop for NvmmBufferHandle {
+    fn drop(&mut self) {
+        if !self._mapped_surface.is_null() {
+            // SAFETY: _mapped_surface was successfully mapped in
+            // extract_nvmm_pointer and has not been unmapped since.
+            // NvBufSurfaceUnMap is safe to call and idempotent.
+            unsafe {
+                ffi::NvBufSurfaceUnMap(self._mapped_surface, 0, -1);
+            }
+        }
+    }
+}
+
+// SAFETY: The data pointer is a numeric GPU/unified-memory address that
+// does not alias host data.  The GStreamer buffer is internally
+// ref-counted and safe to send across threads.  The mapped surface
+// pointer is only used in Drop (unmap) which is thread-safe.
 unsafe impl Send for NvmmBufferHandle {}
 unsafe impl Sync for NvmmBufferHandle {}
 
@@ -209,7 +249,7 @@ impl GpuPipelineProvider for NvmmProvider {
         let mut info = nv_media::SampleInfo::extract(sample, seq)?;
 
         // ── Extract NVMM device pointer via NvBufSurface FFI ─────────
-        let (data_ptr, len, dmabuf_fd, nvmm_pitch) =
+        let (data_ptr, len, dmabuf_fd, nvmm_pitch, mapped_surface) =
             extract_nvmm_pointer(&info.buffer, info.width, info.height)?;
 
         let handle = Arc::new(NvmmBufferHandle {
@@ -221,6 +261,7 @@ impl GpuPipelineProvider for NvmmProvider {
             format: effective,
             dmabuf_fd,
             _gst_buffer: info.buffer.clone(),
+            _mapped_surface: mapped_surface,
         });
 
         // ── Host materializer ────────────────────────────────────────
@@ -474,25 +515,19 @@ fn extract_dmabuf_fd(buffer: &gstreamer::Buffer) -> Result<i32, MediaError> {
 /// Uses [`extract_dmabuf_fd`] to obtain the DMA-buf FD, then
 /// `NvBufSurfaceFromFd` + `NvBufSurfaceMap` to read the device pointer.
 ///
-/// # Pointer lifetime contract
+/// # Mapped-surface ownership
 ///
-/// After map → read `data_ptr` → unmap, `data_ptr` remains valid because:
+/// The surface is left **mapped** and the raw `*mut NvBufSurface` is
+/// returned to the caller.  The caller must store it in
+/// [`NvmmBufferHandle`] which unmaps in its `Drop` implementation.
 ///
-/// 1. **Unified memory**: On Jetson Xavier (JetPack 5.x), NVMM
-///    allocations use NVIDIA unified memory. The physical allocation
-///    persists regardless of the CPU mapping state; `NvBufSurfaceMap`
-///    only populates the `data_ptr` field — it does not make the memory
-///    accessible (unified memory is always addressable).
-///
-/// 2. **DMA-buf pinning**: The underlying DMA-buf allocation lives as
-///    long as the GStreamer buffer.  The [`NvmmBufferHandle::_gst_buffer`]
-///    field pins the buffer for the lifetime of the handle, preventing
-///    deallocation.
-///
-/// 3. **Runtime validation**: [`validate_nvmm_mem_type`] checks the
-///    surface's `mem_type` and rejects memory types where the
-///    post-unmap pointer validity invariant does not hold (e.g., pure
-///    CUDA device memory that is not CPU-addressable).
+/// On `NVBUF_MEM_SURFACE_ARRAY` (the default on Jetson Xavier / JetPack
+/// 5.x), `NvBufSurfaceMap` establishes CPU virtual-address mappings for
+/// the underlying surface-array allocation.  After `NvBufSurfaceUnMap`,
+/// those mappings are torn down and `mapped_addr.addr[0]` (our
+/// `data_ptr`) becomes an invalid pointer — dereferencing it segfaults.
+/// Keeping the surface mapped for the handle's lifetime guarantees
+/// `data_ptr` remains CPU-accessible.
 ///
 /// # Safety
 ///
@@ -503,7 +538,7 @@ fn extract_nvmm_pointer(
     buffer: &gstreamer::Buffer,
     width: u32,
     height: u32,
-) -> Result<(u64, usize, i32, u32), MediaError> {
+) -> Result<(u64, usize, i32, u32, *mut ffi::NvBufSurface), MediaError> {
     let dmabuf_fd = extract_dmabuf_fd(buffer)?;
 
     // ── NvBufSurface FFI ─────────────────────────────────────────────
@@ -571,16 +606,33 @@ fn extract_nvmm_pointer(
         (ptr, size, pitch)
     };
 
-    // Unmap. See doc comment above ("Pointer lifetime contract") for
-    // why data_ptr remains valid after this call on unified memory.
-    unsafe {
-        ffi::NvBufSurfaceUnMap(surface_ptr, 0, -1);
-    }
+    // NOTE: we intentionally do NOT unmap the surface on the success
+    // path.  The caller stores `surface_ptr` in `NvmmBufferHandle`
+    // which unmaps in its `Drop` impl.  On NVBUF_MEM_SURFACE_ARRAY
+    // (Jetson Xavier), CPU access to `data_ptr` requires an active
+    // map — unmapping here would invalidate the pointer.
+    //
+    // ERROR PATHS below this point MUST unmap before returning, since
+    // the caller will never receive `surface_ptr` and therefore cannot
+    // take ownership of the mapping.
 
     // Validate the extracted pointer.
     if data_ptr == 0 {
+        unsafe { ffi::NvBufSurfaceUnMap(surface_ptr, 0, -1); }
         return Err(MediaError::DecodeFailed {
             detail: "NVMM data pointer is null after NvBufSurfaceMap".into(),
+        });
+    }
+
+    // Rough sanity check — at minimum, 1 byte per pixel expected.
+    let min_size = (width as usize).saturating_mul(height as usize);
+    if data_size > 0 && data_size < min_size {
+        unsafe { ffi::NvBufSurfaceUnMap(surface_ptr, 0, -1); }
+        return Err(MediaError::DecodeFailed {
+            detail: format!(
+                "NVMM buffer too small: {data_size} bytes for {width}×{height} \
+                 (minimum {min_size} bytes at 1 byte/pixel)"
+            ),
         });
     }
 
@@ -594,18 +646,7 @@ fn extract_nvmm_pointer(
         "NVMM pointer extraction succeeded",
     );
 
-    // Rough sanity check — at minimum, 1 byte per pixel expected.
-    let min_size = (width as usize).saturating_mul(height as usize);
-    if data_size > 0 && data_size < min_size {
-        return Err(MediaError::DecodeFailed {
-            detail: format!(
-                "NVMM buffer too small: {data_size} bytes for {width}×{height} \
-                 (minimum {min_size} bytes at 1 byte/pixel)"
-            ),
-        });
-    }
-
-    Ok((data_ptr, data_size, dmabuf_fd, nvmm_pitch))
+    Ok((data_ptr, data_size, dmabuf_fd, nvmm_pitch, surface_ptr))
 }
 
 // ---------------------------------------------------------------------------
