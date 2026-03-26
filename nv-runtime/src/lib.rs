@@ -155,10 +155,15 @@ pub(crate) mod worker;
 // Re-export key types at crate root.
 pub use backpressure::BackpressurePolicy;
 pub use batch::{BatchConfig, BatchHandle, BatchMetrics};
-pub use diagnostics::{BatchDiagnostics, FeedDiagnostics, OutputLagStatus, RuntimeDiagnostics, ViewDiagnostics, ViewStatus};
+pub use diagnostics::{
+    BatchDiagnostics, FeedDiagnostics, OutputLagStatus, RuntimeDiagnostics, ViewDiagnostics,
+    ViewStatus,
+};
 pub use feed::{FeedConfig, FeedConfigBuilder};
 pub use feed_handle::{DecodeStatus, FeedHandle, QueueTelemetry};
-pub use output::{AdmissionSummary, FrameInclusion, OutputEnvelope, OutputSink, SharedOutput, SinkFactory};
+pub use output::{
+    AdmissionSummary, FrameInclusion, OutputEnvelope, OutputSink, SharedOutput, SinkFactory,
+};
 pub use pipeline::{FeedPipeline, FeedPipelineBuilder, PipelineError};
 pub use provenance::{
     Provenance, StageOutcomeCategory, StageProvenance, StageResult, ViewProvenance,
@@ -170,7 +175,7 @@ pub use shutdown::{RestartPolicy, RestartTrigger};
 pub use nv_perception::{ValidationMode, ValidationWarning};
 
 // Re-export decode types from nv-media for convenience.
-pub use nv_media::{DecodePreference, DecodeCapabilities, discover_decode_capabilities};
+pub use nv_media::{DecodeCapabilities, DecodePreference, discover_decode_capabilities};
 
 // Re-export post-decode hook types from nv-media for convenience.
 pub use nv_media::{DecodedStreamInfo, PostDecodeHook};

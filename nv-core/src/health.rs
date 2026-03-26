@@ -84,7 +84,7 @@ pub enum DecodePreference {
     PreferHardware,
 
     /// Require hardware decoding. If no hardware decoder is available, the
-    /// backend must fail-fast with a [`MediaError`](crate::error::MediaError)
+    /// backend must fail-fast with a [`MediaError`]
     /// instead of silently falling back to software.
     RequireHardware,
 }
@@ -110,10 +110,7 @@ pub enum HealthEvent {
     SourceConnected { feed_id: FeedId },
 
     /// The video source disconnected.
-    SourceDisconnected {
-        feed_id: FeedId,
-        reason: MediaError,
-    },
+    SourceDisconnected { feed_id: FeedId, reason: MediaError },
 
     /// The video source is attempting to reconnect.
     SourceReconnecting { feed_id: FeedId, attempt: u32 },
@@ -145,16 +142,10 @@ pub enum HealthEvent {
     StagePanic { feed_id: FeedId, stage_id: StageId },
 
     /// The feed is restarting.
-    FeedRestarting {
-        feed_id: FeedId,
-        restart_count: u32,
-    },
+    FeedRestarting { feed_id: FeedId, restart_count: u32 },
 
     /// The feed has stopped permanently.
-    FeedStopped {
-        feed_id: FeedId,
-        reason: StopReason,
-    },
+    FeedStopped { feed_id: FeedId, reason: StopReason },
 
     /// Frames were dropped due to backpressure.
     BackpressureDrop {
@@ -273,7 +264,7 @@ pub enum HealthEvent {
         detail: String,
     },
 
-    /// The per-feed [`OutputSink`] panicked during `emit()`.
+    /// The per-feed `OutputSink` panicked during `emit()`.
     ///
     /// The output is dropped but the feed continues processing.
     /// The runtime wraps `OutputSink::emit()` in `catch_unwind` to
@@ -392,7 +383,7 @@ pub enum HealthEvent {
     /// are not available at runtime — the backend silently falls back to
     /// host-memory decoding.
     ///
-    /// Emitted once per session start alongside [`DecodeDecision`].
+    /// Emitted once per session start alongside `DecodeDecision`.
     ///
     /// **Action:** install GStreamer >= 1.20 CUDA plugins, or switch to
     /// a platform-specific provider (`DeviceResidency::Provider`) for

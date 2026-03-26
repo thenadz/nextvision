@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use nv_core::config::{CameraMode, ReconnectPolicy, SourceSpec};
 use nv_core::error::{ConfigError, NvError};
-use nv_media::PostDecodeHook;
-use nv_media::PtzProvider;
 use nv_media::DecodePreference;
 use nv_media::DeviceResidency;
+use nv_media::PostDecodeHook;
+use nv_media::PtzProvider;
 use nv_perception::{Stage, StagePipeline, ValidationMode, validate_pipeline_phased};
 use nv_temporal::RetentionPolicy;
 use nv_view::{EpochPolicy, ViewStateProvider};
@@ -318,7 +318,7 @@ impl FeedConfigBuilder {
     /// Controls the pipeline tail strategy:
     /// - [`DeviceResidency::Host`] (default) — `videoconvert → appsink`
     /// - [`DeviceResidency::Cuda`] — `cudaupload → cudaconvert → appsink(memory:CUDAMemory)`
-    /// - [`DeviceResidency::Provider(p)`] — delegates to the provider
+    /// - `DeviceResidency::Provider(p)` — delegates to the provider
     ///
     /// See [`DeviceResidency`] for details.
     #[must_use]
@@ -333,7 +333,9 @@ impl FeedConfigBuilder {
     /// building one stage at a time.
     #[must_use]
     pub fn add_stage(mut self, stage: impl Stage) -> Self {
-        self.stages.get_or_insert_with(Vec::new).push(Box::new(stage));
+        self.stages
+            .get_or_insert_with(Vec::new)
+            .push(Box::new(stage));
         self
     }
 
@@ -351,9 +353,9 @@ impl FeedConfigBuilder {
     /// - `MissingRequired` if `source`, `camera_mode`, stages (or feed_pipeline), or `output_sink` are not set.
     /// - `CameraModeConflict` if `Observed` is set without a provider, or `Fixed` with a provider.
     pub fn build(self) -> Result<FeedConfig, NvError> {
-        let source = self.source.ok_or(ConfigError::MissingRequired {
-            field: "source",
-        })?;
+        let source = self
+            .source
+            .ok_or(ConfigError::MissingRequired { field: "source" })?;
         let camera_mode = self.camera_mode.ok_or(ConfigError::MissingRequired {
             field: "camera_mode",
         })?;
@@ -362,8 +364,10 @@ impl FeedConfigBuilder {
         let (stages, batch, post_batch_stages) = if let Some(fp) = self.feed_pipeline {
             if self.stages.is_some() {
                 return Err(ConfigError::InvalidPolicy {
-                    detail: "cannot set both stages() and feed_pipeline() — use one or the other".into(),
-                }.into());
+                    detail: "cannot set both stages() and feed_pipeline() — use one or the other"
+                        .into(),
+                }
+                .into());
             }
             fp.into_parts()
         } else {
@@ -393,12 +397,15 @@ impl FeedConfigBuilder {
         match self.validation_mode {
             ValidationMode::Off => {}
             ValidationMode::Warn => {
-                for w in validate_pipeline(&stages, batch_caps.as_ref(), batch_id, &post_batch_stages) {
+                for w in
+                    validate_pipeline(&stages, batch_caps.as_ref(), batch_id, &post_batch_stages)
+                {
                     tracing::warn!("stage validation: {w:?}");
                 }
             }
             ValidationMode::Error => {
-                let warnings = validate_pipeline(&stages, batch_caps.as_ref(), batch_id, &post_batch_stages);
+                let warnings =
+                    validate_pipeline(&stages, batch_caps.as_ref(), batch_id, &post_batch_stages);
                 if !warnings.is_empty() {
                     let detail = warnings
                         .iter()
@@ -476,7 +483,6 @@ fn validate_pipeline(
     validate_pipeline_phased(pre_batch, batch_caps, batch_id, post_batch)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,8 +495,13 @@ mod tests {
         caps: StageCapabilities,
     }
     impl Stage for CapStage {
-        fn id(&self) -> StageId { StageId(self.id) }
-        fn process(&mut self, _: &StageContext<'_>) -> Result<StageOutput, nv_core::error::StageError> {
+        fn id(&self) -> StageId {
+            StageId(self.id)
+        }
+        fn process(
+            &mut self,
+            _: &StageContext<'_>,
+        ) -> Result<StageOutput, nv_core::error::StageError> {
             Ok(StageOutput::empty())
         }
         fn capabilities(&self) -> Option<StageCapabilities> {
@@ -532,7 +543,9 @@ mod tests {
 
         let warnings = validate_pipeline(&pre, Some(&caps), Some(batch_id), &post);
         assert!(
-            !warnings.iter().any(|w| matches!(w, ValidationWarning::UnsatisfiedDependency { .. })),
+            !warnings
+                .iter()
+                .any(|w| matches!(w, ValidationWarning::UnsatisfiedDependency { .. })),
             "no unsatisfied dependencies expected, got: {warnings:?}"
         );
     }

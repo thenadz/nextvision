@@ -7,7 +7,8 @@
 //!
 //! # Quick start
 //!
-//! ```no_run
+#![cfg_attr(feature = "otlp-grpc", doc = "```no_run")]
+#![cfg_attr(not(feature = "otlp-grpc"), doc = "```ignore")]
 //! use std::time::Duration;
 //! use nv_metrics::MetricsExporter;
 //! # async fn example(handle: nv_runtime::RuntimeHandle) -> Result<(), nv_metrics::MetricsError> {
@@ -37,7 +38,7 @@
 //! | `nv.feed.*` | `feed_id` | `frames_received`, `tracks_active`, `view_stability_score` |
 //! | `nv.batch.*` | `processor_id` | `items_processed`, `avg_processing_ms`, `consecutive_errors` |
 //!
-//! See [`recorder`] module docs for the full instrument list.
+//! See the `recorder` module docs for the full instrument list.
 //!
 //! # Feature flags
 //!

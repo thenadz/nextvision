@@ -131,7 +131,9 @@ impl PipelineExecutor {
         }
 
         let source_fps = (self.frames_processed - 1) as f64 / elapsed_secs;
-        let resolved = self.frame_inclusion.resolve_with_source_fps(source_fps as f32);
+        let resolved = self
+            .frame_inclusion
+            .resolve_with_source_fps(source_fps as f32);
 
         tracing::info!(
             feed = %self.feed_id,
@@ -189,7 +191,7 @@ impl PipelineExecutor {
         // --- Frame lag detection ---
         if let Some(age) = frame_age {
             let age_ms = age.as_nanos() / 1_000_000;
-            if age_ms >= FRAME_LAG_THRESHOLD_MS as u64 {
+            if age_ms >= FRAME_LAG_THRESHOLD_MS {
                 self.frame_lag_count += 1;
                 self.frame_lag_peak_age_ms = self.frame_lag_peak_age_ms.max(age_ms);
                 let now = Instant::now();
@@ -568,7 +570,9 @@ impl PipelineExecutor {
                 }
             }
             // Before resolution, use fallback_interval.
-            FrameInclusion::TargetFps { fallback_interval, .. } => {
+            FrameInclusion::TargetFps {
+                fallback_interval, ..
+            } => {
                 if fallback_interval == 0 {
                     false
                 } else {
@@ -611,7 +615,11 @@ impl PipelineExecutor {
                 frame_included: include_frame,
             },
             metadata: artifacts.stage_artifacts,
-            frame: if include_frame { Some(frame.clone()) } else { None },
+            frame: if include_frame {
+                Some(frame.clone())
+            } else {
+                None
+            },
             admission,
         };
 

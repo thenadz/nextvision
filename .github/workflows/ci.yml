@@ -52,16 +52,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Clippy
+        # nv-jetson compiles on x86_64 (clippy doesn't link), so include it.
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Build
-        run: cargo build --workspace --all-targets
+        # nv-jetson excluded: libnvbufsurface (Tegra-only) needed at link time.
+        run: cargo build --workspace --exclude nv-jetson --all-targets
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude nv-jetson
 
       - name: Doc build
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --workspace --exclude nv-jetson --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -90,10 +92,10 @@ jobs:
 
       # MSRV check: build only (no clippy, since lint suggestions evolve)
       - name: Build (MSRV)
-        run: cargo build --workspace
+        run: cargo build --workspace --exclude nv-jetson
 
       - name: Test (MSRV)
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude nv-jetson
 
   # --------------------------------------------------------------------------
   # Dependency audit — catch known vulnerabilities
@@ -119,8 +121,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      # Exclude nv-jetson (aarch64-only) and sample crates that link ONNX
+      # Runtime (already covered by the default-features `check` job).
       - name: Build without gst-backend
-        run: cargo build --workspace --no-default-features
+        run: >
+          cargo build --no-default-features
+          --exclude nv-jetson
+          --exclude nv-sample-app
+          --exclude nv-sample-detection
+          --workspace
 
       - name: Test without gst-backend
-        run: cargo test --workspace --no-default-features
+        run: >
+          cargo test --no-default-features
+          --exclude nv-jetson
+          --exclude nv-sample-app
+          --exclude nv-sample-detection
+          --workspace

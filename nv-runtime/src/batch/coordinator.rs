@@ -86,9 +86,7 @@ impl BatchCoordinator {
         let (startup_tx, startup_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
 
         let shutdown_clone = Arc::clone(&shutdown);
-        let on_start_timeout = config
-            .startup_timeout
-            .unwrap_or(DEFAULT_ON_START_TIMEOUT);
+        let on_start_timeout = config.startup_timeout.unwrap_or(DEFAULT_ON_START_TIMEOUT);
         let thread = std::thread::Builder::new()
             .name(format!("nv-batch-{}", processor_id))
             .spawn(move || {
@@ -530,7 +528,11 @@ fn bounded_coordinator_join(
                 timeout_secs = timeout.as_secs(),
                 "batch coordinator thread did not finish within timeout — detaching"
             );
-            joiner.ok().map(|j| crate::runtime::DetachedJoin { label, done_rx, joiner: j })
+            joiner.ok().map(|j| crate::runtime::DetachedJoin {
+                label,
+                done_rx,
+                joiner: j,
+            })
         }
     }
 }

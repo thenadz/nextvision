@@ -2076,9 +2076,7 @@ fn target_fps_resolves_from_source_cadence_not_wall_clock() {
 
     // Create 35 frames at 30 FPS (33_333_333 ns interval).
     let interval_ns = 33_333_333u64; // ~30 FPS
-    let frames = nv_test_util::synthetic::frame_sequence(
-        FeedId::new(1), 35, 2, 2, interval_ns,
-    );
+    let frames = nv_test_util::synthetic::frame_sequence(FeedId::new(1), 35, 2, 2, interval_ns);
 
     // Process all frames. Even though we're not inserting any wall-clock
     // delay, the source timestamps carry the cadence information.
@@ -2088,7 +2086,10 @@ fn target_fps_resolves_from_source_cadence_not_wall_clock() {
 
     // After 35 frames (>30 warmup), TargetFps should be resolved.
     assert!(
-        matches!(exec.frame_inclusion, FrameInclusion::Sampled { interval: 6 }),
+        matches!(
+            exec.frame_inclusion,
+            FrameInclusion::Sampled { interval: 6 }
+        ),
         "expected Sampled {{ interval: 6 }}, got {:?}",
         exec.frame_inclusion,
     );
@@ -2118,9 +2119,7 @@ fn target_fps_unaffected_by_processing_stall() {
 
     // 25 FPS source: 40ms between frames
     let interval_ns = 40_000_000u64; // 25 FPS
-    let frames = nv_test_util::synthetic::frame_sequence(
-        FeedId::new(1), 35, 2, 2, interval_ns,
-    );
+    let frames = nv_test_util::synthetic::frame_sequence(FeedId::new(1), 35, 2, 2, interval_ns);
 
     // Simulate a 100ms processing stall on the first frame (as CUDA/TRT
     // JIT would cause). With wall-clock estimation this would inflate
@@ -2135,7 +2134,10 @@ fn target_fps_unaffected_by_processing_stall() {
 
     // round(25/5) = 5
     assert!(
-        matches!(exec.frame_inclusion, FrameInclusion::Sampled { interval: 5 }),
+        matches!(
+            exec.frame_inclusion,
+            FrameInclusion::Sampled { interval: 5 }
+        ),
         "expected Sampled {{ interval: 5 }} from 25 FPS source, got {:?}",
         exec.frame_inclusion,
     );
@@ -2159,9 +2161,7 @@ fn target_fps_uses_fallback_during_warmup() {
 
     // Process only 10 frames — within warmup window (30 frames).
     let interval_ns = 33_333_333u64; // 30 FPS
-    let frames = nv_test_util::synthetic::frame_sequence(
-        FeedId::new(1), 10, 2, 2, interval_ns,
-    );
+    let frames = nv_test_util::synthetic::frame_sequence(FeedId::new(1), 10, 2, 2, interval_ns);
 
     for f in &frames {
         let _ = exec.process_frame(f, std::time::Duration::ZERO);
@@ -2169,7 +2169,13 @@ fn target_fps_uses_fallback_during_warmup() {
 
     // Should still be TargetFps (unresolved).
     assert!(
-        matches!(exec.frame_inclusion, FrameInclusion::TargetFps { fallback_interval: 8, .. }),
+        matches!(
+            exec.frame_inclusion,
+            FrameInclusion::TargetFps {
+                fallback_interval: 8,
+                ..
+            }
+        ),
         "should remain TargetFps during warmup, got {:?}",
         exec.frame_inclusion,
     );
@@ -2180,7 +2186,11 @@ fn target_fps_uses_fallback_during_warmup() {
 // ------------------------------------------------------------------
 
 /// Create a frame with a specific wall-clock timestamp (for lag tests).
-fn frame_with_wall_ts(feed_id: FeedId, seq: u64, wall_ts: nv_core::WallTs) -> nv_frame::FrameEnvelope {
+fn frame_with_wall_ts(
+    feed_id: FeedId,
+    seq: u64,
+    wall_ts: nv_core::WallTs,
+) -> nv_frame::FrameEnvelope {
     nv_frame::FrameEnvelope::new_owned(
         feed_id,
         seq,
@@ -2211,9 +2221,7 @@ fn frame_lag_emitted_when_frame_is_stale() {
     );
 
     // Create a frame stamped 5 seconds in the past (well above the 2s threshold).
-    let stale_wall = nv_core::WallTs::from_micros(
-        nv_core::WallTs::now().as_micros() - 5_000_000,
-    );
+    let stale_wall = nv_core::WallTs::from_micros(nv_core::WallTs::now().as_micros() - 5_000_000);
     let frame = frame_with_wall_ts(FeedId::new(42), 0, stale_wall);
 
     let (_output, health) = exec.process_frame(&frame, std::time::Duration::ZERO);
@@ -2222,12 +2230,23 @@ fn frame_lag_emitted_when_frame_is_stale() {
         .iter()
         .filter(|e| matches!(e, HealthEvent::FrameLag { .. }))
         .collect();
-    assert_eq!(lag_events.len(), 1, "expected one FrameLag event, got {lag_events:?}");
+    assert_eq!(
+        lag_events.len(),
+        1,
+        "expected one FrameLag event, got {lag_events:?}"
+    );
 
     match &lag_events[0] {
-        HealthEvent::FrameLag { feed_id, frame_age_ms, frames_lagged } => {
+        HealthEvent::FrameLag {
+            feed_id,
+            frame_age_ms,
+            frames_lagged,
+        } => {
             assert_eq!(*feed_id, FeedId::new(42));
-            assert!(*frame_age_ms >= 4_000, "frame_age_ms should be >= 4000, got {frame_age_ms}");
+            assert!(
+                *frame_age_ms >= 4_000,
+                "frame_age_ms should be >= 4000, got {frame_age_ms}"
+            );
             assert_eq!(*frames_lagged, 1);
         }
         _ => unreachable!(),
@@ -2259,7 +2278,10 @@ fn no_frame_lag_for_fresh_frame() {
         .iter()
         .filter(|e| matches!(e, HealthEvent::FrameLag { .. }))
         .collect();
-    assert!(lag_events.is_empty(), "fresh frame should not trigger FrameLag, got {lag_events:?}");
+    assert!(
+        lag_events.is_empty(),
+        "fresh frame should not trigger FrameLag, got {lag_events:?}"
+    );
 }
 
 #[test]
@@ -2279,7 +2301,12 @@ fn no_frame_lag_for_zero_wall_ts() {
 
     // Frame with wall_ts=0 sentinel — should NOT trigger FrameLag.
     let frame = nv_test_util::synthetic::solid_gray(
-        FeedId::new(42), 0, nv_core::timestamp::MonotonicTs::from_nanos(1_000_000), 2, 2, 128,
+        FeedId::new(42),
+        0,
+        nv_core::timestamp::MonotonicTs::from_nanos(1_000_000),
+        2,
+        2,
+        128,
     );
 
     let (_output, health) = exec.process_frame(&frame, std::time::Duration::ZERO);
@@ -2287,7 +2314,10 @@ fn no_frame_lag_for_zero_wall_ts() {
         .iter()
         .filter(|e| matches!(e, HealthEvent::FrameLag { .. }))
         .collect();
-    assert!(lag_events.is_empty(), "zero wall_ts sentinel should not trigger FrameLag");
+    assert!(
+        lag_events.is_empty(),
+        "zero wall_ts sentinel should not trigger FrameLag"
+    );
 }
 
 #[test]
@@ -2305,15 +2335,15 @@ fn frame_lag_coalesced_within_throttle_window() {
         Arc::new(AtomicBool::new(false)),
     );
 
-    let stale_wall = nv_core::WallTs::from_micros(
-        nv_core::WallTs::now().as_micros() - 5_000_000,
-    );
+    let stale_wall = nv_core::WallTs::from_micros(nv_core::WallTs::now().as_micros() - 5_000_000);
 
     // First stale frame — should emit FrameLag.
     let f1 = frame_with_wall_ts(FeedId::new(42), 0, stale_wall);
     let (_, h1) = exec.process_frame(&f1, std::time::Duration::ZERO);
     assert_eq!(
-        h1.iter().filter(|e| matches!(e, HealthEvent::FrameLag { .. })).count(),
+        h1.iter()
+            .filter(|e| matches!(e, HealthEvent::FrameLag { .. }))
+            .count(),
         1,
         "first stale frame should emit FrameLag"
     );
@@ -2322,7 +2352,9 @@ fn frame_lag_coalesced_within_throttle_window() {
     let f2 = frame_with_wall_ts(FeedId::new(42), 1, stale_wall);
     let (_, h2) = exec.process_frame(&f2, std::time::Duration::ZERO);
     assert_eq!(
-        h2.iter().filter(|e| matches!(e, HealthEvent::FrameLag { .. })).count(),
+        h2.iter()
+            .filter(|e| matches!(e, HealthEvent::FrameLag { .. }))
+            .count(),
         0,
         "second stale frame within throttle window should be coalesced"
     );
@@ -2348,9 +2380,7 @@ fn provenance_includes_frame_age_and_queue_hold_time() {
 
     // Frame stamped 100ms ago — under the 2s lag threshold but has a
     // measurable frame_age.
-    let wall = nv_core::WallTs::from_micros(
-        nv_core::WallTs::now().as_micros() - 100_000,
-    );
+    let wall = nv_core::WallTs::from_micros(nv_core::WallTs::now().as_micros() - 100_000);
     let frame = frame_with_wall_ts(FeedId::new(42), 0, wall);
 
     // Simulate 5ms queue hold time.
@@ -2359,8 +2389,15 @@ fn provenance_includes_frame_age_and_queue_hold_time() {
     let out = output.expect("should produce output");
 
     // frame_age should be present and ~100ms.
-    let age = out.provenance.frame_age.expect("frame_age should be Some for non-zero wall_ts");
-    assert!(age.as_nanos() >= 50_000_000, "frame_age should be >= 50ms, got {:?}", age);
+    let age = out
+        .provenance
+        .frame_age
+        .expect("frame_age should be Some for non-zero wall_ts");
+    assert!(
+        age.as_nanos() >= 50_000_000,
+        "frame_age should be >= 50ms, got {:?}",
+        age
+    );
 
     // queue_hold_time should match what we passed in.
     assert_eq!(out.provenance.queue_hold_time, hold);

@@ -668,7 +668,7 @@ impl FrameEnvelope {
                 ..
             } => {
                 let cached = self.inner.host_cache.get_or_init(|| {
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f())) {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
                         Ok(result) => result,
                         Err(payload) => {
                             let detail = match payload.downcast_ref::<&str>() {
@@ -1141,7 +1141,9 @@ mod tests {
                 device_id: 0,
                 mem_handle: 0,
             }),
-            Some(Box::new(move || Ok(HostBytes::from_vec(expected_clone.clone())))),
+            Some(Box::new(move || {
+                Ok(HostBytes::from_vec(expected_clone.clone()))
+            })),
             TypedMetadata::new(),
         );
         let cow = f.require_host_data().unwrap();
@@ -1332,8 +1334,8 @@ mod tests {
 
     #[test]
     fn require_host_data_concurrent_access() {
-        use std::sync::atomic::{AtomicU32, Ordering};
         use std::sync::Barrier;
+        use std::sync::atomic::{AtomicU32, Ordering};
 
         let call_count = Arc::new(AtomicU32::new(0));
         let cc = Arc::clone(&call_count);

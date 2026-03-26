@@ -109,20 +109,16 @@ fn build_host_tail(
     use gstreamer as gst;
     use gstreamer_app as gst_app;
 
-    let videoconvert =
-        gst::ElementFactory::make("videoconvert")
-            .build()
-            .map_err(|e| MediaError::Unsupported {
-                detail: format!("failed to create videoconvert: {e}"),
-            })?;
+    let videoconvert = gst::ElementFactory::make("videoconvert")
+        .build()
+        .map_err(|e| MediaError::Unsupported {
+            detail: format!("failed to create videoconvert: {e}"),
+        })?;
 
     let caps_str = format!("video/x-raw,format={}", output_format.gst_format_str());
-    let appsink_caps: gst::Caps =
-        caps_str
-            .parse()
-            .map_err(|_| MediaError::Unsupported {
-                detail: format!("invalid appsink caps: {caps_str}"),
-            })?;
+    let appsink_caps: gst::Caps = caps_str.parse().map_err(|_| MediaError::Unsupported {
+        detail: format!("invalid appsink caps: {caps_str}"),
+    })?;
 
     let appsink = gst_app::AppSink::builder()
         .caps(&appsink_caps)
@@ -229,10 +225,7 @@ impl PipelineBuilder {
             };
             unsafe {
                 let mut value = gst::glib::Value::from_type(gtype);
-                gst::glib::gobject_ffi::g_value_set_enum(
-                    value.to_glib_none_mut().0,
-                    discriminant,
-                );
+                gst::glib::gobject_ffi::g_value_set_enum(value.to_glib_none_mut().0, discriminant);
                 value
             }
         }
@@ -243,7 +236,11 @@ impl PipelineBuilder {
 
         // --- Source element ---
         let source = match &self.spec {
-            SourceSpec::Rtsp { url, transport, security } => {
+            SourceSpec::Rtsp {
+                url,
+                transport,
+                security,
+            } => {
                 use nv_core::security::{RtspSecurityPolicy, promote_rtsp_to_tls};
                 // Apply TLS promotion based on security policy.
                 let effective_url = match security {
@@ -253,20 +250,20 @@ impl PipelineBuilder {
                     }
                 };
                 gst::ElementFactory::make("rtspsrc")
-                .property("location", effective_url.as_str())
-                .property("latency", self.latency_ms)
-                .property("tcp-timeout", DEFAULT_RTSP_TCP_TIMEOUT_US)
-                .property_from_str(
-                    "protocols",
-                    match transport {
-                        RtspTransport::Tcp => "tcp",
-                        RtspTransport::UdpUnicast => "udp-unicast",
-                    },
-                )
-                .build()
-                .map_err(|e| MediaError::Unsupported {
-                    detail: format!("failed to create rtspsrc: {e}"),
-                })?
+                    .property("location", effective_url.as_str())
+                    .property("latency", self.latency_ms)
+                    .property("tcp-timeout", DEFAULT_RTSP_TCP_TIMEOUT_US)
+                    .property_from_str(
+                        "protocols",
+                        match transport {
+                            RtspTransport::Tcp => "tcp",
+                            RtspTransport::UdpUnicast => "udp-unicast",
+                        },
+                    )
+                    .build()
+                    .map_err(|e| MediaError::Unsupported {
+                        detail: format!("failed to create rtspsrc: {e}"),
+                    })?
             }
             SourceSpec::File { path, loop_: _ } => gst::ElementFactory::make("filesrc")
                 .property("location", path.to_string_lossy().as_ref())
@@ -526,11 +523,10 @@ impl PipelineBuilder {
                                 "video/x-raw(memory:CUDAMemory),format={}",
                                 self.output_format.gst_format_str(),
                             );
-                            let appsink_caps: gst::Caps = caps_str.parse().map_err(
-                                |_| MediaError::Unsupported {
+                            let appsink_caps: gst::Caps =
+                                caps_str.parse().map_err(|_| MediaError::Unsupported {
                                     detail: format!("invalid CUDA appsink caps: {caps_str}"),
-                                },
-                            )?;
+                                })?;
 
                             let appsink = gst_app::AppSink::builder()
                                 .caps(&appsink_caps)
@@ -567,9 +563,7 @@ impl PipelineBuilder {
             .first()
             .cloned()
             .unwrap_or_else(|| appsink_element.clone());
-        let last_link_source = converter_elements
-            .last()
-            .cloned();
+        let last_link_source = converter_elements.last().cloned();
 
         // --- Assemble pipeline ---
 
@@ -584,9 +578,11 @@ impl PipelineBuilder {
                 detail: format!("failed to add converter element to pipeline: {e}"),
             })?;
         }
-        pipeline.add(appsink_element).map_err(|e| MediaError::Unsupported {
-            detail: format!("failed to add appsink to pipeline: {e}"),
-        })?;
+        pipeline
+            .add(appsink_element)
+            .map_err(|e| MediaError::Unsupported {
+                detail: format!("failed to add appsink to pipeline: {e}"),
+            })?;
 
         // Link the converter chain internally (e.g., cudaupload → cudaconvert)
         // and then the last converter → appsink.
@@ -613,7 +609,9 @@ impl PipelineBuilder {
             );
             if provider_active {
                 pair[0].link_pads_full(
-                    None, &pair[1], None,
+                    None,
+                    &pair[1],
+                    None,
                     gst::PadLinkCheck::HIERARCHY | gst::PadLinkCheck::TEMPLATE_CAPS,
                 )
             } else {
@@ -632,7 +630,9 @@ impl PipelineBuilder {
             );
             if provider_active {
                 last.link_pads_full(
-                    None, appsink_element, None,
+                    None,
+                    appsink_element,
+                    None,
                     gst::PadLinkCheck::HIERARCHY | gst::PadLinkCheck::TEMPLATE_CAPS,
                 )
             } else {
@@ -694,8 +694,8 @@ impl PipelineBuilder {
             decode_element.connect_pad_added(move |_element, pad| {
                 let Some(fc) = fc_weak.upgrade() else { return };
                 let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
-                if let Some(structure) = caps.structure(0) {
-                    if structure.name().starts_with("video/") {
+                if let Some(structure) = caps.structure(0)
+                    && structure.name().starts_with("video/") {
                         // Extract caps metadata for diagnostics (used by
                         // both the hook path and the provider/direct path).
                         let memory_type = caps.features(0).and_then(|features| {
@@ -774,8 +774,8 @@ impl PipelineBuilder {
                         } else {
                             fc
                         };
-                        if let Some(sink_pad) = target.static_pad("sink") {
-                            if !sink_pad.is_linked() {
+                        if let Some(sink_pad) = target.static_pad("sink")
+                            && !sink_pad.is_linked() {
                                 let link_result = if use_relaxed_link {
                                     // Provider paths: defer real caps negotiation
                                     // until data flows. Template caps are sufficient
@@ -823,9 +823,7 @@ impl PipelineBuilder {
                                     }
                                 }
                             }
-                        }
                     }
-                }
             });
 
             // RTSP: dynamic pad rtspsrc → decodebin
@@ -833,17 +831,16 @@ impl PipelineBuilder {
                 let db_weak = decode_element.downgrade();
                 source.connect_pad_added(move |_element, pad| {
                     let Some(db) = db_weak.upgrade() else { return };
-                    if let Some(sink_pad) = db.static_pad("sink") {
-                        if !sink_pad.is_linked() {
-                            if let Err(e) = pad.link(&sink_pad) {
-                                tracing::error!(
-                                    pad = %pad.name(),
-                                    error = %e,
-                                    "failed to link rtspsrc pad to decodebin — \
-                                     pipeline will not produce frames",
-                                );
-                            }
-                        }
+                    if let Some(sink_pad) = db.static_pad("sink")
+                        && !sink_pad.is_linked()
+                        && let Err(e) = pad.link(&sink_pad)
+                    {
+                        tracing::error!(
+                            pad = %pad.name(),
+                            error = %e,
+                            "failed to link rtspsrc pad to decodebin — \
+                             pipeline will not produce frames",
+                        );
                     }
                 });
             }
@@ -856,17 +853,16 @@ impl PipelineBuilder {
                     let Some(dec) = dec_weak.upgrade() else {
                         return;
                     };
-                    if let Some(sink_pad) = dec.static_pad("sink") {
-                        if !sink_pad.is_linked() {
-                            if let Err(e) = pad.link(&sink_pad) {
-                                tracing::error!(
-                                    pad = %pad.name(),
-                                    error = %e,
-                                    "failed to link rtspsrc pad to decoder — \
-                                     pipeline will not produce frames",
-                                );
-                            }
-                        }
+                    if let Some(sink_pad) = dec.static_pad("sink")
+                        && !sink_pad.is_linked()
+                        && let Err(e) = pad.link(&sink_pad)
+                    {
+                        tracing::error!(
+                            pad = %pad.name(),
+                            error = %e,
+                            "failed to link rtspsrc pad to decoder — \
+                             pipeline will not produce frames",
+                        );
                     }
                 });
             } else {
@@ -1044,8 +1040,8 @@ mod tests {
     #[test]
     fn builder_stores_post_decode_hook() {
         let hook: PostDecodeHook = std::sync::Arc::new(|_info| None);
-        let b = PipelineBuilder::new(SourceSpec::file("/tmp/test.mp4"))
-            .post_decode_hook(Some(hook));
+        let b =
+            PipelineBuilder::new(SourceSpec::file("/tmp/test.mp4")).post_decode_hook(Some(hook));
         assert!(b.post_decode_hook.is_some());
     }
 
@@ -1102,7 +1098,11 @@ mod tests {
         };
         let _ = hook(&info);
 
-        let got = captured.lock().unwrap().clone().expect("hook should be called");
+        let got = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("hook should be called");
         assert_eq!(got.media_type, "video/x-raw");
         assert_eq!(got.memory_type.as_deref(), Some("NVMM"));
         assert_eq!(got.format.as_deref(), Some("NV12"));
@@ -1145,28 +1145,38 @@ mod tests {
 
     #[test]
     fn builder_stores_provider_residency() {
-        use std::sync::Arc;
+        use crate::gpu_provider::{GpuPipelineProvider, SharedGpuProvider};
         use nv_core::error::MediaError;
         use nv_core::id::FeedId;
         use nv_frame::PixelFormat;
-        use crate::gpu_provider::{GpuPipelineProvider, SharedGpuProvider};
+        use std::sync::Arc;
 
         struct StubProvider;
         impl GpuPipelineProvider for StubProvider {
-            fn name(&self) -> &str { "stub" }
+            fn name(&self) -> &str {
+                "stub"
+            }
             #[cfg(feature = "gst-backend")]
             fn build_pipeline_tail(
-                &self, _: PixelFormat,
+                &self,
+                _: PixelFormat,
             ) -> Result<crate::gpu_provider::GpuPipelineTail, MediaError> {
-                Err(MediaError::Unsupported { detail: "stub".into() })
+                Err(MediaError::Unsupported {
+                    detail: "stub".into(),
+                })
             }
             #[cfg(feature = "gst-backend")]
             fn bridge_sample(
-                &self, _: FeedId, _: &Arc<std::sync::atomic::AtomicU64>,
-                _: PixelFormat, _: &gstreamer::Sample,
+                &self,
+                _: FeedId,
+                _: &Arc<std::sync::atomic::AtomicU64>,
+                _: PixelFormat,
+                _: &gstreamer::Sample,
                 _: Option<crate::PtzTelemetry>,
             ) -> Result<nv_frame::FrameEnvelope, MediaError> {
-                Err(MediaError::Unsupported { detail: "stub".into() })
+                Err(MediaError::Unsupported {
+                    detail: "stub".into(),
+                })
             }
         }
 
@@ -1185,11 +1195,11 @@ mod tests {
     /// wrong results in GPU-dependent stages.
     #[test]
     fn provider_failure_returns_error() {
-        use std::sync::Arc;
+        use crate::gpu_provider::{GpuPipelineProvider, SharedGpuProvider};
         use nv_core::error::MediaError;
         use nv_core::id::FeedId;
         use nv_frame::PixelFormat;
-        use crate::gpu_provider::{GpuPipelineProvider, SharedGpuProvider};
+        use std::sync::Arc;
 
         // Pipeline construction requires GStreamer to be initialized.
         if gstreamer::init().is_err() {
@@ -1199,10 +1209,13 @@ mod tests {
 
         struct FailingProvider;
         impl GpuPipelineProvider for FailingProvider {
-            fn name(&self) -> &str { "failing" }
+            fn name(&self) -> &str {
+                "failing"
+            }
             #[cfg(feature = "gst-backend")]
             fn build_pipeline_tail(
-                &self, _: PixelFormat,
+                &self,
+                _: PixelFormat,
             ) -> Result<crate::gpu_provider::GpuPipelineTail, MediaError> {
                 Err(MediaError::Unsupported {
                     detail: "intentional failure for test".into(),
@@ -1210,11 +1223,16 @@ mod tests {
             }
             #[cfg(feature = "gst-backend")]
             fn bridge_sample(
-                &self, _: FeedId, _: &Arc<std::sync::atomic::AtomicU64>,
-                _: PixelFormat, _: &gstreamer::Sample,
+                &self,
+                _: FeedId,
+                _: &Arc<std::sync::atomic::AtomicU64>,
+                _: PixelFormat,
+                _: &gstreamer::Sample,
                 _: Option<crate::PtzTelemetry>,
             ) -> Result<nv_frame::FrameEnvelope, MediaError> {
-                Err(MediaError::Unsupported { detail: "stub".into() })
+                Err(MediaError::Unsupported {
+                    detail: "stub".into(),
+                })
             }
         }
 
@@ -1319,11 +1337,17 @@ mod tests {
         // Provider active → relaxed links.
         let provider_active = true;
         let use_relaxed_link = provider_active;
-        assert!(use_relaxed_link, "provider path should use relaxed link checks");
+        assert!(
+            use_relaxed_link,
+            "provider path should use relaxed link checks"
+        );
 
         // Cuda (no provider) → standard links.
         let provider_active = false;
         let use_relaxed_link = provider_active;
-        assert!(!use_relaxed_link, "cuda path should use standard link checks");
+        assert!(
+            !use_relaxed_link,
+            "cuda path should use standard link checks"
+        );
     }
 }

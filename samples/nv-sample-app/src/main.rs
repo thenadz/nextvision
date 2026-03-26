@@ -35,24 +35,24 @@ mod overlay;
 mod ui;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use clap::Parser;
 use tracing::{error, info, warn};
 
-use nv_metrics::MetricsExporter;
-use nv_sample_tracking::{TrackerConfig, TrackerStage};
-use nv_sample_detection::{DetectorBatchProcessor, DetectorConfig, DetectorStage};
 use nv_core::{CameraMode, SourceSpec};
+use nv_metrics::MetricsExporter;
 use nv_runtime::{
     BackpressurePolicy, BatchConfig, DeviceResidency, FeedConfig, FeedPipeline, FrameInclusion,
     HealthEvent, OutputEnvelope, OutputSink, Runtime,
 };
+use nv_sample_detection::{DetectorBatchProcessor, DetectorConfig, DetectorStage};
+use nv_sample_tracking::{TrackerConfig, TrackerStage};
 
 use crate::cli::Cli;
-use crate::ui::{new_shared_state, UiSink};
+use crate::ui::{UiSink, new_shared_state};
 
 fn main() {
     tracing_subscriber::fmt()
@@ -161,11 +161,7 @@ const DEFAULT_PREVIEW_INTERVAL: u32 = 6;
 /// brief warmup (~30 frames). The fallback interval assumes ~30 fps
 /// during the warmup window so that preview begins immediately.
 fn resolve_frame_inclusion(args: &Cli, include_frames: bool) -> FrameInclusion {
-    resolve_frame_inclusion_params(
-        args.sample_interval,
-        args.preview_fps,
-        include_frames,
-    )
+    resolve_frame_inclusion_params(args.sample_interval, args.preview_fps, include_frames)
 }
 
 /// Pure parameter-based inclusion resolution — testable without Cli.
@@ -201,14 +197,16 @@ struct LogSink {
 
 impl LogSink {
     fn new() -> Self {
-        Self { count: AtomicU64::new(0) }
+        Self {
+            count: AtomicU64::new(0),
+        }
     }
 }
 
 impl OutputSink for LogSink {
     fn emit(&self, output: Arc<OutputEnvelope>) {
         let n = self.count.fetch_add(1, Ordering::Relaxed) + 1;
-        if n % 60 == 0 {
+        if n.is_multiple_of(60) {
             info!(
                 feed = %output.feed_id,
                 seq = output.frame_seq,
@@ -226,20 +224,26 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Metrics: spin up a tokio runtime for the OTel background exporter
     // only when --otlp-endpoint is provided.  No tokio overhead otherwise.
-    let metrics_rt = args.otlp_endpoint.as_ref().map(|_| {
-        tokio::runtime::Runtime::new()
-    }).transpose()?;
-    let metrics = args.otlp_endpoint.as_ref().map(|endpoint| {
-        // Enter the tokio context only for the duration of build(),
-        // then drop the guard so that block_on() in the shutdown path
-        // is never called from within an entered runtime context.
-        let _guard = metrics_rt.as_ref().unwrap().enter();
-        MetricsExporter::builder()
-            .runtime_handle(runtime_handle.clone())
-            .otlp_endpoint(endpoint)
-            .service_name("nv-sample-app")
-            .build()
-    }).transpose()?;
+    let metrics_rt = args
+        .otlp_endpoint
+        .as_ref()
+        .map(|_| tokio::runtime::Runtime::new())
+        .transpose()?;
+    let metrics = args
+        .otlp_endpoint
+        .as_ref()
+        .map(|endpoint| {
+            // Enter the tokio context only for the duration of build(),
+            // then drop the guard so that block_on() in the shutdown path
+            // is never called from within an entered runtime context.
+            let _guard = metrics_rt.as_ref().unwrap().enter();
+            MetricsExporter::builder()
+                .runtime_handle(runtime_handle.clone())
+                .otlp_endpoint(endpoint)
+                .service_name("nv-sample-app")
+                .build()
+        })
+        .transpose()?;
 
     // Feed handles — kept alive and passed to the UI.
     let feeds;
@@ -306,7 +310,8 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
         args: &Cli,
         ui_state: &Option<ui::SharedUiState>,
         make_sink: &dyn Fn(&Option<ui::SharedUiState>) -> Box<dyn OutputSink>,
-        make_builder: &dyn Fn() -> Result<nv_runtime::FeedConfigBuilder, Box<dyn std::error::Error>>,
+        make_builder: &dyn Fn()
+            -> Result<nv_runtime::FeedConfigBuilder, Box<dyn std::error::Error>>,
     ) -> Result<Vec<nv_runtime::FeedHandle>, Box<dyn std::error::Error>> {
         let device_residency = crate::mode::select_device_residency(args.gpu);
         let frame_inclusion = resolve_frame_inclusion(args, ui_state.is_some());
@@ -317,8 +322,13 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let builder = make_builder()?;
             let redacted_source = format!("{source:?}");
             let feed_config = build_feed_config(
-                builder, source, sink, args.queue_depth,
-                frame_inclusion, args.decode, device_residency.clone(),
+                builder,
+                source,
+                sink,
+                args.queue_depth,
+                frame_inclusion,
+                args.decode,
+                device_residency.clone(),
             )?;
             let feed = runtime.add_feed(feed_config)?;
             info!(feed_index = i, feed_id = %feed.id(), source = redacted_source, "feed started");
@@ -336,7 +346,11 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
             "batch mode enabled"
         );
 
-        let gpu_timeout = if args.gpu { Some(GPU_STARTUP_TIMEOUT) } else { None };
+        let gpu_timeout = if args.gpu {
+            Some(GPU_STARTUP_TIMEOUT)
+        } else {
+            None
+        };
 
         let batch_hdl = runtime.create_batch(
             Box::new(create_batch_processor(&args)),
@@ -380,7 +394,11 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .spawn(move || {
             while let Ok(event) = health_rx.blocking_recv() {
                 match &event {
-                    HealthEvent::FrameLag { feed_id, frame_age_ms, frames_lagged } => {
+                    HealthEvent::FrameLag {
+                        feed_id,
+                        frame_age_ms,
+                        frames_lagged,
+                    } => {
                         warn!(
                             feed_id = %feed_id,
                             frame_age_ms,
@@ -388,7 +406,10 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             "frame lag detected"
                         );
                     }
-                    HealthEvent::BackpressureDrop { feed_id, frames_dropped } => {
+                    HealthEvent::BackpressureDrop {
+                        feed_id,
+                        frames_dropped,
+                    } => {
                         warn!(feed_id = %feed_id, frames_dropped, "backpressure drop");
                     }
                     HealthEvent::SourceDisconnected { feed_id, reason } => {
@@ -400,7 +421,10 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     HealthEvent::FeedStopped { feed_id, reason } => {
                         info!(feed_id = %feed_id, ?reason, "feed stopped");
                     }
-                    HealthEvent::FeedRestarting { feed_id, restart_count } => {
+                    HealthEvent::FeedRestarting {
+                        feed_id,
+                        restart_count,
+                    } => {
                         warn!(feed_id = %feed_id, restart_count, "feed restarting");
                     }
                     _ => {
@@ -435,12 +459,11 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     info!("shutting down");
     // Flush metrics before tearing down the runtime they observe.
-    if let Some(m) = metrics {
-        if let Some(rt) = &metrics_rt {
-            if let Err(e) = rt.block_on(m.shutdown()) {
-                warn!(error = %e, "metrics shutdown error");
-            }
-        }
+    if let Some(m) = metrics
+        && let Some(rt) = &metrics_rt
+        && let Err(e) = rt.block_on(m.shutdown())
+    {
+        warn!(error = %e, "metrics shutdown error");
     }
     runtime.shutdown()?;
     Ok(())
@@ -482,7 +505,9 @@ mod tests {
         let result = resolve_frame_inclusion_params(None, None, true);
         assert_eq!(
             result,
-            FrameInclusion::Sampled { interval: DEFAULT_PREVIEW_INTERVAL },
+            FrameInclusion::Sampled {
+                interval: DEFAULT_PREVIEW_INTERVAL
+            },
         );
     }
 

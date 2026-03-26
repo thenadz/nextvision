@@ -21,7 +21,10 @@ use nv_frame::PixelFormat;
 /// support 3-byte formats in NVMM memory.  The letterbox preprocessing
 /// extracts R, G, B channels regardless (alpha is discarded), so both
 /// formats produce identical inference results.
-pub(crate) fn require_rgb_compatible(format: PixelFormat, stage_id: StageId) -> Result<u32, StageError> {
+pub(crate) fn require_rgb_compatible(
+    format: PixelFormat,
+    stage_id: StageId,
+) -> Result<u32, StageError> {
     match format {
         PixelFormat::Rgb8 => Ok(3),
         PixelFormat::Rgba8 => Ok(4),

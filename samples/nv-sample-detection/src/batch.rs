@@ -57,7 +57,10 @@ impl DetectorBatchProcessor {
     pub fn new(config: DetectorConfig) -> Self {
         let policy = config.effective_host_fallback();
         Self {
-            preprocessor: Box::new(HostBatchPreprocessor::with_policy(Self::PROCESSOR_ID, policy)),
+            preprocessor: Box::new(HostBatchPreprocessor::with_policy(
+                Self::PROCESSOR_ID,
+                policy,
+            )),
             config,
             session: None,
             det_counter: 0,

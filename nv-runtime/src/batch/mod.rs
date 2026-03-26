@@ -1,9 +1,9 @@
 //! Shared batch coordination infrastructure.
 //!
 //! This module provides the runtime-side machinery for cross-feed batch
-//! inference: a [`BatchCoordinator`] that collects frames from feed
+//! inference: a `BatchCoordinator` that collects frames from feed
 //! threads, forms bounded batches, dispatches to a user-supplied
-//! [`BatchProcessor`](nv_perception::BatchProcessor), and routes results
+//! `BatchProcessor`, and routes results
 //! back to feed-local pipeline continuations.
 //!
 //! # Ownership
@@ -23,7 +23,7 @@
 //!                    BatchProcessor::process(&mut self, &mut [BatchEntry])
 //! ```
 //!
-//! Each feed thread submits a [`BatchEntry`] (frame + view snapshot) via
+//! Each feed thread submits a `BatchEntry` (frame + view snapshot) via
 //! a bounded channel and blocks on a per-item response channel. The
 //! coordinator thread collects items until `max_batch_size` or
 //! `max_latency`, calls the processor, and routes results back.
@@ -31,8 +31,8 @@
 //! # Backpressure
 //!
 //! Submission uses `try_send` (non-blocking). If the coordinator queue is
-//! full, the feed thread receives [`BatchSubmitError::QueueFull`] and the
-//! frame is dropped with a [`HealthEvent::BatchSubmissionRejected`] event.
+//! full, the feed thread receives `BatchSubmitError::QueueFull` and the
+//! frame is dropped with a `HealthEvent::BatchSubmissionRejected` event.
 //! Rejection counts are coalesced per-feed with a 1-second throttle
 //! window, and flushed on recovery or lifecycle boundaries.
 //!
@@ -48,16 +48,16 @@
 //! from the moment it enters the submission queue until the coordinator
 //! routes its result back (or drains it at shutdown).
 //!
-//! Under normal operation, [`submit_and_wait`](BatchHandle::submit_and_wait)
+//! Under normal operation, `submit_and_wait`
 //! is synchronous — the feed thread blocks until the result arrives.
 //! With the default cap of 1, at most one item per feed is in the queue
 //! at any time.
 //!
 //! **Timeout regime**: when `submit_and_wait` returns
-//! [`BatchSubmitError::Timeout`], the timed-out item remains in-flight
+//! `BatchSubmitError::Timeout`, the timed-out item remains in-flight
 //! inside the coordinator. The in-flight cap prevents the feed from
 //! stacking additional items: the next `submit_and_wait` call returns
-//! [`BatchSubmitError::InFlightCapReached`] immediately until the
+//! `BatchSubmitError::InFlightCapReached` immediately until the
 //! coordinator processes (or drains) the orphaned item. This bounds
 //! per-feed queue occupancy to `max_in_flight_per_feed` even under
 //! sustained processor slowness.
@@ -74,10 +74,10 @@
 //! approximately uniform, but short-term skew is possible.
 //!
 //! **Diagnostic**: per-feed rejection counts are visible via
-//! [`HealthEvent::BatchSubmissionRejected`] events, per-feed
-//! timeout counts via [`HealthEvent::BatchTimeout`] events, and
+//! `HealthEvent::BatchSubmissionRejected` events, per-feed
+//! timeout counts via `HealthEvent::BatchTimeout` events, and
 //! per-feed in-flight cap rejections via
-//! [`HealthEvent::BatchInFlightExceeded`] events (all coalesced
+//! `HealthEvent::BatchInFlightExceeded` events (all coalesced
 //! per feed). Persistent in-flight rejections indicate the
 //! processor is too slow for the configured timeout.
 //!
@@ -115,13 +115,13 @@
 //! ## Response timeout
 //!
 //! `submit_and_wait` blocks for at most `max_latency + response_timeout`
-//! before returning [`BatchSubmitError::Timeout`]. The response timeout
-//! defaults to 5 s ([`DEFAULT_RESPONSE_TIMEOUT`]) and can be configured
+//! before returning `BatchSubmitError::Timeout`. The response timeout
+//! defaults to 5 s (`DEFAULT_RESPONSE_TIMEOUT`) and can be configured
 //! via [`BatchConfig::response_timeout`].
 //!
 //! ## Expected vs unexpected coordinator loss
 //!
-//! [`PipelineExecutor`](crate::executor::PipelineExecutor) distinguishes
+//! `PipelineExecutor` distinguishes
 //! expected shutdown (feed/runtime is shutting down) from unexpected
 //! coordinator death by checking the feed's shutdown flag. Unexpected
 //! loss emits exactly one `HealthEvent::StageError` per feed.

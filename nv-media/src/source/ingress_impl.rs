@@ -118,47 +118,45 @@ impl MediaIngress for MediaSource {
         let _reconnect_delay = self.poll_bus();
 
         // Check liveness watchdog: if armed and expired, force reconnect.
-        if self.state == SourceState::Running {
-            if let Some(deadline) = self.liveness_deadline {
-                if Instant::now() >= deadline {
-                    tracing::warn!(
-                        feed_id = %self.feed_id,
-                        "liveness watchdog expired — no stream started, forcing reconnect"
-                    );
-                    self.liveness_deadline = None;
+        if self.state == SourceState::Running
+            && let Some(deadline) = self.liveness_deadline
+            && Instant::now() >= deadline
+        {
+            tracing::warn!(
+                feed_id = %self.feed_id,
+                "liveness watchdog expired — no stream started, forcing reconnect"
+            );
+            self.liveness_deadline = None;
 
-                    // If the source is using PreferTls and TLS fallback is
-                    // not yet active, activate it so the next reconnection
-                    // attempt uses plain rtsp:// instead of rtsps://.
-                    if !self.tls_fallback_active {
-                        if let SourceSpec::Rtsp { security, .. } = &self.spec {
-                            if *security == nv_core::security::RtspSecurityPolicy::PreferTls {
-                                tracing::info!(
-                                    feed_id = %self.feed_id,
-                                    "TLS connection did not produce a stream — \
-                                     falling back to plain RTSP"
-                                );
-                                self.tls_fallback_active = true;
-                            }
-                        }
-                    }
-
-                    if let Some(delay) = self.disconnect_and_reconnect(MediaError::Timeout) {
-                        // Give the camera hardware time to release the
-                        // failed TLS session before the plain-RTSP attempt.
-                        // Many cameras (e.g. Hikvision) throttle or reject
-                        // rapid successive RTSP DESCRIBE requests.
-                        let cooldown = if self.tls_fallback_active {
-                            delay.max(Duration::from_secs(3))
-                        } else {
-                            delay
-                        };
-                        self.reconnect_deadline = Some(Instant::now() + cooldown);
-                    }
-                    // Re-poll to pick up the reconnection state.
-                    let _delay = self.poll_bus();
-                }
+            // If the source is using PreferTls and TLS fallback is
+            // not yet active, activate it so the next reconnection
+            // attempt uses plain rtsp:// instead of rtsps://.
+            if !self.tls_fallback_active
+                && let SourceSpec::Rtsp { security, .. } = &self.spec
+                && *security == nv_core::security::RtspSecurityPolicy::PreferTls
+            {
+                tracing::info!(
+                    feed_id = %self.feed_id,
+                    "TLS connection did not produce a stream — \
+                     falling back to plain RTSP"
+                );
+                self.tls_fallback_active = true;
             }
+
+            if let Some(delay) = self.disconnect_and_reconnect(MediaError::Timeout) {
+                // Give the camera hardware time to release the
+                // failed TLS session before the plain-RTSP attempt.
+                // Many cameras (e.g. Hikvision) throttle or reject
+                // rapid successive RTSP DESCRIBE requests.
+                let cooldown = if self.tls_fallback_active {
+                    delay.max(Duration::from_secs(3))
+                } else {
+                    delay
+                };
+                self.reconnect_deadline = Some(Instant::now() + cooldown);
+            }
+            // Re-poll to pick up the reconnection state.
+            let _delay = self.poll_bus();
         }
 
         // Map the resulting state and compute the next-tick hint.

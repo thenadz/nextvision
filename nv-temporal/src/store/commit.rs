@@ -128,10 +128,10 @@ impl TemporalStore {
     /// Should be called once per frame, after all track commits.
     ///
     /// Phase 1: evict `Lost` tracks older than
-    /// [`RetentionPolicy::max_track_age`].
+    /// `RetentionPolicy::max_track_age`.
     ///
     /// Phase 2: if the track count exceeds
-    /// [`RetentionPolicy::max_concurrent_tracks`], evict tracks by
+    /// `RetentionPolicy::max_concurrent_tracks`, evict tracks by
     /// priority until under the limit:
     ///   1. `Lost` (oldest first)
     ///   2. `Coasted` (oldest first)
@@ -140,12 +140,12 @@ impl TemporalStore {
     /// `Confirmed` tracks are never evicted by the hard cap.
     ///
     /// Note: in normal production flow the cap is already enforced by
-    /// [`commit_track`]'s pre-eviction, so Phase 2 is a
+    /// `commit_track`'s pre-eviction, so Phase 2 is a
     /// safety-net that fires only when tracks are inserted via test
     /// helpers or other non-`commit_track` paths.
     ///
     /// Phase 3: prune trajectory points for all surviving tracks to
-    /// stay within [`RetentionPolicy::max_trajectory_points_per_track`].
+    /// stay within `RetentionPolicy::max_trajectory_points_per_track`.
     pub fn enforce_retention(&mut self, now_ts: MonotonicTs) {
         let max_age = self.retention.max_track_age;
         let max_tracks = self.retention.max_concurrent_tracks;
@@ -154,12 +154,11 @@ impl TemporalStore {
         // Phase 1: age-based eviction of Lost tracks.
         let mut to_evict: Vec<TrackId> = Vec::new();
         for (id, history) in self.tracks.iter() {
-            if history.track.state == nv_perception::TrackState::Lost {
-                if let Some(age) = now_ts.checked_duration_since(history.last_seen) {
-                    if age >= max_age {
-                        to_evict.push(*id);
-                    }
-                }
+            if history.track.state == nv_perception::TrackState::Lost
+                && let Some(age) = now_ts.checked_duration_since(history.last_seen)
+                && age >= max_age
+            {
+                to_evict.push(*id);
             }
         }
         for id in &to_evict {

@@ -201,19 +201,16 @@ impl GpuPipelineProvider for NvmmProvider {
 
         // Capsfilter to constrain nvvidconv output to NVMM + target format.
         let caps_str = format!("video/x-raw(memory:NVMM),format={gst_format}");
-        let caps = gstreamer::Caps::from_str(&caps_str).map_err(|e| {
-            MediaError::DecodeFailed {
-                detail: format!("invalid NVMM caps string '{caps_str}': {e}"),
-            }
+        let caps = gstreamer::Caps::from_str(&caps_str).map_err(|e| MediaError::DecodeFailed {
+            detail: format!("invalid NVMM caps string '{caps_str}': {e}"),
         })?;
 
-        let capsfilter =
-            gstreamer::ElementFactory::make("capsfilter")
-                .property("caps", &caps)
-                .build()
-                .map_err(|_| MediaError::Unsupported {
-                    detail: "capsfilter element not found".into(),
-                })?;
+        let capsfilter = gstreamer::ElementFactory::make("capsfilter")
+            .property("caps", &caps)
+            .build()
+            .map_err(|_| MediaError::Unsupported {
+                detail: "capsfilter element not found".into(),
+            })?;
 
         // Appsink with NVMM caps.
         let appsink = gstreamer_app::AppSink::builder()
@@ -274,14 +271,8 @@ impl GpuPipelineProvider for NvmmProvider {
         let mat_width = info.width;
         let mat_height = info.height;
         let mat_bpp = pixel_format_bpp(effective);
-        let materialize: HostMaterializeFn = Box::new(move || {
-            materialize_nvmm_to_host(
-                dmabuf_fd,
-                mat_width,
-                mat_height,
-                mat_bpp,
-            )
-        });
+        let materialize: HostMaterializeFn =
+            Box::new(move || materialize_nvmm_to_host(dmabuf_fd, mat_width, mat_height, mat_bpp));
 
         // Frame stride = tightly-packed row width, since the materializer
         // strips GPU alignment padding when copying to host memory.
@@ -290,8 +281,6 @@ impl GpuPipelineProvider for NvmmProvider {
 
         Ok(info.into_device_envelope(feed_id, effective, handle, Some(materialize), ptz))
     }
-
-
 }
 
 // ---------------------------------------------------------------------------
@@ -382,15 +371,11 @@ fn extract_dmabuf_fd(buffer: &gstreamer::Buffer) -> Result<i32, MediaError> {
     let mem = buffer.peek_memory(0);
 
     // ── Tier 1: GStreamer DmaBuf allocator ────────────────────────────
-    if let Some(dmabuf) =
-        mem.downcast_memory_ref::<gstreamer_allocators::DmaBufMemory>()
-    {
+    if let Some(dmabuf) = mem.downcast_memory_ref::<gstreamer_allocators::DmaBufMemory>() {
         let fd: RawFd = dmabuf.fd();
         if fd < 0 {
             return Err(MediaError::DecodeFailed {
-                detail: format!(
-                    "DmaBuf memory returned negative FD ({fd})"
-                ),
+                detail: format!("DmaBuf memory returned negative FD ({fd})"),
             });
         }
         tracing::trace!(fd, "extracted DMA-buf FD via GstDmaBufMemory");
@@ -398,15 +383,11 @@ fn extract_dmabuf_fd(buffer: &gstreamer::Buffer) -> Result<i32, MediaError> {
     }
 
     // ── Tier 2: GStreamer Fd allocator ────────────────────────────────
-    if let Some(fdmem) =
-        mem.downcast_memory_ref::<gstreamer_allocators::FdMemory>()
-    {
+    if let Some(fdmem) = mem.downcast_memory_ref::<gstreamer_allocators::FdMemory>() {
         let fd: RawFd = fdmem.fd();
         if fd < 0 {
             return Err(MediaError::DecodeFailed {
-                detail: format!(
-                    "FdMemory returned negative FD ({fd})"
-                ),
+                detail: format!("FdMemory returned negative FD ({fd})"),
             });
         }
         tracing::trace!(fd, "extracted DMA-buf FD via GstFdMemory");
@@ -442,12 +423,14 @@ fn extract_dmabuf_fd(buffer: &gstreamer::Buffer) -> Result<i32, MediaError> {
         });
     }
 
-    let map = buffer.map_readable().map_err(|_| MediaError::DecodeFailed {
-        detail: format!(
-            "failed to map NVMM buffer readable (allocator='{allocator_name}') — \
+    let map = buffer
+        .map_readable()
+        .map_err(|_| MediaError::DecodeFailed {
+            detail: format!(
+                "failed to map NVMM buffer readable (allocator='{allocator_name}') — \
              is this a valid NVMM allocation?"
-        ),
-    })?;
+            ),
+        })?;
 
     // The mapped data IS the NvBufSurface struct on JetPack 5.x.
     if map.len() < std::mem::size_of::<ffi::NvBufSurface>() {
@@ -469,22 +452,18 @@ fn extract_dmabuf_fd(buffer: &gstreamer::Buffer) -> Result<i32, MediaError> {
 
     if surface.surface_list.is_null() {
         return Err(MediaError::DecodeFailed {
-            detail: format!(
-                "NvBufSurface.surface_list is null; allocator='{allocator_name}'"
-            ),
+            detail: format!("NvBufSurface.surface_list is null; allocator='{allocator_name}'"),
         });
     }
     if surface.batch_size == 0 {
         return Err(MediaError::DecodeFailed {
-            detail: format!(
-                "NvBufSurface.batch_size is 0; allocator='{allocator_name}'"
-            ),
+            detail: format!("NvBufSurface.batch_size is 0; allocator='{allocator_name}'"),
         });
     }
 
     let dmabuf_fd = unsafe { (*surface.surface_list).buffer_desc } as i32;
 
-    if dmabuf_fd < 0 || dmabuf_fd > MAX_REASONABLE_FD {
+    if !(0..=MAX_REASONABLE_FD).contains(&dmabuf_fd) {
         return Err(MediaError::DecodeFailed {
             detail: format!(
                 "NvBufSurface.bufferDesc produced implausible FD value \
@@ -547,8 +526,7 @@ fn extract_nvmm_pointer(
     // SAFETY: `dmabuf_fd` was extracted from a valid NVMM GStreamer
     // buffer.  `NvBufSurfaceFromFd` populates `surface_ptr` with a
     // valid `NvBufSurface*` on success.
-    let ret =
-        unsafe { ffi::NvBufSurfaceFromFd(dmabuf_fd, &mut surface_ptr as *mut _) };
+    let ret = unsafe { ffi::NvBufSurfaceFromFd(dmabuf_fd, &mut surface_ptr as *mut _) };
 
     if ret != 0 || surface_ptr.is_null() {
         return Err(MediaError::DecodeFailed {
@@ -618,7 +596,9 @@ fn extract_nvmm_pointer(
 
     // Validate the extracted pointer.
     if data_ptr == 0 {
-        unsafe { ffi::NvBufSurfaceUnMap(surface_ptr, 0, -1); }
+        unsafe {
+            ffi::NvBufSurfaceUnMap(surface_ptr, 0, -1);
+        }
         return Err(MediaError::DecodeFailed {
             detail: "NVMM data pointer is null after NvBufSurfaceMap".into(),
         });
@@ -627,7 +607,9 @@ fn extract_nvmm_pointer(
     // Rough sanity check — at minimum, 1 byte per pixel expected.
     let min_size = (width as usize).saturating_mul(height as usize);
     if data_size > 0 && data_size < min_size {
-        unsafe { ffi::NvBufSurfaceUnMap(surface_ptr, 0, -1); }
+        unsafe {
+            ffi::NvBufSurfaceUnMap(surface_ptr, 0, -1);
+        }
         return Err(MediaError::DecodeFailed {
             detail: format!(
                 "NVMM buffer too small: {data_size} bytes for {width}×{height} \
@@ -768,13 +750,15 @@ fn materialize_nvmm_to_host(
             })
         } else {
             let row_bytes = (width as usize).saturating_mul(bpp as usize);
-            let src_stride = if nvmm_pitch > 0 { nvmm_pitch } else { row_bytes };
+            let src_stride = if nvmm_pitch > 0 {
+                nvmm_pitch
+            } else {
+                row_bytes
+            };
 
             if src_stride < row_bytes {
                 Err(nv_frame::FrameAccessError::MaterializationFailed {
-                    detail: format!(
-                        "NVMM stride ({src_stride}) < row_bytes ({row_bytes})"
-                    ),
+                    detail: format!("NVMM stride ({src_stride}) < row_bytes ({row_bytes})"),
                 })
             } else {
                 let total_read = (height as usize)

@@ -4,7 +4,7 @@
 //! used on the hot path — stages that need a specific format should convert
 //! explicitly.
 
-use crate::frame::{FrameEnvelope, FrameAccessError, PixelFormat};
+use crate::frame::{FrameAccessError, FrameEnvelope, PixelFormat};
 
 /// Errors from [`convert()`].
 #[derive(Debug, thiserror::Error)]
@@ -66,7 +66,7 @@ pub fn convert(frame: &FrameEnvelope, target: PixelFormat) -> Result<FrameEnvelo
             return Err(ConvertError::Unsupported {
                 from: frame.format(),
                 to: target,
-            })
+            });
         }
     };
     let required = checked_frame_size(w, h, src_stride, src_bpp).ok_or_else(|| {
@@ -78,12 +78,18 @@ pub fn convert(frame: &FrameEnvelope, target: PixelFormat) -> Result<FrameEnvelo
         })
     })?;
     if host_bytes.len() < required {
-        return Err(ConvertError::Access(FrameAccessError::MaterializationFailed {
-            detail: format!(
-                "frame data too short: {} bytes for {}x{} stride={} bpp={}",
-                host_bytes.len(), w, h, src_stride, src_bpp,
-            ),
-        }));
+        return Err(ConvertError::Access(
+            FrameAccessError::MaterializationFailed {
+                detail: format!(
+                    "frame data too short: {} bytes for {}x{} stride={} bpp={}",
+                    host_bytes.len(),
+                    w,
+                    h,
+                    src_stride,
+                    src_bpp,
+                ),
+            },
+        ));
     }
 
     let converted = match (frame.format(), target) {
@@ -96,7 +102,7 @@ pub fn convert(frame: &FrameEnvelope, target: PixelFormat) -> Result<FrameEnvelo
             return Err(ConvertError::Unsupported {
                 from: frame.format(),
                 to: target,
-            })
+            });
         }
     };
 
@@ -116,7 +122,7 @@ pub fn convert(frame: &FrameEnvelope, target: PixelFormat) -> Result<FrameEnvelo
             return Err(ConvertError::Unsupported {
                 from: frame.format(),
                 to: target,
-            })
+            });
         }
     };
 

@@ -8,7 +8,7 @@
 //! [`Runtime::shutdown()`] consumes the runtime, joins all worker threads,
 //! and guarantees a clean stop.
 //!
-//! Each feed runs on a dedicated OS thread (see [`worker`](crate::worker)).
+//! Each feed runs on a dedicated OS thread (see the `worker` module).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -84,7 +84,7 @@ impl RuntimeBuilder {
 
     /// Set the output broadcast channel capacity. Default: `256`.
     ///
-    /// Controls how many [`OutputEnvelope`]s the aggregate output
+    /// Controls how many `OutputEnvelope`s the aggregate output
     /// subscription channel can buffer before the ring buffer wraps.
     ///
     /// When the internal sentinel receiver detects ring-buffer wrap,
@@ -102,7 +102,7 @@ impl RuntimeBuilder {
     /// Set a custom `MediaIngressFactory`.
     ///
     /// By default the runtime uses the built-in media backend
-    /// ([`DefaultMediaFactory`](nv_media::DefaultMediaFactory)).
+    /// ([`DefaultMediaFactory`]).
     /// Replace this for testing or alternative backends.
     #[must_use]
     pub fn ingress_factory(mut self, factory: Box<dyn MediaIngressFactory>) -> Self {
@@ -138,7 +138,10 @@ impl RuntimeBuilder {
     /// when pipeline strings originate from trusted sources (e.g.,
     /// hard-coded application code).
     #[must_use]
-    pub fn custom_pipeline_policy(mut self, policy: nv_core::security::CustomPipelinePolicy) -> Self {
+    pub fn custom_pipeline_policy(
+        mut self,
+        policy: nv_core::security::CustomPipelinePolicy,
+    ) -> Self {
         self.custom_pipeline_policy = policy;
         self
     }
@@ -279,7 +282,10 @@ impl RuntimeInner {
                 .feeds
                 .lock()
                 .map_err(|_| NvError::Runtime(RuntimeError::RegistryPoisoned))?;
-            feeds.values().map(|entry| Arc::clone(&entry.shared)).collect()
+            feeds
+                .values()
+                .map(|entry| Arc::clone(&entry.shared))
+                .collect()
         };
 
         // Build per-feed diagnostics outside the lock.
@@ -403,15 +409,20 @@ impl RuntimeInner {
         if matches!(config.source, nv_core::config::SourceSpec::Custom { .. })
             && self.custom_pipeline_policy == nv_core::security::CustomPipelinePolicy::Reject
         {
-            return Err(NvError::Media(nv_core::error::MediaError::CustomPipelineRejected));
+            return Err(NvError::Media(
+                nv_core::error::MediaError::CustomPipelineRejected,
+            ));
         }
         // Reject insecure RTSP URLs when RequireTls is set.
-        if let nv_core::config::SourceSpec::Rtsp { ref url, security, .. } = config.source {
-            if security == nv_core::security::RtspSecurityPolicy::RequireTls
-                && nv_core::security::is_insecure_rtsp(url)
-            {
-                return Err(NvError::Media(nv_core::error::MediaError::InsecureRtspRejected));
-            }
+        if let nv_core::config::SourceSpec::Rtsp {
+            ref url, security, ..
+        } = config.source
+            && security == nv_core::security::RtspSecurityPolicy::RequireTls
+            && nv_core::security::is_insecure_rtsp(url)
+        {
+            return Err(NvError::Media(
+                nv_core::error::MediaError::InsecureRtspRejected,
+            ));
         }
 
         let mut feeds = self
@@ -462,10 +473,11 @@ impl RuntimeInner {
         entry.shared.request_shutdown();
         drop(feeds);
 
-        if let Some(handle) = entry.thread {
-            if let Some(detached) = bounded_join(handle, feed_id, &self.health_tx, self.feed_join_timeout) {
-                self.track_detached(std::iter::once(detached));
-            }
+        if let Some(handle) = entry.thread
+            && let Some(detached) =
+                bounded_join(handle, feed_id, &self.health_tx, self.feed_join_timeout)
+        {
+            self.track_detached(std::iter::once(detached));
         }
         Ok(())
     }
@@ -500,8 +512,7 @@ impl RuntimeInner {
         // coordinator signaling even when the mutex is poisoned —
         // shutdown must not silently skip cleanup.
         {
-            let coordinators = self.coordinators.lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let coordinators = self.coordinators.lock().unwrap_or_else(|e| e.into_inner());
             for coordinator in coordinators.iter() {
                 coordinator.signal_shutdown();
             }
@@ -512,10 +523,11 @@ impl RuntimeInner {
         // Coordinators are shutting down concurrently, so feed threads
         // blocked on batch responses will unblock promptly.
         for (id, mut entry) in entries {
-            if let Some(handle) = entry.thread.take() {
-                if let Some(detached) = bounded_join(handle, id, &self.health_tx, self.feed_join_timeout) {
-                    self.track_detached(std::iter::once(detached));
-                }
+            if let Some(handle) = entry.thread.take()
+                && let Some(detached) =
+                    bounded_join(handle, id, &self.health_tx, self.feed_join_timeout)
+            {
+                self.track_detached(std::iter::once(detached));
             }
         }
 
@@ -523,8 +535,7 @@ impl RuntimeInner {
         //
         // All feed threads are done (or detached). No new submissions.
         {
-            let mut coordinators = self.coordinators.lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut coordinators = self.coordinators.lock().unwrap_or_else(|e| e.into_inner());
             let detached: Vec<_> = coordinators
                 .drain(..)
                 .filter_map(|c| c.shutdown(self.coordinator_join_timeout))
@@ -589,7 +600,11 @@ fn bounded_join(
                     ),
                 },
             });
-            joiner.ok().map(|j| DetachedJoin { label, done_rx, joiner: j })
+            joiner.ok().map(|j| DetachedJoin {
+                label,
+                done_rx,
+                joiner: j,
+            })
         }
     }
 }
@@ -733,7 +748,7 @@ impl Runtime {
     /// Create a shared batch coordinator for cross-feed inference.
     ///
     /// Returns a clonable [`BatchHandle`] that can be shared across
-    /// multiple feeds via [`FeedPipeline::builder().batch(handle)`].
+    /// multiple feeds via `FeedPipeline::builder().batch(handle)`.
     ///
     /// The coordinator takes **ownership** of the processor (via `Box`).
     /// A single coordinator thread is the sole caller of all processor

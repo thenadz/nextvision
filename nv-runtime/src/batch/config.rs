@@ -41,8 +41,8 @@ pub struct BatchConfig {
     /// Submission queue capacity.
     ///
     /// Controls how many pending items can be buffered before
-    /// [`submit_and_wait`](super::BatchHandle::submit_and_wait) returns
-    /// [`BatchSubmitError::QueueFull`](super::BatchSubmitError::QueueFull).
+    /// `submit_and_wait` returns
+    /// `BatchSubmitError::QueueFull`.
     ///
     /// Defaults to `max_batch_size * 4` (minimum 4) when `None`.
     /// When specified, must be ≥ `max_batch_size`.
@@ -64,8 +64,8 @@ pub struct BatchConfig {
     /// An item is "in-flight" from the moment it enters the submission
     /// queue until the coordinator routes its result back (or drains it
     /// at shutdown). When a feed reaches this limit, further
-    /// [`submit_and_wait`](super::BatchHandle::submit_and_wait) calls fail
-    /// immediately with [`BatchSubmitError::InFlightCapReached`](super::BatchSubmitError::InFlightCapReached)
+    /// `submit_and_wait` calls fail
+    /// immediately with `BatchSubmitError::InFlightCapReached`
     /// rather than adding to the queue.
     ///
     /// This prevents a feed from accumulating orphaned items in the
@@ -77,7 +77,7 @@ pub struct BatchConfig {
     /// Default: 1 — each feed contributes at most one item to the
     /// shared queue at any time. Must be ≥ 1.
     pub max_in_flight_per_feed: usize,
-    /// Maximum time to wait for [`BatchProcessor::on_start()`] to
+    /// Maximum time to wait for `BatchProcessor::on_start()` to
     /// complete before returning an error.
     ///
     /// GPU-backed processors (e.g. TensorRT engine compilation) may
@@ -162,7 +162,7 @@ impl BatchConfig {
 
     /// Validate all configuration fields.
     ///
-    /// Called internally by [`BatchCoordinator::start`](super::BatchCoordinator::start).
+    /// Called internally by `BatchCoordinator::start`.
     /// Also available for early validation before passing a config to the runtime.
     ///
     /// # Errors
@@ -181,34 +181,34 @@ impl BatchConfig {
                 detail: "batch max_latency must be > 0".into(),
             });
         }
-        if let Some(rt) = self.response_timeout {
-            if rt.is_zero() {
-                return Err(ConfigError::InvalidPolicy {
-                    detail: "batch response_timeout must be > 0".into(),
-                });
-            }
+        if let Some(rt) = self.response_timeout
+            && rt.is_zero()
+        {
+            return Err(ConfigError::InvalidPolicy {
+                detail: "batch response_timeout must be > 0".into(),
+            });
         }
-        if let Some(cap) = self.queue_capacity {
-            if cap < self.max_batch_size {
-                return Err(ConfigError::InvalidPolicy {
-                    detail: format!(
-                        "batch queue_capacity ({cap}) must be >= max_batch_size ({})",
-                        self.max_batch_size
-                    ),
-                });
-            }
+        if let Some(cap) = self.queue_capacity
+            && cap < self.max_batch_size
+        {
+            return Err(ConfigError::InvalidPolicy {
+                detail: format!(
+                    "batch queue_capacity ({cap}) must be >= max_batch_size ({})",
+                    self.max_batch_size
+                ),
+            });
         }
         if self.max_in_flight_per_feed == 0 {
             return Err(ConfigError::InvalidPolicy {
                 detail: "batch max_in_flight_per_feed must be >= 1".into(),
             });
         }
-        if let Some(st) = self.startup_timeout {
-            if st.is_zero() {
-                return Err(ConfigError::InvalidPolicy {
-                    detail: "batch startup_timeout must be > 0".into(),
-                });
-            }
+        if let Some(st) = self.startup_timeout
+            && st.is_zero()
+        {
+            return Err(ConfigError::InvalidPolicy {
+                detail: "batch startup_timeout must be > 0".into(),
+            });
         }
         Ok(())
     }

@@ -623,7 +623,8 @@ fn sampled_inclusion_delivers_frame_periodically() {
 
     let expected_with_frame = frame_count / interval as u64;
     assert_eq!(
-        with_frame.len() as u64, expected_with_frame,
+        with_frame.len() as u64,
+        expected_with_frame,
         "expected {expected_with_frame} outputs with frame, got {}",
         with_frame.len()
     );

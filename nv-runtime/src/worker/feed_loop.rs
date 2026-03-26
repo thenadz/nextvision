@@ -492,14 +492,14 @@ impl FeedWorker {
                     paused = cvar.wait(paused).unwrap_or_else(|e| e.into_inner());
                 }
                 // Resume the source when leaving paused state.
-                if !self.shared.shutdown.load(Ordering::Relaxed) {
-                    if let Err(e) = source.resume() {
-                        tracing::warn!(
-                            feed_id = %self.feed_id,
-                            error = %e,
-                            "source resume failed"
-                        );
-                    }
+                if !self.shared.shutdown.load(Ordering::Relaxed)
+                    && let Err(e) = source.resume()
+                {
+                    tracing::warn!(
+                        feed_id = %self.feed_id,
+                        error = %e,
+                        "source resume failed"
+                    );
                 }
                 continue;
             }
@@ -535,7 +535,8 @@ impl FeedWorker {
             };
 
             // Run the pipeline.
-            let (maybe_output, health_events) = self.executor.process_frame(&frame, queue_hold_time);
+            let (maybe_output, health_events) =
+                self.executor.process_frame(&frame, queue_hold_time);
 
             // Check if any stage panicked.
             let had_panic = health_events
@@ -617,10 +618,10 @@ impl FeedWorker {
     /// This is a cheap check: the source returns a cached `Option` and
     /// the write only happens when the value actually changes.
     fn sync_decode_status(source: &dyn MediaIngress, shared: &FeedSharedState) {
-        if let Some(status) = source.decode_status() {
-            if let Ok(mut guard) = shared.decode_status.lock() {
-                *guard = Some(status);
-            }
+        if let Some(status) = source.decode_status()
+            && let Ok(mut guard) = shared.decode_status.lock()
+        {
+            *guard = Some(status);
         }
     }
 
@@ -696,7 +697,10 @@ impl FeedWorker {
             return false;
         }
         match (&self.restart_policy.restart_on, reason) {
-            (RestartTrigger::SourceFailure, ExitReason::StagePanic | ExitReason::StageStartFailed) => return false,
+            (
+                RestartTrigger::SourceFailure,
+                ExitReason::StagePanic | ExitReason::StageStartFailed,
+            ) => return false,
             (RestartTrigger::SourceOrStagePanic, _) => {}
             (RestartTrigger::SourceFailure, _) => {}
             (RestartTrigger::Never, _) => return false,

@@ -30,7 +30,7 @@
 //!    it might be `nvvidconv → appsink(NVMM)` or just `appsink(NVMM)`.
 //!
 //! 2. **Frame bridge** — the function that converts a `GstSample` into a
-//!    [`FrameEnvelope`](nv_frame::FrameEnvelope) with device-resident
+//!    `FrameEnvelope` with device-resident
 //!    pixel data (`bridge_sample`).
 //!
 //! The provider controls the full pipeline tail; any decoder-to-tail
@@ -42,11 +42,10 @@ use std::sync::atomic::AtomicU64;
 
 use nv_core::error::MediaError;
 use nv_core::id::FeedId;
-use nv_frame::frame::PixelFormat;
 use nv_frame::FrameEnvelope;
+use nv_frame::frame::PixelFormat;
 
 use crate::bridge::PtzTelemetry;
-
 
 /// Result of [`GpuPipelineProvider::build_pipeline_tail`].
 ///
@@ -114,10 +113,8 @@ pub trait GpuPipelineProvider: Send + Sync {
     /// Return `MediaError::Unsupported` if the required GStreamer elements
     /// or capabilities are not available at runtime.
     #[cfg(feature = "gst-backend")]
-    fn build_pipeline_tail(
-        &self,
-        pixel_format: PixelFormat,
-    ) -> Result<GpuPipelineTail, MediaError>;
+    fn build_pipeline_tail(&self, pixel_format: PixelFormat)
+    -> Result<GpuPipelineTail, MediaError>;
 
     /// Bridge a GStreamer sample into a device-resident [`FrameEnvelope`].
     ///
@@ -137,14 +134,12 @@ pub trait GpuPipelineProvider: Send + Sync {
         sample: &gstreamer::Sample,
         ptz: Option<PtzTelemetry>,
     ) -> Result<FrameEnvelope, MediaError>;
-
-
 }
 
 /// Shared handle to a [`GpuPipelineProvider`].
 ///
-/// Used by [`IngressOptions`](crate::IngressOptions),
-/// [`SessionConfig`](crate::backend::SessionConfig), and the pipeline
+/// Used by `IngressOptions`,
+/// `SessionConfig`, and the pipeline
 /// builder.
 pub type SharedGpuProvider = Arc<dyn GpuPipelineProvider>;
 
@@ -199,24 +194,23 @@ impl SampleInfo {
     ///
     /// Parses `VideoInfo` from the sample caps, reads the PTS, bumps
     /// the sequence counter, and captures a wall-clock timestamp.
-    pub fn extract(
-        sample: &gstreamer::Sample,
-        seq: &Arc<AtomicU64>,
-    ) -> Result<Self, MediaError> {
+    pub fn extract(sample: &gstreamer::Sample, seq: &Arc<AtomicU64>) -> Result<Self, MediaError> {
         use std::sync::atomic::Ordering;
 
         let caps = sample.caps().ok_or_else(|| MediaError::DecodeFailed {
             detail: "sample has no caps".into(),
         })?;
 
-        let video_info = gstreamer_video::VideoInfo::from_caps(caps)
-            .map_err(|e| MediaError::DecodeFailed {
+        let video_info =
+            gstreamer_video::VideoInfo::from_caps(caps).map_err(|e| MediaError::DecodeFailed {
                 detail: format!("failed to parse VideoInfo from caps: {e}"),
             })?;
 
-        let buffer = sample.buffer_owned().ok_or_else(|| MediaError::DecodeFailed {
-            detail: "sample has no buffer".into(),
-        })?;
+        let buffer = sample
+            .buffer_owned()
+            .ok_or_else(|| MediaError::DecodeFailed {
+                detail: "sample has no buffer".into(),
+            })?;
 
         let pts_ns = buffer.pts().map(|pts| pts.nseconds()).unwrap_or(0);
 

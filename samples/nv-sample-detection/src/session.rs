@@ -4,9 +4,9 @@
 //! [`DetectorBatchProcessor`](crate::DetectorBatchProcessor) (cross-feed batch).
 
 use ort::session::Session;
-use tracing::{debug, warn};
 #[cfg(feature = "gpu")]
 use tracing::info;
+use tracing::{debug, warn};
 
 use nv_core::error::StageError;
 use nv_core::id::StageId;
@@ -100,40 +100,41 @@ pub fn load_session(config: &DetectorConfig, stage_id: StageId) -> Result<Sessio
         );
     }
 
-    let session = builder
-        .commit_from_file(&config.model_path)
-        .map_err(|e| StageError::ModelLoadFailed {
-            stage_id,
-            detail: format!("ONNX load failed: {e}"),
-        })?;
+    let session =
+        builder
+            .commit_from_file(&config.model_path)
+            .map_err(|e| StageError::ModelLoadFailed {
+                stage_id,
+                detail: format!("ONNX load failed: {e}"),
+            })?;
 
     // Validate output schema: expect [batch, max_dets, 6].
-    if let Some(output) = session.outputs().first() {
-        if let ort::value::ValueType::Tensor { shape, .. } = output.dtype() {
-            if shape.len() != 3 {
-                return Err(StageError::ModelLoadFailed {
-                    stage_id,
-                    detail: format!(
-                        "unexpected output rank: expected 3 dimensions [batch, max_dets, 6], \
+    if let Some(output) = session.outputs().first()
+        && let ort::value::ValueType::Tensor { shape, .. } = output.dtype()
+    {
+        if shape.len() != 3 {
+            return Err(StageError::ModelLoadFailed {
+                stage_id,
+                detail: format!(
+                    "unexpected output rank: expected 3 dimensions [batch, max_dets, 6], \
                          got {} dimensions {:?}. Ensure the model is an end-to-end export.",
-                        shape.len(),
-                        &shape[..],
-                    ),
-                });
-            }
-            // The last dimension may be dynamic (-1). Only reject
-            // when it is a fixed positive value that isn't 6.
-            let cols = shape[2];
-            if cols > 0 && cols != EXPECTED_OUTPUT_COLS {
-                return Err(StageError::ModelLoadFailed {
-                    stage_id,
-                    detail: format!(
-                        "unexpected output columns: expected {EXPECTED_OUTPUT_COLS} \
+                    shape.len(),
+                    &shape[..],
+                ),
+            });
+        }
+        // The last dimension may be dynamic (-1). Only reject
+        // when it is a fixed positive value that isn't 6.
+        let cols = shape[2];
+        if cols > 0 && cols != EXPECTED_OUTPUT_COLS {
+            return Err(StageError::ModelLoadFailed {
+                stage_id,
+                detail: format!(
+                    "unexpected output columns: expected {EXPECTED_OUTPUT_COLS} \
                          [x1, y1, x2, y2, conf, class], got {cols}. \
                          Ensure the model is an end-to-end export.",
-                    ),
-                });
-            }
+                ),
+            });
         }
     }
 

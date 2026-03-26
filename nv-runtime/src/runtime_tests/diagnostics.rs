@@ -442,7 +442,7 @@ fn runtime_diagnostics_includes_batch_coordinators() {
                 queue_capacity: None,
                 response_timeout: None,
                 max_in_flight_per_feed: 1,
-            startup_timeout: None,
+                startup_timeout: None,
             },
         )
         .unwrap();
@@ -510,7 +510,7 @@ fn create_batch_rejects_duplicate_processor_id() {
         queue_capacity: None,
         response_timeout: None,
         max_in_flight_per_feed: 1,
-            startup_timeout: None,
+        startup_timeout: None,
     };
 
     let _h1 = runtime
@@ -554,7 +554,7 @@ fn create_batch_concurrent_duplicate_id_exactly_one_wins() {
         queue_capacity: None,
         response_timeout: None,
         max_in_flight_per_feed: 1,
-            startup_timeout: None,
+        startup_timeout: None,
     };
 
     const THREADS: usize = 8;
@@ -772,7 +772,7 @@ fn create_batch_during_shutdown_returns_shutdown_error() {
         queue_capacity: None,
         response_timeout: None,
         max_in_flight_per_feed: 1,
-            startup_timeout: None,
+        startup_timeout: None,
     };
 
     let gate_clone = Arc::clone(&gate);

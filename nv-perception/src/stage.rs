@@ -26,9 +26,9 @@
 //!   `detections` and `tracks` in its [`StageOutput`]. No separate tracker
 //!   stage is needed.
 //! - **Direct track emitter**: a stage produces `tracks` without intermediate
-//!   detections. Set `detection_id` to `None` on each [`TrackObservation`].
+//!   detections. Set `detection_id` to `None` on each `TrackObservation`.
 //! - **Richer observations**: per-observation metadata (embeddings, features,
-//!   model-specific scores) is stored in [`TrackObservation::metadata`].
+//!   model-specific scores) is stored in `TrackObservation::metadata`.
 //!   Per-track metadata goes in [`Track::metadata`]. Per-frame shared data
 //!   goes in [`StageOutput::artifacts`].
 //!
@@ -451,7 +451,7 @@ impl StageOutputBuilder {
 ///
 /// This is the **only** extension point for adding perception logic to the
 /// pipeline. Stages run in a fixed linear order; each stage sees the
-/// accumulated [`PerceptionArtifacts`](super::PerceptionArtifacts) from all
+/// accumulated [`PerceptionArtifacts`] from all
 /// prior stages.
 ///
 /// All methods take `&mut self`. The executor holds exclusive ownership of each

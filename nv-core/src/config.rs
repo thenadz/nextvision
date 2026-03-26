@@ -143,7 +143,11 @@ impl SourceSpec {
 impl fmt::Debug for SourceSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Rtsp { url, transport, security } => f
+            Self::Rtsp {
+                url,
+                transport,
+                security,
+            } => f
                 .debug_struct("Rtsp")
                 .field("url", &redact_url(url))
                 .field("transport", transport)
@@ -154,10 +158,7 @@ impl fmt::Debug for SourceSpec {
                 .field("path", path)
                 .field("loop_", loop_)
                 .finish(),
-            Self::V4l2 { device } => f
-                .debug_struct("V4l2")
-                .field("device", device)
-                .finish(),
+            Self::V4l2 { device } => f.debug_struct("V4l2").field("device", device).finish(),
             Self::Custom { .. } => f
                 .debug_struct("Custom")
                 .field("pipeline_fragment", &"<redacted>")
@@ -258,7 +259,11 @@ mod tests {
     fn rtsp_plain_scheme_infers_allow_insecure() {
         let spec = SourceSpec::rtsp("rtsp://example.com/stream");
         match &spec {
-            SourceSpec::Rtsp { url, transport, security } => {
+            SourceSpec::Rtsp {
+                url,
+                transport,
+                security,
+            } => {
                 assert_eq!(url, "rtsp://example.com/stream");
                 assert_eq!(*transport, RtspTransport::Tcp);
                 assert_eq!(*security, RtspSecurityPolicy::AllowInsecure);
@@ -271,7 +276,11 @@ mod tests {
     fn rtsp_tls_scheme_infers_prefer_tls() {
         let spec = SourceSpec::rtsp("rtsps://example.com/stream");
         match &spec {
-            SourceSpec::Rtsp { url, transport, security } => {
+            SourceSpec::Rtsp {
+                url,
+                transport,
+                security,
+            } => {
                 assert_eq!(url, "rtsps://example.com/stream");
                 assert_eq!(*transport, RtspTransport::Tcp);
                 assert_eq!(*security, RtspSecurityPolicy::PreferTls);

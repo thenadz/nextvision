@@ -2,7 +2,7 @@
 //!
 //! [`StagePipeline`] provides a builder for composing stages into an
 //! ordered pipeline. The resulting pipeline can be passed directly to
-//! [`FeedConfigBuilder::pipeline`] or destructured into a `Vec<Box<dyn Stage>>`.
+//! `FeedConfigBuilder::pipeline` or destructured into a `Vec<Box<dyn Stage>>`.
 //!
 //! # Example
 //!
@@ -40,7 +40,7 @@ use nv_core::id::StageId;
 /// Controls whether [`StagePipeline::validate`] / [`validate_stages`]
 /// warnings are ignored, logged, or promoted to hard errors.
 ///
-/// Used by [`FeedConfigBuilder`](nv_runtime) to wire validation into
+/// Used by `FeedConfigBuilder` to wire validation into
 /// the normal build path without requiring callers to invoke
 /// `validate()` manually.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -96,8 +96,8 @@ impl StagePipeline {
 
     /// Consume the pipeline and return the ordered stage list.
     ///
-    /// Suitable for passing to [`FeedConfigBuilder::stages`] or
-    /// [`FeedConfigBuilder::pipeline`].
+    /// Suitable for passing to `FeedConfigBuilder::stages` or
+    /// `FeedConfigBuilder::pipeline`.
     #[must_use]
     pub fn into_stages(self) -> Vec<Box<dyn Stage>> {
         self.stages
@@ -141,7 +141,7 @@ pub enum ValidationWarning {
 /// Validate an ordered stage slice and return advisory warnings.
 ///
 /// This is the same logic as [`StagePipeline::validate`] but operates
-/// on a borrowed slice, making it usable by [`FeedConfigBuilder`]
+/// on a borrowed slice, making it usable by `FeedConfigBuilder`
 /// without requiring a `StagePipeline`.
 #[must_use]
 pub fn validate_stages(stages: &[Box<dyn Stage>]) -> Vec<ValidationWarning> {

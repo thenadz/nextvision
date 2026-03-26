@@ -1,16 +1,15 @@
 //! Builder and runtime for the background metrics exporter.
 //!
 //! [`MetricsExporter`] owns a background tokio task that polls
-//! [`RuntimeHandle::diagnostics()`] at a configurable interval and
+//! `RuntimeHandle::diagnostics()` at a configurable interval and
 //! records values into OpenTelemetry instruments. The OTel SDK's
-//! [`PeriodicReader`](opentelemetry_sdk::metrics::PeriodicReader)
-//! handles batching and export to the configured backend.
+//! `PeriodicReader` handles batching and export to the configured backend.
 
 use std::time::Duration;
 
 use nv_runtime::RuntimeHandle;
-use opentelemetry::metrics::MeterProvider;
 use opentelemetry::KeyValue;
+use opentelemetry::metrics::MeterProvider;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -27,7 +26,8 @@ use crate::recorder::{HealthCounters, Instruments};
 ///
 /// # Minimal example
 ///
-/// ```no_run
+#[cfg_attr(feature = "otlp-grpc", doc = "```no_run")]
+#[cfg_attr(not(feature = "otlp-grpc"), doc = "```ignore")]
 /// use std::time::Duration;
 /// use nv_metrics::MetricsExporter;
 /// # async fn example(handle: nv_runtime::RuntimeHandle) -> Result<(), nv_metrics::MetricsError> {
@@ -101,7 +101,7 @@ impl MetricsExporterBuilder {
     /// Add extra OpenTelemetry resource attributes.
     ///
     /// These are merged with the service name to form the OTel
-    /// [`Resource`] attached to all exported metrics. Useful for
+    /// `Resource` attached to all exported metrics. Useful for
     /// environment, region, or deployment identifiers.
     #[must_use]
     pub fn resource_attributes(mut self, attrs: Vec<KeyValue>) -> Self {
@@ -167,8 +167,12 @@ impl MetricsExporterBuilder {
         let task = tokio::runtime::Handle::try_current()
             .map_err(|_| MetricsError::NoTokioRuntime)?
             .spawn(poll_loop(
-                handle, instruments, health_counters, health_rx,
-                poll_interval, shutdown_rx,
+                handle,
+                instruments,
+                health_counters,
+                health_rx,
+                poll_interval,
+                shutdown_rx,
             ));
 
         debug!(
@@ -227,19 +231,13 @@ fn build_otlp_provider(
 
     let reader = PeriodicReader::builder(exporter).build();
 
-    let mut resource_attrs: Vec<KeyValue> = vec![KeyValue::new(
-        "service.name",
-        service_name.to_owned(),
-    )];
+    let mut resource_attrs: Vec<KeyValue> =
+        vec![KeyValue::new("service.name", service_name.to_owned())];
     resource_attrs.extend_from_slice(extra_attrs);
 
     let provider = SdkMeterProvider::builder()
         .with_reader(reader)
-        .with_resource(
-            Resource::builder()
-                .with_attributes(resource_attrs)
-                .build(),
-        )
+        .with_resource(Resource::builder().with_attributes(resource_attrs).build())
         .build();
 
     Ok(provider)
@@ -466,10 +464,14 @@ mod tests {
         // The poll loop should have recorded at least one runtime metric.
         let has_uptime = metrics.iter().any(|rm| {
             rm.scope_metrics().any(|sm| {
-                sm.metrics().any(|m| m.name() == "nv.runtime.uptime_seconds")
+                sm.metrics()
+                    .any(|m| m.name() == "nv.runtime.uptime_seconds")
             })
         });
-        assert!(has_uptime, "poll loop should record nv.runtime.uptime_seconds");
+        assert!(
+            has_uptime,
+            "poll loop should record nv.runtime.uptime_seconds"
+        );
 
         exporter.shutdown().await.unwrap();
         runtime.shutdown().unwrap();

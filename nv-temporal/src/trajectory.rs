@@ -145,16 +145,16 @@ impl Trajectory {
         }
 
         // Pass 2: handle remaining deficit from the first surviving segment.
-        if to_remove > 0 {
-            if let Some(seg) = self.segments.first_mut() {
-                if seg.is_active() && seg.points.len() <= to_remove {
-                    seg.points.clear();
-                    seg.motion = MotionFeatures::default();
-                } else {
-                    let drain_count = to_remove.min(seg.points.len());
-                    seg.points.drain(..drain_count);
-                    seg.motion = MotionFeatures::compute(&seg.points);
-                }
+        if to_remove > 0
+            && let Some(seg) = self.segments.first_mut()
+        {
+            if seg.is_active() && seg.points.len() <= to_remove {
+                seg.points.clear();
+                seg.motion = MotionFeatures::default();
+            } else {
+                let drain_count = to_remove.min(seg.points.len());
+                seg.points.drain(..drain_count);
+                seg.motion = MotionFeatures::compute(&seg.points);
             }
         }
     }

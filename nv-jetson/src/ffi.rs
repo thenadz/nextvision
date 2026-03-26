@@ -201,9 +201,5 @@ unsafe extern "C" {
     ) -> c_int;
 
     /// Unmap a previously mapped surface.
-    pub fn NvBufSurfaceUnMap(
-        surface: *mut NvBufSurface,
-        index: c_int,
-        plane: c_int,
-    ) -> c_int;
+    pub fn NvBufSurfaceUnMap(surface: *mut NvBufSurface, index: c_int, plane: c_int) -> c_int;
 }

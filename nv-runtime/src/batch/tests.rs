@@ -1947,7 +1947,10 @@ fn slow_first_process_causes_in_flight_cascade() {
     );
 
     let m = handle.metrics();
-    assert_eq!(m.batches_dispatched, 0, "no batch should have completed yet");
+    assert_eq!(
+        m.batches_dispatched, 0,
+        "no batch should have completed yet"
+    );
     assert_eq!(m.items_processed, 0, "no items processed yet");
     assert!(m.items_rejected >= 2, "at least 2 rejected by cap");
     assert_eq!(m.pending_items(), 1, "first item still pending");
@@ -1969,7 +1972,10 @@ fn slow_first_process_causes_in_flight_cascade() {
 
     // Subsequent submissions should now succeed.
     let r4 = handle.submit_and_wait(make_entry(1), Some(&in_flight));
-    assert!(r4.is_ok(), "submit after recovery should succeed, got: {r4:?}");
+    assert!(
+        r4.is_ok(),
+        "submit after recovery should succeed, got: {r4:?}"
+    );
 
     coord.shutdown(Duration::from_secs(10));
 }

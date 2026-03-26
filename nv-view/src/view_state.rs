@@ -166,7 +166,7 @@ impl ViewState {
             validity: ContextValidity::Degraded {
                 reason: crate::validity::DegradationReason::Unknown,
             },
-                stability_score: clamp_unit(0.0),
+            stability_score: clamp_unit(0.0),
         }
     }
 }

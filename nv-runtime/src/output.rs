@@ -3,10 +3,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use nv_core::TypedMetadata;
 use nv_core::health::HealthEvent;
 use nv_core::id::FeedId;
 use nv_core::timestamp::{MonotonicTs, WallTs};
-use nv_core::TypedMetadata;
 use nv_frame::FrameEnvelope;
 use nv_perception::{DerivedSignal, DetectionSet, SceneFeature, Track};
 use nv_view::ViewState;
@@ -95,7 +95,7 @@ impl FrameInclusion {
     /// from the observed source rate.
     ///
     /// Until the source rate is known (warmup window), falls back to
-    /// `fallback_interval`. Once observed, resolves to [`Sampled`].
+    /// `fallback_interval`. Once observed, resolves to `Sampled`.
     ///
     /// `fallback_interval` is normalized: 0 → Never, 1 → Always.
     #[must_use]
@@ -155,7 +155,9 @@ impl FrameInclusion {
             Self::Never => 0,
             Self::Always => 1,
             Self::Sampled { interval } => *interval,
-            Self::TargetFps { fallback_interval, .. } => *fallback_interval,
+            Self::TargetFps {
+                fallback_interval, ..
+            } => *fallback_interval,
         }
     }
 
@@ -167,7 +169,10 @@ impl FrameInclusion {
     #[must_use]
     pub fn resolve_with_source_fps(self, source_fps: f32) -> Self {
         match self {
-            Self::TargetFps { target, fallback_interval } => {
+            Self::TargetFps {
+                target,
+                fallback_interval,
+            } => {
                 if source_fps <= 0.0 {
                     Self::sampled(fallback_interval)
                 } else {
@@ -378,10 +383,7 @@ impl LagDetector {
     pub fn check_after_send(&self, health_tx: &broadcast::Sender<HealthEvent>) {
         use std::sync::atomic::Ordering;
 
-        let sends = self
-            .sends_since_check
-            .fetch_add(1, Ordering::Relaxed)
-            + 1;
+        let sends = self.sends_since_check.fetch_add(1, Ordering::Relaxed) + 1;
 
         // The sentinel hasn't consumed any messages since the last drain.
         // It can only observe Lagged(n) when the ring buffer wraps past
@@ -540,10 +542,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use nv_core::TypedMetadata;
     use nv_core::health::HealthEvent;
     use nv_core::id::FeedId;
     use nv_core::timestamp::{MonotonicTs, WallTs};
-    use nv_core::TypedMetadata;
     use nv_perception::DetectionSet;
     use nv_view::ViewState;
     use tokio::sync::broadcast;
@@ -594,7 +596,10 @@ mod tests {
         (tx, detector)
     }
 
-    fn make_health() -> (broadcast::Sender<HealthEvent>, broadcast::Receiver<HealthEvent>) {
+    fn make_health() -> (
+        broadcast::Sender<HealthEvent>,
+        broadcast::Receiver<HealthEvent>,
+    ) {
         broadcast::channel(128)
     }
 
@@ -748,9 +753,15 @@ mod tests {
 
         // Should report only the loss from this interval, not from the
         // pre-realign window.
-        assert!(!d3.is_empty(), "new window should produce its own lag events");
+        assert!(
+            !d3.is_empty(),
+            "new window should produce its own lag events"
+        );
         let total: u64 = d3.iter().sum();
-        assert!(total > 0 && total <= 2, "delta should reflect only new-window loss");
+        assert!(
+            total > 0 && total <= 2,
+            "delta should reflect only new-window loss"
+        );
     }
 
     // D.5: flush_pending_emits_final_delta
@@ -914,8 +925,11 @@ mod tests {
             6,
         );
         assert_eq!(
-            FrameInclusion::TargetFps { target: 5.0, fallback_interval: 6 }
-                .effective_interval(),
+            FrameInclusion::TargetFps {
+                target: 5.0,
+                fallback_interval: 6
+            }
+            .effective_interval(),
             6,
         );
     }
@@ -938,7 +952,10 @@ mod tests {
     fn target_fps_positive_creates_variant() {
         assert_eq!(
             FrameInclusion::target_fps(5.0, 6),
-            FrameInclusion::TargetFps { target: 5.0, fallback_interval: 6 },
+            FrameInclusion::TargetFps {
+                target: 5.0,
+                fallback_interval: 6
+            },
         );
     }
 

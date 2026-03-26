@@ -37,7 +37,7 @@ pub fn decode_end2end_output(
     det_id_offset: u64,
 ) -> DetectionSet {
     let num_slots = output.len() / END2END_COLS;
-    if num_slots == 0 || output.len() % END2END_COLS != 0 {
+    if num_slots == 0 || !output.len().is_multiple_of(END2END_COLS) {
         return DetectionSet::empty();
     }
 

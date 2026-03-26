@@ -8,10 +8,10 @@
 //! from the broadcast channel increments the corresponding counter via
 //! [`HealthCounters::record()`].
 
-use nv_runtime::diagnostics::{RuntimeDiagnostics, ViewStatus};
 use nv_runtime::HealthEvent;
-use opentelemetry::metrics::{Counter, Gauge, Meter};
+use nv_runtime::diagnostics::{RuntimeDiagnostics, ViewStatus};
 use opentelemetry::KeyValue;
+use opentelemetry::metrics::{Counter, Gauge, Meter};
 
 // ---------------------------------------------------------------------------
 // Instrument set
@@ -92,7 +92,9 @@ impl Instruments {
                 .build(),
             feed_uptime_seconds: meter
                 .f64_gauge("nv.feed.uptime_seconds")
-                .with_description("Seconds since the feed's current session started (resets on restart)")
+                .with_description(
+                    "Seconds since the feed's current session started (resets on restart)",
+                )
                 .build(),
             feed_frames_received: meter
                 .u64_gauge("nv.feed.frames_received")
@@ -182,7 +184,9 @@ impl Instruments {
                 .build(),
             batch_pending_items: meter
                 .u64_gauge("nv.batch.pending_items")
-                .with_description("Approximate items in-flight (submitted but not processed/rejected)")
+                .with_description(
+                    "Approximate items in-flight (submitted but not processed/rejected)",
+                )
                 .build(),
         }
     }
@@ -192,10 +196,8 @@ impl Instruments {
         // -- Runtime --
         self.runtime_uptime_seconds
             .record(diag.uptime.as_secs_f64(), &[]);
-        self.runtime_feed_count
-            .record(diag.feed_count as u64, &[]);
-        self.runtime_max_feeds
-            .record(diag.max_feeds as u64, &[]);
+        self.runtime_feed_count.record(diag.feed_count as u64, &[]);
+        self.runtime_max_feeds.record(diag.max_feeds as u64, &[]);
         self.runtime_output_lag
             .record(u64::from(diag.output_lag.in_lag), &[]);
         self.runtime_output_lag_pending_lost
@@ -203,10 +205,7 @@ impl Instruments {
 
         // -- Per-feed --
         for feed in &diag.feeds {
-            let attrs = [KeyValue::new(
-                "feed_id",
-                feed.feed_id.to_string(),
-            )];
+            let attrs = [KeyValue::new("feed_id", feed.feed_id.to_string())];
 
             self.feed_alive.record(u64::from(feed.alive), &attrs);
             self.feed_paused.record(u64::from(feed.paused), &attrs);
@@ -220,8 +219,7 @@ impl Instruments {
                 .record(feed.metrics.frames_processed, &attrs);
             self.feed_tracks_active
                 .record(feed.metrics.tracks_active, &attrs);
-            self.feed_view_epoch
-                .record(feed.metrics.view_epoch, &attrs);
+            self.feed_view_epoch.record(feed.metrics.view_epoch, &attrs);
             self.feed_restarts
                 .record(u64::from(feed.metrics.restarts), &attrs);
             self.feed_queue_source_depth
@@ -265,8 +263,7 @@ impl Instruments {
                     .record(ms / 1_000_000.0, &attrs);
             }
             if let Some(ms) = batch.metrics.avg_formation_ns() {
-                self.batch_avg_formation_ms
-                    .record(ms / 1_000_000.0, &attrs);
+                self.batch_avg_formation_ms.record(ms / 1_000_000.0, &attrs);
             }
             if let Some(ratio) = batch.metrics.avg_fill_ratio() {
                 self.batch_avg_fill_ratio.record(ratio, &attrs);
@@ -404,80 +401,148 @@ impl HealthCounters {
             HealthEvent::ViewCompensationApplied { .. } => {}
 
             HealthEvent::SourceDisconnected { feed_id, .. } => {
-                self.source_disconnections.add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
+                self.source_disconnections
+                    .add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
             }
             HealthEvent::SourceReconnecting { feed_id, .. } => {
-                self.source_reconnections.add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
+                self.source_reconnections
+                    .add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
             }
-            HealthEvent::StageError { feed_id, stage_id, .. } => {
-                self.stage_errors.add(1, &[
-                    KeyValue::new("feed_id", feed_id.to_string()),
-                    KeyValue::new("stage_id", stage_id.as_str().to_owned()),
-                ]);
+            HealthEvent::StageError {
+                feed_id, stage_id, ..
+            } => {
+                self.stage_errors.add(
+                    1,
+                    &[
+                        KeyValue::new("feed_id", feed_id.to_string()),
+                        KeyValue::new("stage_id", stage_id.as_str().to_owned()),
+                    ],
+                );
             }
             HealthEvent::StagePanic { feed_id, stage_id } => {
-                self.stage_panics.add(1, &[
-                    KeyValue::new("feed_id", feed_id.to_string()),
-                    KeyValue::new("stage_id", stage_id.as_str().to_owned()),
-                ]);
+                self.stage_panics.add(
+                    1,
+                    &[
+                        KeyValue::new("feed_id", feed_id.to_string()),
+                        KeyValue::new("stage_id", stage_id.as_str().to_owned()),
+                    ],
+                );
             }
             HealthEvent::FeedRestarting { feed_id, .. } => {
-                self.feed_restarts.add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
+                self.feed_restarts
+                    .add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
             }
             HealthEvent::FeedStopped { feed_id, .. } => {
-                self.feeds_stopped.add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
+                self.feeds_stopped
+                    .add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
             }
-            HealthEvent::BackpressureDrop { feed_id, frames_dropped } => {
-                self.backpressure_drops.add(*frames_dropped, &[KeyValue::new("feed_id", feed_id.to_string())]);
+            HealthEvent::BackpressureDrop {
+                feed_id,
+                frames_dropped,
+            } => {
+                self.backpressure_drops.add(
+                    *frames_dropped,
+                    &[KeyValue::new("feed_id", feed_id.to_string())],
+                );
             }
             HealthEvent::ViewEpochChanged { feed_id, .. } => {
-                self.view_epoch_changes.add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
+                self.view_epoch_changes
+                    .add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
             }
             HealthEvent::ViewDegraded { feed_id, .. } => {
-                self.view_degradations.add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
+                self.view_degradations
+                    .add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
             }
             HealthEvent::OutputLagged { messages_lost } => {
                 self.output_lag_events.add(*messages_lost, &[]);
             }
             HealthEvent::SinkPanic { feed_id } => {
-                self.sink_panics.add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
+                self.sink_panics
+                    .add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
             }
             HealthEvent::SinkTimeout { feed_id } => {
-                self.sink_timeouts.add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
+                self.sink_timeouts
+                    .add(1, &[KeyValue::new("feed_id", feed_id.to_string())]);
             }
-            HealthEvent::SinkBackpressure { feed_id, outputs_dropped } => {
-                self.sink_backpressure.add(*outputs_dropped, &[KeyValue::new("feed_id", feed_id.to_string())]);
+            HealthEvent::SinkBackpressure {
+                feed_id,
+                outputs_dropped,
+            } => {
+                self.sink_backpressure.add(
+                    *outputs_dropped,
+                    &[KeyValue::new("feed_id", feed_id.to_string())],
+                );
             }
-            HealthEvent::TrackAdmissionRejected { feed_id, rejected_count } => {
-                self.track_admission_rejected.add(u64::from(*rejected_count), &[KeyValue::new("feed_id", feed_id.to_string())]);
+            HealthEvent::TrackAdmissionRejected {
+                feed_id,
+                rejected_count,
+            } => {
+                self.track_admission_rejected.add(
+                    u64::from(*rejected_count),
+                    &[KeyValue::new("feed_id", feed_id.to_string())],
+                );
             }
             HealthEvent::BatchError { processor_id, .. } => {
-                self.batch_errors.add(1, &[KeyValue::new("processor_id", processor_id.as_str().to_owned())]);
+                self.batch_errors.add(
+                    1,
+                    &[KeyValue::new(
+                        "processor_id",
+                        processor_id.as_str().to_owned(),
+                    )],
+                );
             }
-            HealthEvent::BatchSubmissionRejected { feed_id, processor_id, dropped_count } => {
-                self.batch_submission_rejected.add(*dropped_count, &[
-                    KeyValue::new("feed_id", feed_id.to_string()),
-                    KeyValue::new("processor_id", processor_id.as_str().to_owned()),
-                ]);
+            HealthEvent::BatchSubmissionRejected {
+                feed_id,
+                processor_id,
+                dropped_count,
+            } => {
+                self.batch_submission_rejected.add(
+                    *dropped_count,
+                    &[
+                        KeyValue::new("feed_id", feed_id.to_string()),
+                        KeyValue::new("processor_id", processor_id.as_str().to_owned()),
+                    ],
+                );
             }
-            HealthEvent::BatchTimeout { feed_id, processor_id, timed_out_count } => {
-                self.batch_timeouts.add(*timed_out_count, &[
-                    KeyValue::new("feed_id", feed_id.to_string()),
-                    KeyValue::new("processor_id", processor_id.as_str().to_owned()),
-                ]);
+            HealthEvent::BatchTimeout {
+                feed_id,
+                processor_id,
+                timed_out_count,
+            } => {
+                self.batch_timeouts.add(
+                    *timed_out_count,
+                    &[
+                        KeyValue::new("feed_id", feed_id.to_string()),
+                        KeyValue::new("processor_id", processor_id.as_str().to_owned()),
+                    ],
+                );
             }
-            HealthEvent::BatchInFlightExceeded { feed_id, processor_id, rejected_count } => {
-                self.batch_in_flight_exceeded.add(*rejected_count, &[
-                    KeyValue::new("feed_id", feed_id.to_string()),
-                    KeyValue::new("processor_id", processor_id.as_str().to_owned()),
-                ]);
+            HealthEvent::BatchInFlightExceeded {
+                feed_id,
+                processor_id,
+                rejected_count,
+            } => {
+                self.batch_in_flight_exceeded.add(
+                    *rejected_count,
+                    &[
+                        KeyValue::new("feed_id", feed_id.to_string()),
+                        KeyValue::new("processor_id", processor_id.as_str().to_owned()),
+                    ],
+                );
             }
             HealthEvent::ResidencyDowngrade { .. } | HealthEvent::InsecureRtspSource { .. } => {
                 // Informational — no counter needed. Operators observe this
                 // via health event subscribers or logs.
             }
-            HealthEvent::FrameLag { feed_id, frames_lagged, .. } => {
-                self.frame_lag_events.add(*frames_lagged, &[KeyValue::new("feed_id", feed_id.to_string())]);
+            HealthEvent::FrameLag {
+                feed_id,
+                frames_lagged,
+                ..
+            } => {
+                self.frame_lag_events.add(
+                    *frames_lagged,
+                    &[KeyValue::new("feed_id", feed_id.to_string())],
+                );
             }
         }
     }
@@ -490,13 +555,13 @@ impl HealthCounters {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nv_core::id::{FeedId, StageId};
+    use nv_core::metrics::FeedMetrics;
+    use nv_runtime::BatchMetrics;
+    use nv_runtime::QueueTelemetry;
     use nv_runtime::diagnostics::{
         BatchDiagnostics, FeedDiagnostics, OutputLagStatus, ViewDiagnostics,
     };
-    use nv_runtime::BatchMetrics;
-    use nv_runtime::QueueTelemetry;
-    use nv_core::id::{FeedId, StageId};
-    use nv_core::metrics::FeedMetrics;
     use opentelemetry::metrics::MeterProvider;
     use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
     use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
@@ -507,54 +572,50 @@ mod tests {
             uptime: Duration::from_secs(120),
             feed_count: 2,
             max_feeds: 8,
-            feeds: vec![
-                FeedDiagnostics {
+            feeds: vec![FeedDiagnostics {
+                feed_id: FeedId::new(1),
+                alive: true,
+                paused: false,
+                uptime: Duration::from_secs(100),
+                metrics: FeedMetrics {
                     feed_id: FeedId::new(1),
-                    alive: true,
-                    paused: false,
-                    uptime: Duration::from_secs(100),
-                    metrics: FeedMetrics {
-                        feed_id: FeedId::new(1),
-                        frames_received: 5000,
-                        frames_dropped: 10,
-                        frames_processed: 4990,
-                        tracks_active: 7,
-                        view_epoch: 3,
-                        restarts: 1,
-                    },
-                    queues: QueueTelemetry {
-                        source_depth: 2,
-                        source_capacity: 16,
-                        sink_depth: 0,
-                        sink_capacity: 8,
-                    },
-                    decode: None,
-                    view: ViewDiagnostics {
-                        epoch: 3,
-                        stability_score: 0.95,
-                        status: ViewStatus::Stable,
-                    },
-                    batch_processor_id: Some(StageId("yolov8")),
+                    frames_received: 5000,
+                    frames_dropped: 10,
+                    frames_processed: 4990,
+                    tracks_active: 7,
+                    view_epoch: 3,
+                    restarts: 1,
                 },
-            ],
-            batches: vec![
-                BatchDiagnostics {
-                    processor_id: StageId("yolov8"),
-                    metrics: BatchMetrics {
-                        batches_dispatched: 250,
-                        items_processed: 980,
-                        items_submitted: 1000,
-                        items_rejected: 5,
-                        items_timed_out: 2,
-                        total_processing_ns: 25_000_000_000,
-                        total_formation_ns: 5_000_000_000,
-                        min_batch_size: 2,
-                        max_batch_size_seen: 4,
-                        configured_max_batch_size: 4,
-                        consecutive_errors: 0,
-                    },
+                queues: QueueTelemetry {
+                    source_depth: 2,
+                    source_capacity: 16,
+                    sink_depth: 0,
+                    sink_capacity: 8,
                 },
-            ],
+                decode: None,
+                view: ViewDiagnostics {
+                    epoch: 3,
+                    stability_score: 0.95,
+                    status: ViewStatus::Stable,
+                },
+                batch_processor_id: Some(StageId("yolov8")),
+            }],
+            batches: vec![BatchDiagnostics {
+                processor_id: StageId("yolov8"),
+                metrics: BatchMetrics {
+                    batches_dispatched: 250,
+                    items_processed: 980,
+                    items_submitted: 1000,
+                    items_rejected: 5,
+                    items_timed_out: 2,
+                    total_processing_ns: 25_000_000_000,
+                    total_formation_ns: 5_000_000_000,
+                    min_batch_size: 2,
+                    max_batch_size_seen: 4,
+                    configured_max_batch_size: 4,
+                    consecutive_errors: 0,
+                },
+            }],
             output_lag: OutputLagStatus {
                 in_lag: false,
                 pending_lost: 0,
@@ -641,10 +702,10 @@ mod tests {
         for rm in &metrics {
             for sm in rm.scope_metrics() {
                 for m in sm.metrics() {
-                    if m.name() == name {
-                        if let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = m.data() {
-                            return gauge.data_points().next().map(|dp| dp.value());
-                        }
+                    if m.name() == name
+                        && let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = m.data()
+                    {
+                        return gauge.data_points().next().map(|dp| dp.value());
                     }
                 }
             }
@@ -657,10 +718,10 @@ mod tests {
         for rm in &metrics {
             for sm in rm.scope_metrics() {
                 for m in sm.metrics() {
-                    if m.name() == name {
-                        if let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = m.data() {
-                            return gauge.data_points().next().map(|dp| dp.value());
-                        }
+                    if m.name() == name
+                        && let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = m.data()
+                    {
+                        return gauge.data_points().next().map(|dp| dp.value());
                     }
                 }
             }
@@ -719,8 +780,14 @@ mod tests {
         drop(instruments);
         let _ = provider.force_flush();
 
-        assert_eq!(find_u64_gauge(&exporter, "nv.feed.frames_received"), Some(5000));
-        assert_eq!(find_u64_gauge(&exporter, "nv.feed.frames_dropped"), Some(10));
+        assert_eq!(
+            find_u64_gauge(&exporter, "nv.feed.frames_received"),
+            Some(5000)
+        );
+        assert_eq!(
+            find_u64_gauge(&exporter, "nv.feed.frames_dropped"),
+            Some(10)
+        );
         assert_eq!(find_u64_gauge(&exporter, "nv.feed.tracks_active"), Some(7));
         assert_eq!(find_u64_gauge(&exporter, "nv.feed.alive"), Some(1));
         assert_eq!(find_u64_gauge(&exporter, "nv.feed.view_status"), Some(0)); // Stable
@@ -743,8 +810,14 @@ mod tests {
         let _ = provider.force_flush();
 
         assert_eq!(find_u64_gauge(&exporter, "nv.batch.dispatched"), Some(250));
-        assert_eq!(find_u64_gauge(&exporter, "nv.batch.items_processed"), Some(980));
-        assert_eq!(find_u64_gauge(&exporter, "nv.batch.items_rejected"), Some(5));
+        assert_eq!(
+            find_u64_gauge(&exporter, "nv.batch.items_processed"),
+            Some(980)
+        );
+        assert_eq!(
+            find_u64_gauge(&exporter, "nv.batch.items_rejected"),
+            Some(5)
+        );
 
         let avg_proc = find_f64_gauge(&exporter, "nv.batch.avg_processing_ms");
         assert!(avg_proc.is_some());
@@ -820,13 +893,13 @@ mod tests {
         for rm in &metrics {
             for sm in rm.scope_metrics() {
                 for m in sm.metrics() {
-                    if m.name() == "nv.feed.frames_received" {
-                        if let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = m.data() {
-                            for dp in gauge.data_points() {
-                                for attr in dp.attributes() {
-                                    if attr.key.as_str() == "feed_id" {
-                                        found_attr = true;
-                                    }
+                    if m.name() == "nv.feed.frames_received"
+                        && let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = m.data()
+                    {
+                        for dp in gauge.data_points() {
+                            for attr in dp.attributes() {
+                                if attr.key.as_str() == "feed_id" {
+                                    found_attr = true;
                                 }
                             }
                         }
@@ -854,13 +927,13 @@ mod tests {
         for rm in &metrics {
             for sm in rm.scope_metrics() {
                 for m in sm.metrics() {
-                    if m.name() == "nv.batch.dispatched" {
-                        if let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = m.data() {
-                            for dp in gauge.data_points() {
-                                for attr in dp.attributes() {
-                                    if attr.key.as_str() == "processor_id" {
-                                        found_attr = true;
-                                    }
+                    if m.name() == "nv.batch.dispatched"
+                        && let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = m.data()
+                    {
+                        for dp in gauge.data_points() {
+                            for attr in dp.attributes() {
+                                if attr.key.as_str() == "processor_id" {
+                                    found_attr = true;
                                 }
                             }
                         }
@@ -868,7 +941,10 @@ mod tests {
                 }
             }
         }
-        assert!(found_attr, "batch metrics must carry a processor_id attribute");
+        assert!(
+            found_attr,
+            "batch metrics must carry a processor_id attribute"
+        );
     }
 
     #[test]
@@ -886,7 +962,10 @@ mod tests {
         let _ = provider.force_flush();
 
         assert_eq!(find_u64_gauge(&exporter, "nv.runtime.output_lag"), Some(1));
-        assert_eq!(find_u64_gauge(&exporter, "nv.runtime.output_lag_pending_lost"), Some(42));
+        assert_eq!(
+            find_u64_gauge(&exporter, "nv.runtime.output_lag_pending_lost"),
+            Some(42)
+        );
     }
 
     #[test]
@@ -918,7 +997,10 @@ mod tests {
         drop(instruments);
         let _ = provider.force_flush();
 
-        assert_eq!(find_u64_gauge(&exporter, "nv.batch.pending_items"), Some(15));
+        assert_eq!(
+            find_u64_gauge(&exporter, "nv.batch.pending_items"),
+            Some(15)
+        );
     }
 
     // -- Health counter helpers & tests --
@@ -928,10 +1010,10 @@ mod tests {
         for rm in &metrics {
             for sm in rm.scope_metrics() {
                 for m in sm.metrics() {
-                    if m.name() == name {
-                        if let AggregatedMetrics::U64(MetricData::Sum(sum)) = m.data() {
-                            return sum.data_points().next().map(|dp| dp.value());
-                        }
+                    if m.name() == name
+                        && let AggregatedMetrics::U64(MetricData::Sum(sum)) = m.data()
+                    {
+                        return sum.data_points().next().map(|dp| dp.value());
                     }
                 }
             }
@@ -951,21 +1033,55 @@ mod tests {
         let stage = StageId("det");
         let proc = StageId("yolo");
 
-        let make_stage_err = || StageError::ProcessingFailed { stage_id: StageId("det"), detail: "err".into() };
+        let make_stage_err = || StageError::ProcessingFailed {
+            stage_id: StageId("det"),
+            detail: "err".into(),
+        };
 
         // Fire every variant — none should panic.
         let events: Vec<HealthEvent> = vec![
             HealthEvent::SourceConnected { feed_id: feed },
-            HealthEvent::SourceDisconnected { feed_id: feed, reason: MediaError::Timeout },
-            HealthEvent::SourceReconnecting { feed_id: feed, attempt: 1 },
-            HealthEvent::StageError { feed_id: feed, stage_id: stage, error: make_stage_err() },
-            HealthEvent::StagePanic { feed_id: feed, stage_id: stage },
-            HealthEvent::FeedRestarting { feed_id: feed, restart_count: 1 },
-            HealthEvent::FeedStopped { feed_id: feed, reason: nv_core::health::StopReason::UserRequested },
-            HealthEvent::BackpressureDrop { feed_id: feed, frames_dropped: 5 },
-            HealthEvent::ViewEpochChanged { feed_id: feed, epoch: 2 },
-            HealthEvent::ViewDegraded { feed_id: feed, stability_score: 0.5 },
-            HealthEvent::ViewCompensationApplied { feed_id: feed, epoch: 2 },
+            HealthEvent::SourceDisconnected {
+                feed_id: feed,
+                reason: MediaError::Timeout,
+            },
+            HealthEvent::SourceReconnecting {
+                feed_id: feed,
+                attempt: 1,
+            },
+            HealthEvent::StageError {
+                feed_id: feed,
+                stage_id: stage,
+                error: make_stage_err(),
+            },
+            HealthEvent::StagePanic {
+                feed_id: feed,
+                stage_id: stage,
+            },
+            HealthEvent::FeedRestarting {
+                feed_id: feed,
+                restart_count: 1,
+            },
+            HealthEvent::FeedStopped {
+                feed_id: feed,
+                reason: nv_core::health::StopReason::UserRequested,
+            },
+            HealthEvent::BackpressureDrop {
+                feed_id: feed,
+                frames_dropped: 5,
+            },
+            HealthEvent::ViewEpochChanged {
+                feed_id: feed,
+                epoch: 2,
+            },
+            HealthEvent::ViewDegraded {
+                feed_id: feed,
+                stability_score: 0.5,
+            },
+            HealthEvent::ViewCompensationApplied {
+                feed_id: feed,
+                epoch: 2,
+            },
             HealthEvent::OutputLagged { messages_lost: 10 },
             HealthEvent::SourceEos { feed_id: feed },
             HealthEvent::DecodeDecision {
@@ -978,12 +1094,34 @@ mod tests {
             },
             HealthEvent::SinkPanic { feed_id: feed },
             HealthEvent::SinkTimeout { feed_id: feed },
-            HealthEvent::SinkBackpressure { feed_id: feed, outputs_dropped: 3 },
-            HealthEvent::TrackAdmissionRejected { feed_id: feed, rejected_count: 2 },
-            HealthEvent::BatchError { processor_id: proc, batch_size: 4, error: make_stage_err() },
-            HealthEvent::BatchSubmissionRejected { feed_id: feed, processor_id: proc, dropped_count: 1 },
-            HealthEvent::BatchTimeout { feed_id: feed, processor_id: proc, timed_out_count: 1 },
-            HealthEvent::BatchInFlightExceeded { feed_id: feed, processor_id: proc, rejected_count: 1 },
+            HealthEvent::SinkBackpressure {
+                feed_id: feed,
+                outputs_dropped: 3,
+            },
+            HealthEvent::TrackAdmissionRejected {
+                feed_id: feed,
+                rejected_count: 2,
+            },
+            HealthEvent::BatchError {
+                processor_id: proc,
+                batch_size: 4,
+                error: make_stage_err(),
+            },
+            HealthEvent::BatchSubmissionRejected {
+                feed_id: feed,
+                processor_id: proc,
+                dropped_count: 1,
+            },
+            HealthEvent::BatchTimeout {
+                feed_id: feed,
+                processor_id: proc,
+                timed_out_count: 1,
+            },
+            HealthEvent::BatchInFlightExceeded {
+                feed_id: feed,
+                processor_id: proc,
+                rejected_count: 1,
+            },
         ];
 
         for event in &events {
@@ -999,14 +1137,23 @@ mod tests {
 
         let feed = FeedId::new(1);
 
-        counters.record(&HealthEvent::BackpressureDrop { feed_id: feed, frames_dropped: 3 });
-        counters.record(&HealthEvent::BackpressureDrop { feed_id: feed, frames_dropped: 7 });
+        counters.record(&HealthEvent::BackpressureDrop {
+            feed_id: feed,
+            frames_dropped: 3,
+        });
+        counters.record(&HealthEvent::BackpressureDrop {
+            feed_id: feed,
+            frames_dropped: 7,
+        });
 
         drop(counters);
         let _ = provider.force_flush();
 
         // 3 + 7 = 10
-        assert_eq!(find_u64_sum(&exporter, "nv.health.backpressure_drops"), Some(10));
+        assert_eq!(
+            find_u64_sum(&exporter, "nv.health.backpressure_drops"),
+            Some(10)
+        );
     }
 
     #[test]
@@ -1021,7 +1168,10 @@ mod tests {
         drop(counters);
         let _ = provider.force_flush();
 
-        assert_eq!(find_u64_sum(&exporter, "nv.health.output_lag_events"), Some(20));
+        assert_eq!(
+            find_u64_sum(&exporter, "nv.health.output_lag_events"),
+            Some(20)
+        );
     }
 
     #[test]
@@ -1035,7 +1185,10 @@ mod tests {
         counters.record(&HealthEvent::StageError {
             feed_id: FeedId::new(42),
             stage_id: StageId("detector"),
-            error: StageError::ProcessingFailed { stage_id: StageId("detector"), detail: "test".into() },
+            error: StageError::ProcessingFailed {
+                stage_id: StageId("detector"),
+                detail: "test".into(),
+            },
         });
 
         drop(counters);
@@ -1047,16 +1200,16 @@ mod tests {
         for rm in &metrics {
             for sm in rm.scope_metrics() {
                 for m in sm.metrics() {
-                    if m.name() == "nv.health.stage_errors" {
-                        if let AggregatedMetrics::U64(MetricData::Sum(sum)) = m.data() {
-                            for dp in sum.data_points() {
-                                for attr in dp.attributes() {
-                                    if attr.key.as_str() == "feed_id" {
-                                        found_feed = true;
-                                    }
-                                    if attr.key.as_str() == "stage_id" {
-                                        found_stage = true;
-                                    }
+                    if m.name() == "nv.health.stage_errors"
+                        && let AggregatedMetrics::U64(MetricData::Sum(sum)) = m.data()
+                    {
+                        for dp in sum.data_points() {
+                            for attr in dp.attributes() {
+                                if attr.key.as_str() == "feed_id" {
+                                    found_feed = true;
+                                }
+                                if attr.key.as_str() == "stage_id" {
+                                    found_stage = true;
                                 }
                             }
                         }
@@ -1075,8 +1228,12 @@ mod tests {
         let counters = HealthCounters::new(&meter);
 
         // These variants are intentionally not counted.
-        counters.record(&HealthEvent::SourceConnected { feed_id: FeedId::new(1) });
-        counters.record(&HealthEvent::SourceEos { feed_id: FeedId::new(1) });
+        counters.record(&HealthEvent::SourceConnected {
+            feed_id: FeedId::new(1),
+        });
+        counters.record(&HealthEvent::SourceEos {
+            feed_id: FeedId::new(1),
+        });
 
         drop(counters);
         let _ = provider.force_flush();
@@ -1084,7 +1241,10 @@ mod tests {
         let names = metric_names(&exporter);
         // No counter instruments should have been emitted for
         // informational-only events.
-        assert!(names.is_empty(), "informational events should not produce metrics, got: {names:?}");
+        assert!(
+            names.is_empty(),
+            "informational events should not produce metrics, got: {names:?}"
+        );
     }
 
     #[test]
@@ -1098,27 +1258,80 @@ mod tests {
         let feed = FeedId::new(1);
         let stage = StageId("s");
         let proc = StageId("p");
-        let make_err = || StageError::ProcessingFailed { stage_id: StageId("s"), detail: "e".into() };
+        let make_err = || StageError::ProcessingFailed {
+            stage_id: StageId("s"),
+            detail: "e".into(),
+        };
 
         // Fire one of each counted variant.
-        counters.record(&HealthEvent::SourceDisconnected { feed_id: feed, reason: MediaError::Timeout });
-        counters.record(&HealthEvent::SourceReconnecting { feed_id: feed, attempt: 1 });
-        counters.record(&HealthEvent::StageError { feed_id: feed, stage_id: stage, error: make_err() });
-        counters.record(&HealthEvent::StagePanic { feed_id: feed, stage_id: stage });
-        counters.record(&HealthEvent::FeedRestarting { feed_id: feed, restart_count: 1 });
-        counters.record(&HealthEvent::FeedStopped { feed_id: feed, reason: nv_core::health::StopReason::UserRequested });
-        counters.record(&HealthEvent::BackpressureDrop { feed_id: feed, frames_dropped: 1 });
-        counters.record(&HealthEvent::ViewEpochChanged { feed_id: feed, epoch: 1 });
-        counters.record(&HealthEvent::ViewDegraded { feed_id: feed, stability_score: 0.5 });
+        counters.record(&HealthEvent::SourceDisconnected {
+            feed_id: feed,
+            reason: MediaError::Timeout,
+        });
+        counters.record(&HealthEvent::SourceReconnecting {
+            feed_id: feed,
+            attempt: 1,
+        });
+        counters.record(&HealthEvent::StageError {
+            feed_id: feed,
+            stage_id: stage,
+            error: make_err(),
+        });
+        counters.record(&HealthEvent::StagePanic {
+            feed_id: feed,
+            stage_id: stage,
+        });
+        counters.record(&HealthEvent::FeedRestarting {
+            feed_id: feed,
+            restart_count: 1,
+        });
+        counters.record(&HealthEvent::FeedStopped {
+            feed_id: feed,
+            reason: nv_core::health::StopReason::UserRequested,
+        });
+        counters.record(&HealthEvent::BackpressureDrop {
+            feed_id: feed,
+            frames_dropped: 1,
+        });
+        counters.record(&HealthEvent::ViewEpochChanged {
+            feed_id: feed,
+            epoch: 1,
+        });
+        counters.record(&HealthEvent::ViewDegraded {
+            feed_id: feed,
+            stability_score: 0.5,
+        });
         counters.record(&HealthEvent::OutputLagged { messages_lost: 1 });
         counters.record(&HealthEvent::SinkPanic { feed_id: feed });
         counters.record(&HealthEvent::SinkTimeout { feed_id: feed });
-        counters.record(&HealthEvent::SinkBackpressure { feed_id: feed, outputs_dropped: 1 });
-        counters.record(&HealthEvent::TrackAdmissionRejected { feed_id: feed, rejected_count: 1 });
-        counters.record(&HealthEvent::BatchError { processor_id: proc, batch_size: 4, error: make_err() });
-        counters.record(&HealthEvent::BatchSubmissionRejected { feed_id: feed, processor_id: proc, dropped_count: 1 });
-        counters.record(&HealthEvent::BatchTimeout { feed_id: feed, processor_id: proc, timed_out_count: 1 });
-        counters.record(&HealthEvent::BatchInFlightExceeded { feed_id: feed, processor_id: proc, rejected_count: 1 });
+        counters.record(&HealthEvent::SinkBackpressure {
+            feed_id: feed,
+            outputs_dropped: 1,
+        });
+        counters.record(&HealthEvent::TrackAdmissionRejected {
+            feed_id: feed,
+            rejected_count: 1,
+        });
+        counters.record(&HealthEvent::BatchError {
+            processor_id: proc,
+            batch_size: 4,
+            error: make_err(),
+        });
+        counters.record(&HealthEvent::BatchSubmissionRejected {
+            feed_id: feed,
+            processor_id: proc,
+            dropped_count: 1,
+        });
+        counters.record(&HealthEvent::BatchTimeout {
+            feed_id: feed,
+            processor_id: proc,
+            timed_out_count: 1,
+        });
+        counters.record(&HealthEvent::BatchInFlightExceeded {
+            feed_id: feed,
+            processor_id: proc,
+            rejected_count: 1,
+        });
 
         drop(counters);
         let _ = provider.force_flush();

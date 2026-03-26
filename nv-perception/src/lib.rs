@@ -76,7 +76,7 @@
 //! ## Backend independence
 //!
 //! This crate has no dependency on GStreamer or any media backend. Stages
-//! receive [`FrameEnvelope`](nv_frame::FrameEnvelope) (generic pixel data)
+//! receive `FrameEnvelope` (generic pixel data)
 //! and produce domain-agnostic artifacts.
 
 pub mod artifact;

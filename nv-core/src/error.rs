@@ -69,7 +69,9 @@ pub enum MediaError {
     InsecureRtspRejected,
 
     /// A `SourceSpec::Custom` pipeline was rejected by the security policy.
-    #[error("custom pipeline rejected: set CustomPipelinePolicy::AllowTrusted on the runtime builder to enable custom pipelines")]
+    #[error(
+        "custom pipeline rejected: set CustomPipelinePolicy::AllowTrusted on the runtime builder to enable custom pipelines"
+    )]
     CustomPipelineRejected,
 }
 
@@ -200,7 +202,10 @@ mod tests {
     #[test]
     fn nv_error_from_config_error() {
         let err: NvError = ConfigError::MissingRequired { field: "source" }.into();
-        assert!(matches!(err, NvError::Config(ConfigError::MissingRequired { .. })));
+        assert!(matches!(
+            err,
+            NvError::Config(ConfigError::MissingRequired { .. })
+        ));
         assert!(err.to_string().contains("source"));
     }
 

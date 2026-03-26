@@ -12,8 +12,8 @@ use eframe::egui;
 use nv_core::id::FeedId;
 use nv_core::timestamp::WallTs;
 use nv_runtime::{
-    BatchHandle, BatchMetrics, FeedHandle, OutputEnvelope, OutputSink,
-    QueueTelemetry, RuntimeHandle,
+    BatchHandle, BatchMetrics, FeedHandle, OutputEnvelope, OutputSink, QueueTelemetry,
+    RuntimeHandle,
 };
 use tracing::info;
 
@@ -226,7 +226,7 @@ impl OutputSink for UiSink {
         }
 
         // Periodic log.
-        if count % 60 == 0 {
+        if count.is_multiple_of(60) {
             info!(
                 feed = %feed_id,
                 seq = output.frame_seq,
@@ -356,8 +356,7 @@ impl eframe::App for NvApp {
             .iter()
             .map(|h| (h.id(), h.decode_status()))
             .collect();
-        let batch_metrics: Option<BatchMetrics> =
-            self.batch_handle.as_ref().map(|b| b.metrics());
+        let batch_metrics: Option<BatchMetrics> = self.batch_handle.as_ref().map(|b| b.metrics());
         let runtime_uptime = self.runtime_handle.uptime();
 
         // ------- Telemetry top panel -------
@@ -387,11 +386,7 @@ impl eframe::App for NvApp {
                             .find(|(id, _)| id == fid)
                             .map(|(_, d)| *d);
 
-                        ui.label(
-                            egui::RichText::new(format!("{}", fid))
-                                .strong()
-                                .size(10.0),
-                        );
+                        ui.label(egui::RichText::new(format!("{}", fid)).strong().size(10.0));
                         ui.label(
                             egui::RichText::new(format!("{:.1}fps", t.fps_ema))
                                 .size(10.0)
@@ -425,8 +420,10 @@ impl eframe::App for NvApp {
                             ui.label(
                                 egui::RichText::new(format!(
                                     "in:{}/{} out:{}/{}",
-                                    qt.source_depth, qt.source_capacity,
-                                    qt.sink_depth, qt.sink_capacity
+                                    qt.source_depth,
+                                    qt.source_capacity,
+                                    qt.sink_depth,
+                                    qt.sink_capacity
                                 ))
                                 .size(10.0)
                                 .color(queue_colour(
@@ -448,12 +445,14 @@ impl eframe::App for NvApp {
                             .and_then(|(_, s)| s.as_ref());
                         if let Some(status) = ds {
                             let (label, colour) = match status.outcome {
-                                nv_runtime::DecodeOutcome::Hardware => {
-                                    (format!("HW({})", status.detail), egui::Color32::from_rgb(100, 220, 100))
-                                }
-                                nv_runtime::DecodeOutcome::Software => {
-                                    (format!("SW({})", status.detail), egui::Color32::from_rgb(220, 200, 80))
-                                }
+                                nv_runtime::DecodeOutcome::Hardware => (
+                                    format!("HW({})", status.detail),
+                                    egui::Color32::from_rgb(100, 220, 100),
+                                ),
+                                nv_runtime::DecodeOutcome::Software => (
+                                    format!("SW({})", status.detail),
+                                    egui::Color32::from_rgb(220, 200, 80),
+                                ),
                                 nv_runtime::DecodeOutcome::Unknown => {
                                     ("?".to_string(), egui::Color32::GRAY)
                                 }
@@ -478,13 +477,15 @@ impl eframe::App for NvApp {
                         egui::RichText::new(format!("Batch:{} {}", avg_batch, fill_pct))
                             .size(10.0)
                             .color(batch_fill_colour(bm.avg_fill_ratio())),
-                    ).on_hover_text("Batch fill: avg frames / max, utilization %");
+                    )
+                    .on_hover_text("Batch fill: avg frames / max, utilization %");
                     if let Some(ns) = bm.avg_processing_ns() {
                         ui.label(
                             egui::RichText::new(format!("{:.0}ms", ns / 1_000_000.0))
                                 .size(9.0)
                                 .color(egui::Color32::GRAY),
-                        ).on_hover_text("Average batch inference time");
+                        )
+                        .on_hover_text("Average batch inference time");
                     }
                     // Per-frame batch stage latency (shown once, from first
                     // feed that has it) — this is the actual wall-clock time
@@ -510,7 +511,8 @@ impl eframe::App for NvApp {
                                 ))
                                 .size(9.0)
                                 .color(egui::Color32::GRAY),
-                            ).on_hover_text("Batch stage latency (shared across feeds)");
+                            )
+                            .on_hover_text("Batch stage latency (shared across feeds)");
                         }
                     }
                     ui.separator();
@@ -531,7 +533,8 @@ impl eframe::App for NvApp {
                     egui::RichText::new(format!("drop:{}", total_drops))
                         .size(10.0)
                         .color(drop_colour),
-                ).on_hover_text("Total frames dropped across all feeds");
+                )
+                .on_hover_text("Total frames dropped across all feeds");
             });
 
             // Row 2: per-feed stage latencies (batch stages excluded — shown
@@ -547,7 +550,7 @@ impl eframe::App for NvApp {
                     .map(|t| {
                         t.last_stage_latencies
                             .iter()
-                            .any(|(name, _)| batch_stage_name.map_or(true, |bn| name != bn))
+                            .any(|(name, _)| batch_stage_name.is_none_or(|bn| name != bn))
                     })
                     .unwrap_or(false)
             });
@@ -557,7 +560,7 @@ impl eframe::App for NvApp {
                         if let Some(t) = state.telemetry.get(fid) {
                             for (name, us) in &t.last_stage_latencies {
                                 // Skip batch stages — rendered globally.
-                                if batch_stage_name.map_or(false, |bn| name == bn) {
+                                if batch_stage_name.is_some_and(|bn| name == bn) {
                                     continue;
                                 }
                                 ui.label(
@@ -641,12 +644,9 @@ impl eframe::App for NvApp {
                     .spacing([2.0, 2.0])
                     .show(ui, |ui| {
                         for (i, (fid, stale_secs)) in stale.iter().enumerate() {
-                            ui.allocate_ui(
-                                egui::vec2(cell_w - 4.0, cell_h - 4.0),
-                                |ui| {
-                                    self.draw_feed_panel(ui, *fid, *stale_secs);
-                                },
-                            );
+                            ui.allocate_ui(egui::vec2(cell_w - 4.0, cell_h - 4.0), |ui| {
+                                self.draw_feed_panel(ui, *fid, *stale_secs);
+                            });
                             if (i + 1) % cols == 0 {
                                 ui.end_row();
                             }
@@ -666,12 +666,7 @@ impl eframe::App for NvApp {
 }
 
 impl NvApp {
-    fn draw_feed_panel(
-        &mut self,
-        ui: &mut egui::Ui,
-        feed_id: FeedId,
-        stale_secs: f32,
-    ) {
+    fn draw_feed_panel(&mut self, ui: &mut egui::Ui, feed_id: FeedId, stale_secs: f32) {
         let available = ui.available_size();
         let snapshot = self.last_frames.get(&feed_id);
 
@@ -696,28 +691,19 @@ impl NvApp {
             // Fast path: when data is already tightly-packed RGBA, pass it
             // directly to egui without an intermediate allocation + copy.
             let image = if bpp == 4 && stride == width * 4 {
-                egui::ColorImage::from_rgba_unmultiplied(
-                    [width as usize, height as usize],
-                    &rgb,
-                )
+                egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgb)
             } else {
                 let rgba = rgb_to_rgba(&rgb, width, height, stride, bpp);
-                egui::ColorImage::from_rgba_unmultiplied(
-                    [width as usize, height as usize],
-                    &rgba,
-                )
+                egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba)
             };
 
-            let tex = self
-                .textures
-                .entry(feed_id)
-                .or_insert_with(|| {
-                    ui.ctx().load_texture(
-                        format!("feed-{}", feed_id),
-                        image.clone(),
-                        egui::TextureOptions::LINEAR,
-                    )
-                });
+            let tex = self.textures.entry(feed_id).or_insert_with(|| {
+                ui.ctx().load_texture(
+                    format!("feed-{}", feed_id),
+                    image.clone(),
+                    egui::TextureOptions::LINEAR,
+                )
+            });
             tex.set(image, egui::TextureOptions::LINEAR);
 
             // Compute scaled size maintaining aspect ratio.
@@ -761,7 +747,11 @@ impl NvApp {
                 );
 
                 // Detection type + track ID label.
-                let label = format!("{} (T{})", crate::overlay::coco_class_name(t.class_id), t.id.as_u64());
+                let label = format!(
+                    "{} (T{})",
+                    crate::overlay::coco_class_name(t.class_id),
+                    t.id.as_u64()
+                );
                 ui.painter().text(
                     egui::pos2(x0, y0 - 2.0),
                     egui::Align2::LEFT_BOTTOM,
@@ -775,8 +765,7 @@ impl NvApp {
             // Shows both frame pixel age and analytics age so the user
             // can distinguish stale pixels from stale perception results.
             let now_wall = WallTs::now().as_micros();
-            let frame_age_us = now_wall
-                .saturating_sub(snap.output.wall_ts.as_micros());
+            let frame_age_us = now_wall.saturating_sub(snap.output.wall_ts.as_micros());
             let analytics_age_us = analytics
                 .map(|a| now_wall.saturating_sub(a.wall_ts.as_micros()))
                 .unwrap_or(frame_age_us);
@@ -791,10 +780,7 @@ impl NvApp {
                 egui::FontId::proportional(11.0),
                 egui::Color32::WHITE,
             );
-            let delay_pos = egui::pos2(
-                rect.max.x - delay_galley.size().x - 8.0,
-                rect.min.y + 4.0,
-            );
+            let delay_pos = egui::pos2(rect.max.x - delay_galley.size().x - 8.0, rect.min.y + 4.0);
             let delay_bg = egui::Rect::from_min_size(
                 delay_pos - egui::vec2(3.0, 1.0),
                 delay_galley.size() + egui::vec2(6.0, 2.0),
@@ -858,10 +844,8 @@ impl NvApp {
                 egui::FontId::proportional(12.0),
                 egui::Color32::WHITE,
             );
-            let label_rect = egui::Rect::from_min_size(
-                label_pos,
-                galley.size() + egui::vec2(6.0, 2.0),
-            );
+            let label_rect =
+                egui::Rect::from_min_size(label_pos, galley.size() + egui::vec2(6.0, 2.0));
             ui.painter().rect_filled(
                 label_rect,
                 3.0,
@@ -876,9 +860,9 @@ impl NvApp {
             );
         } else {
             // No frame ever received — show placeholder.
-            let (rect, _) =
-                ui.allocate_exact_size(available, egui::Sense::hover());
-            ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(30));
+            let (rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+            ui.painter()
+                .rect_filled(rect, 0.0, egui::Color32::from_gray(30));
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -945,9 +929,9 @@ fn batch_fill_colour(ratio: Option<f64>) -> egui::Color32 {
 /// Red    : > 5 s — significantly lagging
 fn delay_colour(age_us: i64) -> egui::Color32 {
     match age_us {
-        ..500_000 => egui::Color32::GREEN,
-        ..2_000_000 => egui::Color32::YELLOW,
-        ..5_000_000 => egui::Color32::from_rgb(255, 165, 0),
+        ..=499_999 => egui::Color32::GREEN,
+        500_000..=1_999_999 => egui::Color32::YELLOW,
+        2_000_000..=4_999_999 => egui::Color32::from_rgb(255, 165, 0),
         _ => egui::Color32::RED,
     }
 }
@@ -1014,7 +998,13 @@ pub fn run_ui(
         "NextVision",
         options,
         Box::new(move |_cc| {
-            Ok(Box::new(NvApp::new(state, feed_handles, batch_handle, runtime_handle, inference_label)))
+            Ok(Box::new(NvApp::new(
+                state,
+                feed_handles,
+                batch_handle,
+                runtime_handle,
+                inference_label,
+            )))
         }),
     )
 }

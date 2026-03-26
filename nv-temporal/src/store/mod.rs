@@ -271,10 +271,10 @@ impl TrackHistory {
 
     /// Materialize or reuse the observation snapshot slice.
     pub(super) fn snapshot_observations(&mut self) -> Arc<[TrackObservation]> {
-        if let Some((cached_gen, ref cached)) = self.cached_observations {
-            if cached_gen == self.observation_gen {
-                return Arc::clone(cached);
-            }
+        if let Some((cached_gen, ref cached)) = self.cached_observations
+            && cached_gen == self.observation_gen
+        {
+            return Arc::clone(cached);
         }
         let slice: Arc<[TrackObservation]> = self.observations.iter().cloned().collect();
         self.cached_observations = Some((self.observation_gen, Arc::clone(&slice)));

@@ -170,7 +170,13 @@ impl Canvas<'_> {
 
 /// Draw all track bounding boxes and IDs onto a pixel buffer.
 pub fn draw_tracks(buf: &mut [u8], w: u32, h: u32, stride: u32, bpp: u32, tracks: &[Track]) {
-    let mut canvas = Canvas { buf, w, h, stride, bpp };
+    let mut canvas = Canvas {
+        buf,
+        w,
+        h,
+        stride,
+        bpp,
+    };
     for t in tracks {
         let c = colour_for_track(t.id.as_u64());
         let bb = &t.current.bbox;
@@ -190,7 +196,13 @@ pub fn draw_tracks(buf: &mut [u8], w: u32, h: u32, stride: u32, bpp: u32, tracks
 /// Draw an FPS counter in the top-left corner.
 pub fn draw_fps(buf: &mut [u8], w: u32, h: u32, stride: u32, bpp: u32, fps: f64) {
     let label = format!("{fps:.1} FPS");
-    let mut canvas = Canvas { buf, w, h, stride, bpp };
+    let mut canvas = Canvas {
+        buf,
+        w,
+        h,
+        stride,
+        bpp,
+    };
     canvas.draw_text(4, 4, &label, [255, 255, 255]);
 }
 

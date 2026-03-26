@@ -3,7 +3,7 @@
 //! [`MediaSource`] owns the GStreamer session for a single feed and manages
 //! its complete lifecycle: start, pause, resume, reconnect, stop.
 //!
-//! Implements the [`MediaIngress`] trait so the runtime interacts with
+//! Implements the `MediaIngress` trait so the runtime interacts with
 //! sources through the trait contract, not the concrete type.
 //!
 //! # Reconnection behavior
@@ -23,8 +23,8 @@
 //! # PTS discontinuity detection
 //!
 //! PTS discontinuity detection is handled by the backend's appsink callback
-//! thread, which pushes [`MediaEvent::Discontinuity`] events into a bounded
-//! [`EventQueue`]. The source's [`poll_bus()`] drains these alongside
+//! thread, which pushes `MediaEvent::Discontinuity` events into a bounded
+//! `EventQueue`. The source's `poll_bus()` drains these alongside
 //! GStreamer bus messages.
 //!
 //! # Restart semantics
@@ -100,7 +100,7 @@ pub(crate) enum ReconnectOutcome {
 /// Handle to a running media source for a single feed.
 ///
 /// Owns the GStreamer session (pipeline lifecycle) and manages reconnection
-/// with configurable backoff. Implements [`MediaIngress`] so the runtime
+/// with configurable backoff. Implements `MediaIngress` so the runtime
 /// layer interacts through the trait, not this concrete type.
 pub struct MediaSource {
     pub(super) feed_id: FeedId,
@@ -323,9 +323,11 @@ impl MediaSource {
         // so the pipeline uses the original rtsp:// URL instead of rtsps://.
         let effective_spec = if self.tls_fallback_active {
             match &self.spec {
-                SourceSpec::Rtsp { url, transport, security }
-                    if *security == nv_core::security::RtspSecurityPolicy::PreferTls =>
-                {
+                SourceSpec::Rtsp {
+                    url,
+                    transport,
+                    security,
+                } if *security == nv_core::security::RtspSecurityPolicy::PreferTls => {
                     SourceSpec::Rtsp {
                         url: url.clone(),
                         transport: *transport,

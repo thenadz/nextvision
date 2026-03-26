@@ -214,11 +214,8 @@ fn extract_cuda_device_ptr(buffer: &gstreamer::BufferRef) -> Result<(u64, usize)
 
         // gst_buffer_map with GST_MAP_CUDA makes the allocator place
         // the CUdeviceptr into map_info.data.
-        let ok = gstreamer::ffi::gst_buffer_map(
-            buffer.as_ptr() as *mut _,
-            map_info.as_mut_ptr(),
-            flags,
-        );
+        let ok =
+            gstreamer::ffi::gst_buffer_map(buffer.as_ptr() as *mut _, map_info.as_mut_ptr(), flags);
 
         if ok == gstreamer::glib::ffi::GFALSE {
             return Err(MediaError::DecodeFailed {
@@ -370,11 +367,11 @@ pub(crate) fn bridge_gst_sample_device(
     // cached by `FrameEnvelope`'s `OnceLock`, so this runs at most once.
     let mat_buffer = buffer.clone();
     let materialize: HostMaterializeFn = Box::new(move || {
-        let map = mat_buffer
-            .map_readable()
-            .map_err(|_| nv_frame::FrameAccessError::MaterializationFailed {
+        let map = mat_buffer.map_readable().map_err(|_| {
+            nv_frame::FrameAccessError::MaterializationFailed {
                 detail: "failed to map CUDA buffer to host".into(),
-            })?;
+            }
+        })?;
         Ok(HostBytes::from_vec(map.as_slice().to_vec()))
     });
 
@@ -446,7 +443,10 @@ mod tests {
         let err = validate_device_ptr(0xDEAD_BEEF, 0, 32, 32).unwrap_err();
         match err {
             MediaError::DecodeFailed { detail } => {
-                assert!(detail.contains("0 bytes"), "expected size mention in: {detail}");
+                assert!(
+                    detail.contains("0 bytes"),
+                    "expected size mention in: {detail}"
+                );
             }
             other => panic!("expected DecodeFailed, got {other}"),
         }
@@ -458,7 +458,10 @@ mod tests {
         let err = validate_device_ptr(0xDEAD_BEEF, 1000, 640, 480).unwrap_err();
         match err {
             MediaError::DecodeFailed { detail } => {
-                assert!(detail.contains("too small"), "expected 'too small' in: {detail}");
+                assert!(
+                    detail.contains("too small"),
+                    "expected 'too small' in: {detail}"
+                );
                 assert!(detail.contains("640"), "should mention width: {detail}");
                 assert!(detail.contains("480"), "should mention height: {detail}");
             }

@@ -50,9 +50,9 @@ pub struct Provenance {
     pub queue_hold_time: std::time::Duration,
     /// Whether this output includes the source frame.
     ///
-    /// Always `true` for [`FrameInclusion::Always`], always `false` for
-    /// [`FrameInclusion::Never`], and periodic for
-    /// [`FrameInclusion::Sampled`].
+    /// Always `true` for `FrameInclusion::Always`, always `false` for
+    /// `FrameInclusion::Never`, and periodic for
+    /// `FrameInclusion::Sampled`.
     pub frame_included: bool,
 }
 

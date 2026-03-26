@@ -12,7 +12,9 @@ pub enum MetricsError {
     /// Enable the `otlp-grpc` feature or supply a pre-built
     /// [`SdkMeterProvider`](opentelemetry_sdk::metrics::SdkMeterProvider)
     /// via [`MetricsExporterBuilder::meter_provider()`](crate::MetricsExporterBuilder::meter_provider).
-    #[error("no exporter configured — enable the `otlp-grpc` feature or provide a custom MeterProvider")]
+    #[error(
+        "no exporter configured — enable the `otlp-grpc` feature or provide a custom MeterProvider"
+    )]
     NoExporter,
 
     /// The OpenTelemetry SDK returned an error during shutdown or flush.
@@ -24,7 +26,9 @@ pub enum MetricsError {
     ZeroPollInterval,
 
     /// `build()` was called outside a tokio runtime context.
-    #[error("no tokio runtime active — MetricsExporter::build() must be called within a tokio runtime")]
+    #[error(
+        "no tokio runtime active — MetricsExporter::build() must be called within a tokio runtime"
+    )]
     NoTokioRuntime,
 
     /// The OTLP exporter could not be constructed.

@@ -61,8 +61,7 @@ pub struct DecodedStreamInfo {
 ///     }
 /// });
 /// ```
-pub type PostDecodeHook =
-    Arc<dyn Fn(&DecodedStreamInfo) -> Option<String> + Send + Sync>;
+pub type PostDecodeHook = Arc<dyn Fn(&DecodedStreamInfo) -> Option<String> + Send + Sync>;
 
 #[cfg(test)]
 mod tests {

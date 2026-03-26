@@ -486,9 +486,9 @@ fn factory_creates_source() {
         reconnect: test_reconnect(),
         ptz_provider: None,
         decode_preference: DecodePreference::Auto,
-            post_decode_hook: None,
-            event_queue_capacity: 64,
-            device_residency: Default::default(),
+        post_decode_hook: None,
+        event_queue_capacity: 64,
+        device_residency: Default::default(),
     });
     let source = result.unwrap();
     assert_eq!(source.feed_id(), FeedId::new(42));
@@ -1632,11 +1632,7 @@ fn decode_decision_includes_preference_and_fallback() {
             fallback_active,
             fallback_reason,
             ..
-        } => Some((
-            *preference,
-            *fallback_active,
-            fallback_reason.clone(),
-        )),
+        } => Some((*preference, *fallback_active, fallback_reason.clone())),
         _ => None,
     });
     let (pref, fb_active, fb_reason) = decision.expect("should emit DecodeDecision");
@@ -1919,7 +1915,9 @@ fn tls_fallback_emits_insecure_health_event() {
 
     let events = health.drain();
     assert!(
-        events.iter().any(|e| matches!(e, HealthEvent::InsecureRtspSource { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, HealthEvent::InsecureRtspSource { .. })),
         "should emit InsecureRtspSource when TLS fallback is active; got: {:?}",
         events,
     );

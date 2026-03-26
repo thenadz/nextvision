@@ -62,11 +62,12 @@
 /// // Explicit opt-out for cameras that don't support TLS
 /// let policy = RtspSecurityPolicy::AllowInsecure;
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RtspSecurityPolicy {
     /// Default: promote bare `rtsp://` to `rtsps://` when scheme is absent
     /// or `rtsp`. Logs a warning if the final URL is still insecure
     /// (e.g., camera doesn't support TLS and caller forces `AllowInsecure`).
+    #[default]
     PreferTls,
 
     /// Allow insecure `rtsp://` without promotion. A health warning is
@@ -78,13 +79,6 @@ pub enum RtspSecurityPolicy {
     /// error at feed creation time if the URL scheme is `rtsp://`.
     RequireTls,
 }
-
-impl Default for RtspSecurityPolicy {
-    fn default() -> Self {
-        Self::PreferTls
-    }
-}
-
 impl std::fmt::Display for RtspSecurityPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -116,10 +110,11 @@ impl std::fmt::Display for RtspSecurityPolicy {
 /// // Explicit opt-in for development/trusted config
 /// let policy = CustomPipelinePolicy::AllowTrusted;
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CustomPipelinePolicy {
     /// Reject `SourceSpec::Custom` at config validation time with a
     /// clear error message explaining how to opt in.
+    #[default]
     Reject,
 
     /// Allow custom pipeline fragments. Use only when the pipeline
@@ -127,13 +122,6 @@ pub enum CustomPipelinePolicy {
     /// application code, not from user input or config files).
     AllowTrusted,
 }
-
-impl Default for CustomPipelinePolicy {
-    fn default() -> Self {
-        Self::Reject
-    }
-}
-
 impl std::fmt::Display for CustomPipelinePolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -277,7 +265,7 @@ fn redact_secret_patterns(s: &mut String) {
             let value_start = abs_idx + pat.len();
             // Find end of value: next space, '&', ';', ',', or end of string.
             let value_end = s[value_start..]
-                .find(|c: char| c == ' ' || c == '&' || c == ';' || c == ',' || c == '\'' || c == '"')
+                .find([' ', '&', ';', ',', '\'', '"'])
                 .map(|p| value_start + p)
                 .unwrap_or(s.len());
 
@@ -342,8 +330,8 @@ pub fn redact_urls_in_string(s: &str) -> String {
 pub fn promote_rtsp_to_tls(url: &str) -> String {
     if url.starts_with("rtsps://") {
         url.to_string()
-    } else if url.starts_with("rtsp://") {
-        format!("rtsps://{}", &url[7..])
+    } else if let Some(rest) = url.strip_prefix("rtsp://") {
+        format!("rtsps://{rest}")
     } else {
         // No recognized scheme — assume RTSP and add TLS scheme.
         format!("rtsps://{url}")
@@ -373,7 +361,10 @@ mod tests {
     #[test]
     fn security_policy_display() {
         assert_eq!(RtspSecurityPolicy::PreferTls.to_string(), "PreferTls");
-        assert_eq!(RtspSecurityPolicy::AllowInsecure.to_string(), "AllowInsecure");
+        assert_eq!(
+            RtspSecurityPolicy::AllowInsecure.to_string(),
+            "AllowInsecure"
+        );
         assert_eq!(RtspSecurityPolicy::RequireTls.to_string(), "RequireTls");
     }
 
@@ -381,7 +372,10 @@ mod tests {
 
     #[test]
     fn custom_pipeline_policy_default_is_reject() {
-        assert_eq!(CustomPipelinePolicy::default(), CustomPipelinePolicy::Reject);
+        assert_eq!(
+            CustomPipelinePolicy::default(),
+            CustomPipelinePolicy::Reject
+        );
     }
 
     // -- URL redaction --
@@ -412,10 +406,7 @@ mod tests {
 
     #[test]
     fn redact_url_no_scheme() {
-        assert_eq!(
-            redact_url("user:pass@host/path"),
-            "***@host/path"
-        );
+        assert_eq!(redact_url("user:pass@host/path"), "***@host/path");
     }
 
     #[test]
@@ -503,10 +494,7 @@ mod tests {
 
     #[test]
     fn promote_rtsp_no_scheme() {
-        assert_eq!(
-            promote_rtsp_to_tls("cam/stream"),
-            "rtsps://cam/stream"
-        );
+        assert_eq!(promote_rtsp_to_tls("cam/stream"), "rtsps://cam/stream");
     }
 
     // -- is_insecure_rtsp --

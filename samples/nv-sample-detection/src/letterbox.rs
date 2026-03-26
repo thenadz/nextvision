@@ -25,7 +25,13 @@ pub struct LetterboxInfo {
 impl LetterboxInfo {
     /// Remap a bounding box from letterbox pixel coordinates back to
     /// normalised `[0, 1]` coordinates relative to the original frame.
-    pub fn remap_to_normalised(&self, x_min: f32, y_min: f32, x_max: f32, y_max: f32) -> (f32, f32, f32, f32) {
+    pub fn remap_to_normalised(
+        &self,
+        x_min: f32,
+        y_min: f32,
+        x_max: f32,
+        y_max: f32,
+    ) -> (f32, f32, f32, f32) {
         let x0 = ((x_min - self.pad_x) / self.scale).clamp(0.0, self.orig_w as f32);
         let y0 = ((y_min - self.pad_y) / self.scale).clamp(0.0, self.orig_h as f32);
         let x1 = ((x_max - self.pad_x) / self.scale).clamp(0.0, self.orig_w as f32);
@@ -66,7 +72,8 @@ pub fn letterbox_preprocess(
     let t = target as usize;
     let pixels = t * t;
     let mut tensor = vec![114.0_f32 / 255.0; pixels * 3];
-    let info = letterbox_preprocess_into(rgb_data, src_w, src_h, src_stride, bpp, target, &mut tensor);
+    let info =
+        letterbox_preprocess_into(rgb_data, src_w, src_h, src_stride, bpp, target, &mut tensor);
     (tensor, info)
 }
 

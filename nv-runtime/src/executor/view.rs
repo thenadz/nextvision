@@ -182,17 +182,17 @@ fn derive_motion_state(report: &MotionReport) -> CameraMotionState {
     }
     // When PTZ telemetry is available the epoch policy infers state from deltas.
     // Without an explicit hint, fall back to frame_transform displacement.
-    if let Some(ref t) = report.frame_transform {
-        if t.confidence > 0.5 {
-            let displacement = t.displacement_magnitude();
-            if displacement < 0.01 {
-                return CameraMotionState::Stable;
-            }
-            return CameraMotionState::Moving {
-                angular_velocity: None,
-                displacement: Some(displacement),
-            };
+    if let Some(ref t) = report.frame_transform
+        && t.confidence > 0.5
+    {
+        let displacement = t.displacement_magnitude();
+        if displacement < 0.01 {
+            return CameraMotionState::Stable;
         }
+        return CameraMotionState::Moving {
+            angular_velocity: None,
+            displacement: Some(displacement),
+        };
     }
     CameraMotionState::Unknown
 }

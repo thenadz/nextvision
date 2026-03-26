@@ -556,25 +556,31 @@ mod tests {
 
     #[test]
     fn device_residency_provider_is_device() {
-        use std::sync::Arc;
+        use crate::gpu_provider::GpuPipelineProvider;
         use nv_core::error::MediaError;
         use nv_core::id::FeedId;
         use nv_frame::PixelFormat;
-        use crate::gpu_provider::GpuPipelineProvider;
+        use std::sync::Arc;
 
         struct StubProvider;
         impl GpuPipelineProvider for StubProvider {
-            fn name(&self) -> &str { "stub" }
+            fn name(&self) -> &str {
+                "stub"
+            }
             #[cfg(feature = "gst-backend")]
             fn build_pipeline_tail(
-                &self, _: PixelFormat,
+                &self,
+                _: PixelFormat,
             ) -> Result<crate::gpu_provider::GpuPipelineTail, MediaError> {
                 unimplemented!()
             }
             #[cfg(feature = "gst-backend")]
             fn bridge_sample(
-                &self, _: FeedId, _: &Arc<std::sync::atomic::AtomicU64>,
-                _: PixelFormat, _: &gstreamer::Sample,
+                &self,
+                _: FeedId,
+                _: &Arc<std::sync::atomic::AtomicU64>,
+                _: PixelFormat,
+                _: &gstreamer::Sample,
                 _: Option<crate::PtzTelemetry>,
             ) -> Result<nv_frame::FrameEnvelope, MediaError> {
                 unimplemented!()
@@ -613,7 +619,7 @@ mod tests {
             SourceSpec::file("/tmp/test.mp4"),
             test_reconnect(),
         )
-            .with_device_residency(DeviceResidency::Cuda);
+        .with_device_residency(DeviceResidency::Cuda);
         assert!(matches!(opts.device_residency, DeviceResidency::Cuda));
     }
 }

@@ -106,10 +106,10 @@ impl FeedSharedState {
     /// Returns `(depth, capacity)`. If no session is active (between
     /// restarts or after shutdown), returns `(0, 0)`.
     pub fn source_queue_telemetry(&self) -> (usize, usize) {
-        if let Ok(guard) = self.queue.lock() {
-            if let Some(ref q) = *guard {
-                return (q.depth(), q.capacity());
-            }
+        if let Ok(guard) = self.queue.lock()
+            && let Some(ref q) = *guard
+        {
+            return (q.depth(), q.capacity());
         }
         (0, 0)
     }
@@ -137,10 +137,10 @@ impl FeedSharedState {
         let (_lock, cvar) = &self.pause_condvar;
         cvar.notify_one();
         // Wake the frame queue consumer (event-driven — no poll delay).
-        if let Ok(guard) = self.queue.lock() {
-            if let Some(ref q) = *guard {
-                q.wake_consumer();
-            }
+        if let Ok(guard) = self.queue.lock()
+            && let Some(ref q) = *guard
+        {
+            q.wake_consumer();
         }
     }
 

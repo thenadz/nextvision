@@ -1,7 +1,7 @@
 //! Codec handling and hardware acceleration negotiation.
 //!
 //! Provides the public [`DecodePreference`] type for user-facing decode
-//! configuration and the internal [`DecoderSelection`] used by the pipeline
+//! configuration and the internal `DecoderSelection` type used by the pipeline
 //! builder.
 //!
 //! # Decode selection model
@@ -20,16 +20,16 @@
 //!    a decoder and the stream is confirmed flowing, the source layer
 //!    inspects which decoder was actually selected. For
 //!    `RequireHardware`, a software effective decoder triggers a typed
-//!    [`MediaError`](nv_core::error::MediaError) instead of silent
-//!    success. For all modes, a [`HealthEvent::DecodeDecision`] is
+//!    `MediaError` instead of silent
+//!    success. For all modes, a `HealthEvent::DecodeDecision` is
 //!    emitted with the effective [`DecodeOutcome`].
 //!
 //! # Adaptive fallback
 //!
 //! For [`PreferHardware`](DecodePreference::PreferHardware), repeated
 //! hardware decoder failures (before `StreamStarted` confirmation) cause
-//! an internal [`HwFailureTracker`] to temporarily demote the selection
-//! to [`DecoderSelection::Auto`], preventing reconnect thrash. The
+//! an internal `HwFailureTracker` to temporarily demote the selection
+//! to `DecoderSelection::Auto`, preventing reconnect thrash. The
 //! demotion has a bounded TTL and resets on success.
 
 use std::sync::{Arc, Mutex};
@@ -290,10 +290,7 @@ impl HwFailureTracker {
     /// Returns `Some((adjusted_selection, reason))` if the tracker
     /// recommends overriding. Only applies to `PreferHardware` — other
     /// preferences are not adjusted.
-    pub fn adjust_selection(
-        &self,
-        pref: DecodePreference,
-    ) -> Option<(DecoderSelection, String)> {
+    pub fn adjust_selection(&self, pref: DecodePreference) -> Option<(DecoderSelection, String)> {
         if !self.should_fallback() {
             return None;
         }
@@ -331,7 +328,7 @@ impl HwFailureTracker {
 /// element registry for video decoder elements whose metadata hints at
 /// hardware acceleration. The classification uses the element's klass
 /// string (`"Hardware"` keyword) and a built-in list of known hardware
-/// decoder name prefixes — see [`is_hardware_video_decoder`] for details.
+/// decoder name prefixes — see `is_hardware_video_decoder` for details.
 ///
 /// When the `gst-backend` feature is **disabled**, this returns a
 /// capabilities struct with `hardware_decode_available = false` and an
@@ -396,8 +393,8 @@ pub(crate) fn is_hardware_video_decoder(klass: &str, element_name: &str) -> bool
 /// GStreamer-specific hardware decoder discovery.
 #[cfg(feature = "gst-backend")]
 fn discover_gst_hw_decoders() -> DecodeCapabilities {
-    use gstreamer as gst;
     use gst::prelude::*;
+    use gstreamer as gst;
 
     // Ensure GStreamer is initialized.
     if gst::init().is_err() {

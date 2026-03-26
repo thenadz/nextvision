@@ -4,7 +4,7 @@
 //! how to obtain pixel data for inference. Two paths exist:
 //!
 //! - **Host path** — frames that are host-readable or mappable to host are
-//!   preprocessed on the CPU via [`letterbox_preprocess`](crate::letterbox::letterbox_preprocess).
+//!   preprocessed on the CPU via [`letterbox_preprocess`].
 //! - **Device-native path** — opaque device-resident frames require a
 //!   hardware-specific adapter. See [`FramePreprocessor`] for the extension
 //!   point.
@@ -20,8 +20,8 @@
 //! (GPU → CPU download). [`HostFallbackPolicy`] controls how this
 //! situation is handled:
 //!
-//! - [`Auto`](HostFallbackPolicy::Auto) — library default: [`Warn`] for
-//!   GPU, [`Allow`] for CPU (default).
+//! - [`Auto`](HostFallbackPolicy::Auto) — library default: `Warn` for
+//!   GPU, `Allow` for CPU (default).
 //! - [`Allow`](HostFallbackPolicy::Allow) — silently permit.
 //! - [`Warn`](HostFallbackPolicy::Warn) — permit but emit rate-limited
 //!   warnings (first call, then every 60th), making the performance cost
@@ -169,7 +169,8 @@ impl FramePreprocessor for HostPreprocessor {
         frame: &FrameEnvelope,
         input_size: u32,
     ) -> Result<PreprocessedFrame, StageError> {
-        let (pixels, bpp) = resolve_host_pixels(frame, self.stage_id, self.policy, &self.warn_count)?;
+        let (pixels, bpp) =
+            resolve_host_pixels(frame, self.stage_id, self.policy, &self.warn_count)?;
         let (tensor, letterbox) = letterbox_preprocess(
             &pixels,
             frame.width(),
@@ -253,7 +254,7 @@ fn apply_host_fallback_policy(
         HostFallbackPolicy::Auto | HostFallbackPolicy::Allow => Ok(()),
         HostFallbackPolicy::Warn => {
             let count = warn_counter.fetch_add(1, Ordering::Relaxed) + 1; // 1-based
-            if count == 1 || count % 60 == 0 {
+            if count == 1 || count.is_multiple_of(60) {
                 warn!(
                     stage = %stage_id,
                     count = count,
@@ -362,8 +363,8 @@ mod tests {
     use nv_frame::{DataAccess, FrameEnvelope, HostBytes, PixelFormat};
 
     use std::sync::atomic::AtomicUsize;
-    use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::SubscriberExt;
 
     const TEST_STAGE: StageId = StageId("test-preprocess");
 
@@ -375,11 +376,22 @@ mod tests {
     #[test]
     fn host_frame_resolves_host_pixels() {
         let frame = nv_test_util::synthetic::solid_rgb(
-            FeedId::new(1), 1, MonotonicTs::from_nanos(0), 4, 4, 128, 64, 32,
+            FeedId::new(1),
+            1,
+            MonotonicTs::from_nanos(0),
+            4,
+            4,
+            128,
+            64,
+            32,
         );
-        let (pixels, bpp) =
-            resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Allow, &allow_counter())
-                .unwrap();
+        let (pixels, bpp) = resolve_host_pixels(
+            &frame,
+            TEST_STAGE,
+            HostFallbackPolicy::Allow,
+            &allow_counter(),
+        )
+        .unwrap();
         assert_eq!(bpp, 3);
         assert_eq!(pixels.len(), 4 * 4 * 3);
     }
@@ -391,16 +403,28 @@ mod tests {
         let rgb_data_clone = rgb_data.clone();
         let handle: Arc<dyn std::any::Any + Send + Sync> = Arc::new(42u32);
         let frame = FrameEnvelope::new_device(
-            FeedId::new(1), 1, MonotonicTs::from_nanos(0), WallTs::now(),
-            8, 8, PixelFormat::Rgb8, 8 * 3,
+            FeedId::new(1),
+            1,
+            MonotonicTs::from_nanos(0),
+            WallTs::now(),
+            8,
+            8,
+            PixelFormat::Rgb8,
+            8 * 3,
             handle,
-            Some(Box::new(move || Ok(HostBytes::from_vec(rgb_data_clone.clone())))),
+            Some(Box::new(move || {
+                Ok(HostBytes::from_vec(rgb_data_clone.clone()))
+            })),
             TypedMetadata::new(),
         );
         assert_eq!(frame.data_access(), DataAccess::MappableToHost);
-        let (pixels, bpp) =
-            resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Allow, &allow_counter())
-                .unwrap();
+        let (pixels, bpp) = resolve_host_pixels(
+            &frame,
+            TEST_STAGE,
+            HostFallbackPolicy::Allow,
+            &allow_counter(),
+        )
+        .unwrap();
         assert_eq!(bpp, 3);
         assert_eq!(pixels.len(), 8 * 8 * 3);
     }
@@ -410,15 +434,25 @@ mod tests {
     fn opaque_device_frame_returns_error() {
         let handle: Arc<dyn std::any::Any + Send + Sync> = Arc::new(42u32);
         let frame = FrameEnvelope::new_device(
-            FeedId::new(1), 1, MonotonicTs::from_nanos(0), WallTs::now(),
-            8, 8, PixelFormat::Rgb8, 8 * 3,
+            FeedId::new(1),
+            1,
+            MonotonicTs::from_nanos(0),
+            WallTs::now(),
+            8,
+            8,
+            PixelFormat::Rgb8,
+            8 * 3,
             handle,
             None, // no materializer → Opaque
             TypedMetadata::new(),
         );
         assert_eq!(frame.data_access(), DataAccess::Opaque);
-        let result =
-            resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Allow, &allow_counter());
+        let result = resolve_host_pixels(
+            &frame,
+            TEST_STAGE,
+            HostFallbackPolicy::Allow,
+            &allow_counter(),
+        );
         assert!(result.is_err());
     }
 
@@ -426,10 +460,19 @@ mod tests {
     #[test]
     fn unsupported_format_returns_error() {
         let frame = nv_test_util::synthetic::solid_gray(
-            FeedId::new(1), 1, MonotonicTs::from_nanos(0), 4, 4, 128,
+            FeedId::new(1),
+            1,
+            MonotonicTs::from_nanos(0),
+            4,
+            4,
+            128,
         );
-        let result =
-            resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Allow, &allow_counter());
+        let result = resolve_host_pixels(
+            &frame,
+            TEST_STAGE,
+            HostFallbackPolicy::Allow,
+            &allow_counter(),
+        );
         assert!(result.is_err());
     }
 
@@ -438,7 +481,14 @@ mod tests {
     fn host_preprocessor_succeeds_on_host_frame() {
         let preprocessor = HostPreprocessor::new(TEST_STAGE);
         let frame = nv_test_util::synthetic::solid_rgb(
-            FeedId::new(1), 1, MonotonicTs::from_nanos(0), 16, 16, 128, 64, 32,
+            FeedId::new(1),
+            1,
+            MonotonicTs::from_nanos(0),
+            16,
+            16,
+            128,
+            64,
+            32,
         );
         let result = preprocessor.preprocess(&frame, 32);
         assert!(result.is_ok());
@@ -453,9 +503,16 @@ mod tests {
         let preprocessor = HostPreprocessor::new(TEST_STAGE);
         let handle: Arc<dyn std::any::Any + Send + Sync> = Arc::new(42u32);
         let frame = FrameEnvelope::new_device(
-            FeedId::new(1), 1, MonotonicTs::from_nanos(0), WallTs::now(),
-            8, 8, PixelFormat::Rgb8, 8 * 3,
-            handle, None,
+            FeedId::new(1),
+            1,
+            MonotonicTs::from_nanos(0),
+            WallTs::now(),
+            8,
+            8,
+            PixelFormat::Rgb8,
+            8 * 3,
+            handle,
+            None,
             TypedMetadata::new(),
         );
         let result = preprocessor.preprocess(&frame, 32);
@@ -470,8 +527,14 @@ mod tests {
         let rgb_data = vec![100u8; 8 * 8 * 3];
         let handle: Arc<dyn std::any::Any + Send + Sync> = Arc::new(42u32);
         FrameEnvelope::new_device(
-            FeedId::new(1), 1, MonotonicTs::from_nanos(0), WallTs::now(),
-            8, 8, PixelFormat::Rgb8, 8 * 3,
+            FeedId::new(1),
+            1,
+            MonotonicTs::from_nanos(0),
+            WallTs::now(),
+            8,
+            8,
+            PixelFormat::Rgb8,
+            8 * 3,
             handle,
             Some(Box::new(move || Ok(HostBytes::from_vec(rgb_data.clone())))),
             TypedMetadata::new(),
@@ -483,8 +546,7 @@ mod tests {
     fn warn_policy_allows_mappable_frame() {
         let frame = make_mappable_frame();
         let counter = AtomicU64::new(0);
-        let result =
-            resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Warn, &counter);
+        let result = resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Warn, &counter);
         assert!(result.is_ok());
         assert_eq!(counter.load(Ordering::Relaxed), 1);
     }
@@ -494,8 +556,7 @@ mod tests {
     fn forbid_policy_rejects_mappable_frame() {
         let frame = make_mappable_frame();
         let counter = AtomicU64::new(0);
-        let result =
-            resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Forbid, &counter);
+        let result = resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Forbid, &counter);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -509,11 +570,17 @@ mod tests {
     #[test]
     fn allow_policy_on_host_readable_no_warn() {
         let frame = nv_test_util::synthetic::solid_rgb(
-            FeedId::new(1), 1, MonotonicTs::from_nanos(0), 4, 4, 128, 64, 32,
+            FeedId::new(1),
+            1,
+            MonotonicTs::from_nanos(0),
+            4,
+            4,
+            128,
+            64,
+            32,
         );
         let counter = AtomicU64::new(0);
-        let result =
-            resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Warn, &counter);
+        let result = resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Warn, &counter);
         assert!(result.is_ok());
         // Host-readable frames don't go through the MappableToHost branch,
         // so the warn counter stays at 0.
@@ -524,11 +591,17 @@ mod tests {
     #[test]
     fn forbid_policy_allows_host_readable_frame() {
         let frame = nv_test_util::synthetic::solid_rgb(
-            FeedId::new(1), 1, MonotonicTs::from_nanos(0), 4, 4, 128, 64, 32,
+            FeedId::new(1),
+            1,
+            MonotonicTs::from_nanos(0),
+            4,
+            4,
+            128,
+            64,
+            32,
         );
         let counter = AtomicU64::new(0);
-        let result =
-            resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Forbid, &counter);
+        let result = resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Forbid, &counter);
         assert!(result.is_ok());
     }
 
@@ -542,12 +615,21 @@ mod tests {
     fn host_batch_preprocessor_succeeds() {
         let preprocessor = HostBatchPreprocessor::new(TEST_STAGE);
         let frame = nv_test_util::synthetic::solid_rgb(
-            FeedId::new(1), 1, MonotonicTs::from_nanos(0), 16, 16, 128, 64, 32,
+            FeedId::new(1),
+            1,
+            MonotonicTs::from_nanos(0),
+            16,
+            16,
+            128,
+            64,
+            32,
         );
         let input_size = 32u32;
         let pixel_count = 3 * (input_size as usize) * (input_size as usize);
         let mut dest = vec![0.0f32; pixel_count];
-        let lb = preprocessor.preprocess_into(&frame, input_size, &mut dest).unwrap();
+        let lb = preprocessor
+            .preprocess_into(&frame, input_size, &mut dest)
+            .unwrap();
         // Letterbox info should be valid.
         assert!(lb.scale > 0.0);
         // Dest should have been written (not all zeros for non-black input).
@@ -557,7 +639,8 @@ mod tests {
     /// HostBatchPreprocessor with Forbid policy rejects mappable frames.
     #[test]
     fn host_batch_preprocessor_forbid_rejects_mappable() {
-        let preprocessor = HostBatchPreprocessor::with_policy(TEST_STAGE, HostFallbackPolicy::Forbid);
+        let preprocessor =
+            HostBatchPreprocessor::with_policy(TEST_STAGE, HostFallbackPolicy::Forbid);
         let frame = make_mappable_frame();
         let input_size = 32u32;
         let pixel_count = 3 * (input_size as usize) * (input_size as usize);
@@ -590,11 +673,10 @@ mod tests {
         //   → count=1 (emit), count=60 (emit), count=120 (emit)
 
         for i in 1..=121u64 {
-            let _ = resolve_host_pixels(
-                &frame, TEST_STAGE, HostFallbackPolicy::Warn, &counter,
-            );
+            let _ = resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Warn, &counter);
             assert_eq!(
-                counter.load(Ordering::Relaxed), i,
+                counter.load(Ordering::Relaxed),
+                i,
                 "counter should match call number",
             );
         }
@@ -611,14 +693,10 @@ mod tests {
     fn warn_throttle_exact_emission_counts() {
         // Directly test the emission pattern: for each 1-based count,
         // determine whether a warn would fire.
-        let should_emit = |count: u64| -> bool {
-            count == 1 || count % 60 == 0
-        };
+        let should_emit = |count: u64| -> bool { count == 1 || count.is_multiple_of(60) };
 
         // Calls 1..=180: count emissions.
-        let emission_points: Vec<u64> = (1..=180)
-            .filter(|&c| should_emit(c))
-            .collect();
+        let emission_points: Vec<u64> = (1..=180).filter(|&c| should_emit(c)).collect();
 
         assert_eq!(
             emission_points,
@@ -637,8 +715,7 @@ mod tests {
     fn auto_policy_acts_as_allow_at_resolve_level() {
         let frame = make_mappable_frame();
         let counter = AtomicU64::new(0);
-        let result =
-            resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Auto, &counter);
+        let result = resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Auto, &counter);
         assert!(result.is_ok());
         // Auto is treated as Allow at this level — no warn counter bump.
         assert_eq!(counter.load(Ordering::Relaxed), 0);
@@ -677,7 +754,9 @@ mod tests {
     #[test]
     fn warn_throttle_real_emission_cadence() {
         let warn_count = Arc::new(AtomicUsize::new(0));
-        let layer = WarnCounter { count: Arc::clone(&warn_count) };
+        let layer = WarnCounter {
+            count: Arc::clone(&warn_count),
+        };
         let subscriber = tracing_subscriber::registry().with(layer);
 
         tracing::subscriber::with_default(subscriber, || {
@@ -685,37 +764,35 @@ mod tests {
             let counter = AtomicU64::new(0);
 
             // Call 1 — should emit.
-            let _ = resolve_host_pixels(
-                &frame, TEST_STAGE, HostFallbackPolicy::Warn, &counter,
-            );
+            let _ = resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Warn, &counter);
             assert_eq!(warn_count.load(Ordering::Relaxed), 1, "emit on call 1");
 
             // Calls 2..59 — no new emissions.
             for _ in 2..=59 {
-                let _ = resolve_host_pixels(
-                    &frame, TEST_STAGE, HostFallbackPolicy::Warn, &counter,
-                );
+                let _ = resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Warn, &counter);
             }
-            assert_eq!(warn_count.load(Ordering::Relaxed), 1, "silent for calls 2..59");
+            assert_eq!(
+                warn_count.load(Ordering::Relaxed),
+                1,
+                "silent for calls 2..59"
+            );
 
             // Call 60 — should emit.
-            let _ = resolve_host_pixels(
-                &frame, TEST_STAGE, HostFallbackPolicy::Warn, &counter,
-            );
+            let _ = resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Warn, &counter);
             assert_eq!(warn_count.load(Ordering::Relaxed), 2, "emit on call 60");
 
             // Calls 61..119 — no new emissions.
             for _ in 61..=119 {
-                let _ = resolve_host_pixels(
-                    &frame, TEST_STAGE, HostFallbackPolicy::Warn, &counter,
-                );
+                let _ = resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Warn, &counter);
             }
-            assert_eq!(warn_count.load(Ordering::Relaxed), 2, "silent for calls 61..119");
+            assert_eq!(
+                warn_count.load(Ordering::Relaxed),
+                2,
+                "silent for calls 61..119"
+            );
 
             // Call 120 — should emit.
-            let _ = resolve_host_pixels(
-                &frame, TEST_STAGE, HostFallbackPolicy::Warn, &counter,
-            );
+            let _ = resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Warn, &counter);
             assert_eq!(warn_count.load(Ordering::Relaxed), 3, "emit on call 120");
         });
     }
@@ -724,16 +801,17 @@ mod tests {
     #[test]
     fn allow_policy_emits_no_warnings() {
         let warn_count = Arc::new(AtomicUsize::new(0));
-        let layer = WarnCounter { count: Arc::clone(&warn_count) };
+        let layer = WarnCounter {
+            count: Arc::clone(&warn_count),
+        };
         let subscriber = tracing_subscriber::registry().with(layer);
 
         tracing::subscriber::with_default(subscriber, || {
             let frame = make_mappable_frame();
             let counter = AtomicU64::new(0);
             for _ in 0..120 {
-                let _ = resolve_host_pixels(
-                    &frame, TEST_STAGE, HostFallbackPolicy::Allow, &counter,
-                );
+                let _ =
+                    resolve_host_pixels(&frame, TEST_STAGE, HostFallbackPolicy::Allow, &counter);
             }
             assert_eq!(warn_count.load(Ordering::Relaxed), 0);
         });

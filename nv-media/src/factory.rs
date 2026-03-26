@@ -1,7 +1,7 @@
 //! Concrete [`MediaIngressFactory`] implementation.
 //!
-//! [`GstMediaIngressFactory`] creates GStreamer-backed [`MediaSource`]
-//! instances. The runtime holds one factory and calls [`create()`] for each
+//! [`GstMediaIngressFactory`] creates GStreamer-backed `MediaSource`
+//! instances. The runtime holds one factory and calls `create()` for each
 //! new feed.
 
 use std::sync::Arc;

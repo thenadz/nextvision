@@ -4,8 +4,8 @@
 //! their concrete [`TypeId`]. At most one value per concrete type. This is the
 //! standard "type-map" or "AnyMap" pattern.
 //!
-//! Used on [`FrameEnvelope`], [`Detection`], [`Track`], [`OutputEnvelope`],
-//! and [`PerceptionArtifacts`] to carry extensible domain-specific data
+//! Used on `FrameEnvelope`, `Detection`, `Track`, `OutputEnvelope`,
+//! and `PerceptionArtifacts` to carry extensible domain-specific data
 //! without modifying core types.
 //!
 //! # Cloning cost

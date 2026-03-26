@@ -86,7 +86,10 @@ impl std::fmt::Debug for SessionConfig {
             .field("decoder", &self.decoder)
             .field("output_format", &self.output_format)
             .field("ptz_provider", &self.ptz_provider.as_ref().map(|_| ".."))
-            .field("post_decode_hook", &self.post_decode_hook.as_ref().map(|_| ".."))
+            .field(
+                "post_decode_hook",
+                &self.post_decode_hook.as_ref().map(|_| ".."),
+            )
             .finish()
     }
 }
@@ -305,7 +308,7 @@ impl GstSession {
                         Err(e) => {
                             let n = fail_counter.fetch_add(1, Ordering::Relaxed) + 1;
                             let consecutive = consec_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                            if n <= 3 || n % 100 == 0 {
+                            if n <= 3 || n.is_multiple_of(100) {
                                 tracing::warn!(
                                     feed_id = %feed_id,
                                     error = %e,

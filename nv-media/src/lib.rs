@@ -41,7 +41,7 @@
 //! - **`cuda`** — Enables the CUDA-resident pipeline path. Decoded frames
 //!   stay on the GPU as CUDA device memory, bypassing the host-memory copy.
 //!   Implies `gst-backend`. Requires GStreamer CUDA development libraries
-//!   at build time. See the [`gpu`] module for details.
+//!   at build time. See the `gpu` module for details.
 //!
 //! ## Module overview
 //!
@@ -50,7 +50,7 @@
 //! | [`ingress`] | **public** | Trait contracts (`MediaIngress`, `FrameSink`, `MediaIngressFactory`) |
 //! | [`source`] | **public** | `MediaSource` — concrete implementation with reconnection |
 //! | [`decode`] | **public** | `DecodePreference`, capability discovery (`pub(crate)` internals) |
-//! | [`gpu`] | **public** | CUDA-resident frame bridge (`cuda` feature) |
+//! | `gpu` | **public** | CUDA-resident frame bridge (`cuda` feature) |
 //! | `backend` | `pub(crate)` | `GstSession` — safe adapter around GStreamer pipeline |
 //! | `bridge` | `pub(crate)` | GstSample → `FrameEnvelope` conversion |
 //! | `bus` | `pub(crate)` | Bus message types and mapping to `MediaEvent` |
@@ -90,8 +90,8 @@ pub use decode::{
     DecodeCapabilities, DecodeDecisionInfo, DecodeOutcome, discover_decode_capabilities,
 };
 pub use factory::{DefaultMediaFactory, GstMediaIngressFactory};
-pub use ingress::IngressOptions;
 pub use ingress::DeviceResidency;
+pub use ingress::IngressOptions;
 pub use ingress::PtzProvider;
 pub use ingress::SourceStatus;
 pub use ingress::TickOutcome;

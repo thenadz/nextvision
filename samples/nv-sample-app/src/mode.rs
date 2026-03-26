@@ -4,7 +4,7 @@
 //! without requiring a running GStreamer pipeline or Jetson hardware.
 //!
 //! When the `jetson-nvmm` feature is active, this module also provides
-//! [`NvmmBatchPreprocessor`] and [`NvmmPreprocessor`] — device-native
+//! `NvmmBatchPreprocessor` and `NvmmPreprocessor` — device-native
 //! preprocessors that read NVMM frames directly from unified memory,
 //! bypassing the expensive GPU→CPU host materialization path. This
 //! eliminates the primary cause of NVMM buffer pool starvation on
@@ -163,9 +163,7 @@ mod nvmm_preprocess {
             }),
             other => Err(StageError::ProcessingFailed {
                 stage_id,
-                detail: format!(
-                    "unsupported NVMM pixel format for preprocessing: {other:?}"
-                ),
+                detail: format!("unsupported NVMM pixel format for preprocessing: {other:?}"),
             }),
         }
     }
@@ -226,10 +224,7 @@ mod nvmm_preprocess {
         pub fn new(stage_id: StageId, policy: HostFallbackPolicy) -> Self {
             Self {
                 stage_id,
-                host_fallback: HostBatchPreprocessor::with_policy(
-                    stage_id,
-                    policy,
-                ),
+                host_fallback: HostBatchPreprocessor::with_policy(stage_id, policy),
             }
         }
     }
@@ -278,10 +273,7 @@ mod nvmm_preprocess {
         pub fn new(stage_id: StageId, policy: HostFallbackPolicy) -> Self {
             Self {
                 stage_id,
-                host_fallback: HostPreprocessor::with_policy(
-                    stage_id,
-                    policy,
-                ),
+                host_fallback: HostPreprocessor::with_policy(stage_id, policy),
             }
         }
     }

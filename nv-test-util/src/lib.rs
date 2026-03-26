@@ -4,11 +4,11 @@
 //!
 //! Provides:
 //!
-//! - **[`synthetic`]** — factory functions for synthetic [`FrameEnvelope`]s with
+//! - **[`synthetic`]** — factory functions for synthetic `FrameEnvelope`s with
 //!   known content (solid color, gradient, etc.).
-//! - **[`mock_stage`]** — configurable mock [`Stage`] implementations for testing
+//! - **[`mock_stage`]** — configurable mock `Stage` implementations for testing
 //!   pipelines without real perception models.
-//! - **[`harness`]** — a lightweight [`StageHarness`](harness::StageHarness) for
+//! - **[`harness`]** — a lightweight [`StageHarness`] for
 //!   testing stages in isolation without the full runtime.
 //! - **[`clock`]** — a controllable test clock for deterministic timestamp generation.
 //!

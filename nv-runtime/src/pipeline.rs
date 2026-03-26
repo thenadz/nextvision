@@ -253,7 +253,7 @@ mod tests {
                 queue_capacity: None,
                 response_timeout: None,
                 max_in_flight_per_feed: 1,
-            startup_timeout: None,
+                startup_timeout: None,
             },
             health_tx,
         )

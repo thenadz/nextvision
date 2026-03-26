@@ -76,9 +76,7 @@ impl FeedHandle {
     /// Whether the worker thread is still alive.
     #[must_use]
     pub fn is_alive(&self) -> bool {
-        self.shared
-            .alive
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.shared.alive.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Get a snapshot of the feed's current metrics.
@@ -102,8 +100,14 @@ impl FeedHandle {
         QueueTelemetry {
             source_depth,
             source_capacity,
-            sink_depth: self.shared.sink_occupancy.load(std::sync::atomic::Ordering::Relaxed),
-            sink_capacity: self.shared.sink_capacity.load(std::sync::atomic::Ordering::Relaxed),
+            sink_depth: self
+                .shared
+                .sink_occupancy
+                .load(std::sync::atomic::Ordering::Relaxed),
+            sink_capacity: self
+                .shared
+                .sink_capacity
+                .load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 

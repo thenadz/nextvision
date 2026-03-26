@@ -59,7 +59,7 @@ pub struct PerceptionArtifacts {
     /// This is the extension seam for arbitrary inter-stage data: feature
     /// maps, prepared input tensors, multi-frame windows, calibration
     /// metadata, or any domain-specific payload. Downstream stages access
-    /// stored values via [`StageContext::artifacts.stage_artifacts.get::<T>()`].
+    /// stored values via `StageContext::artifacts.stage_artifacts.get::<T>()`.
     pub stage_artifacts: TypedMetadata,
 }
 
@@ -98,13 +98,7 @@ mod tests {
     use nv_core::{BBox, MonotonicTs, TypedMetadata};
 
     fn make_detection(id: u64) -> Detection {
-        Detection::builder(
-            DetectionId::new(id),
-            0,
-            0.9,
-            BBox::new(0.1, 0.2, 0.3, 0.4),
-        )
-        .build()
+        Detection::builder(DetectionId::new(id), 0, 0.9, BBox::new(0.1, 0.2, 0.3, 0.4)).build()
     }
 
     fn make_track(id: u64) -> Track {

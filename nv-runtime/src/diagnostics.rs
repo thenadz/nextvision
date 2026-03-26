@@ -1,8 +1,8 @@
 //! Consolidated diagnostics snapshots for feeds and the runtime.
 //!
 //! The library exposes several independent observability surfaces:
-//! [`FeedMetrics`], [`QueueTelemetry`], [`DecodeStatus`], health events,
-//! [`BatchMetrics`], and per-frame [`Provenance`]. Each serves a specific
+//! `FeedMetrics`, `QueueTelemetry`, `DecodeStatus`, health events,
+//! `BatchMetrics`, and per-frame `Provenance`. Each serves a specific
 //! purpose, but downstream systems that want a comprehensive view of
 //! runtime state must stitch them together manually.
 //!
@@ -141,7 +141,7 @@ pub enum ViewStatus {
 
 /// Diagnostics snapshot for a batch coordinator.
 ///
-/// One entry per coordinator created via [`Runtime::create_batch()`].
+/// One entry per coordinator created via `Runtime::create_batch()`.
 /// Included in [`RuntimeDiagnostics::batches`].
 #[derive(Debug, Clone)]
 pub struct BatchDiagnostics {
@@ -165,7 +165,7 @@ pub struct OutputLagStatus {
     /// Whether the output channel is currently saturated.
     pub in_lag: bool,
     /// Messages lost (sentinel-observed) since the last emitted
-    /// [`HealthEvent::OutputLagged`] event. Non-zero only during
+    /// `HealthEvent::OutputLagged` event. Non-zero only during
     /// active saturation.
     pub pending_lost: u64,
 }

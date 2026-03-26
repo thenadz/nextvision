@@ -118,13 +118,13 @@ impl EpochPolicy for DefaultEpochPolicy {
                 || zoom_delta > self.segment_zoom_threshold
             {
                 // Check if compensation is possible.
-                if let Some(ref transform) = ctx.current_report.frame_transform {
-                    if transform.confidence >= self.compensate_min_confidence {
-                        return EpochDecision::Compensate {
-                            reason: DegradationReason::PtzMoving,
-                            transform: transform.transform,
-                        };
-                    }
+                if let Some(ref transform) = ctx.current_report.frame_transform
+                    && transform.confidence >= self.compensate_min_confidence
+                {
+                    return EpochDecision::Compensate {
+                        reason: DegradationReason::PtzMoving,
+                        transform: transform.transform,
+                    };
                 }
                 return EpochDecision::Segment;
             }
@@ -147,13 +147,13 @@ impl EpochPolicy for DefaultEpochPolicy {
         } = &ctx.motion_state
         {
             if *disp > self.segment_displacement_threshold {
-                if let Some(ref transform) = ctx.current_report.frame_transform {
-                    if transform.confidence >= self.compensate_min_confidence {
-                        return EpochDecision::Compensate {
-                            reason: DegradationReason::LargeJump,
-                            transform: transform.transform,
-                        };
-                    }
+                if let Some(ref transform) = ctx.current_report.frame_transform
+                    && transform.confidence >= self.compensate_min_confidence
+                {
+                    return EpochDecision::Compensate {
+                        reason: DegradationReason::LargeJump,
+                        transform: transform.transform,
+                    };
                 }
                 return EpochDecision::Segment;
             }

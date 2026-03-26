@@ -55,10 +55,8 @@ fn main() {
     // --- First inference ---
     println!("[2/2] Running first inference (1x3x640x640 zeros)...");
     let input_data = vec![0.0_f32; 3 * 640 * 640];
-    let input_tensor = ort::value::Tensor::from_array(
-        (vec![1i64, 3, 640, 640], input_data),
-    )
-    .expect("tensor");
+    let input_tensor =
+        ort::value::Tensor::from_array((vec![1i64, 3, 640, 640], input_data)).expect("tensor");
 
     let t1 = Instant::now();
     let outputs = session
@@ -71,10 +69,8 @@ fn main() {
     // --- Second inference ---
     println!("[bonus] Running second inference...");
     let input_data2 = vec![0.0_f32; 3 * 640 * 640];
-    let input_tensor2 = ort::value::Tensor::from_array(
-        (vec![1i64, 3, 640, 640], input_data2),
-    )
-    .expect("tensor");
+    let input_tensor2 =
+        ort::value::Tensor::from_array((vec![1i64, 3, 640, 640], input_data2)).expect("tensor");
 
     let t2 = Instant::now();
     let _outputs2 = session
@@ -83,5 +79,8 @@ fn main() {
     println!("       done in {:.2}s", t2.elapsed().as_secs_f64());
 
     println!();
-    println!("=== RESULT: first session.run() took {:.2}s ===", first_inference_secs);
+    println!(
+        "=== RESULT: first session.run() took {:.2}s ===",
+        first_inference_secs
+    );
 }

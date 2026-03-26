@@ -63,7 +63,9 @@ impl MediaSource {
                 // This covers both explicit AllowInsecure and the case where
                 // PreferTls fell back to plain RTSP after a TLS timeout.
                 if let nv_core::config::SourceSpec::Rtsp { url, security, .. } = &self.spec {
-                    use nv_core::security::{RtspSecurityPolicy, is_insecure_rtsp, promote_rtsp_to_tls, redact_url};
+                    use nv_core::security::{
+                        RtspSecurityPolicy, is_insecure_rtsp, promote_rtsp_to_tls, redact_url,
+                    };
                     let effective_url = if self.tls_fallback_active {
                         // TLS failed, we connected with plain RTSP.
                         url.clone()
@@ -107,14 +109,14 @@ impl MediaSource {
                     nv_core::config::SourceSpec::File { loop_: true, .. } => {
                         // Looping file: seek back to start instead of
                         // reconnecting or stopping.
-                        if let Some(ref mut session) = self.session {
-                            if session.seek_start().is_ok() {
-                                tracing::info!(
-                                    feed_id = %self.feed_id,
-                                    "file source looping — seeked to start"
-                                );
-                                return None;
-                            }
+                        if let Some(ref mut session) = self.session
+                            && session.seek_start().is_ok()
+                        {
+                            tracing::info!(
+                                feed_id = %self.feed_id,
+                                "file source looping — seeked to start"
+                            );
+                            return None;
                         }
                         // If seek failed, fall through to reconnect which
                         // will rebuild the pipeline from scratch.
@@ -249,19 +251,20 @@ impl MediaSource {
         });
 
         // Check for residency downgrade: Cuda requested → Host effective.
-        if let Some(ref session) = self.session {
-            if matches!(self.device_residency, DeviceResidency::Cuda) && !session.gpu_resident() {
-                tracing::warn!(
-                    feed_id = %self.feed_id,
-                    "DeviceResidency::Cuda requested but effective residency is Host — \
-                     CUDA GStreamer elements were unavailable at pipeline build time",
-                );
-                self.emit_health(HealthEvent::ResidencyDowngrade {
-                    feed_id: self.feed_id,
-                    requested: "Cuda".into(),
-                    effective: "Host".into(),
-                });
-            }
+        if let Some(ref session) = self.session
+            && matches!(self.device_residency, DeviceResidency::Cuda)
+            && !session.gpu_resident()
+        {
+            tracing::warn!(
+                feed_id = %self.feed_id,
+                "DeviceResidency::Cuda requested but effective residency is Host — \
+                 CUDA GStreamer elements were unavailable at pipeline build time",
+            );
+            self.emit_health(HealthEvent::ResidencyDowngrade {
+                feed_id: self.feed_id,
+                requested: "Cuda".into(),
+                effective: "Host".into(),
+            });
         }
 
         None

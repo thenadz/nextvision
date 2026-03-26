@@ -3,8 +3,8 @@
 //! Sample ONNX object-detector adapter for the NextVision perception pipeline.
 //!
 //! This crate is a **reference implementation** — it demonstrates how to
-//! integrate an ONNX detector model with the library's [`Stage`] and
-//! [`BatchProcessor`] traits. Library users will typically replace this
+//! integrate an ONNX detector model with the library's `Stage` and
+//! `BatchProcessor` traits. Library users will typically replace this
 //! with their own detection backend.
 //!
 //! Two execution modes are provided:
