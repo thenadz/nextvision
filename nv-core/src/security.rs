@@ -245,8 +245,6 @@ pub fn sanitize_error_string(s: &str) -> String {
 /// Redact common secret-like patterns: `key=value` where key is a
 /// known sensitive token name. Replaces the value with `***`.
 fn redact_secret_patterns(s: &mut String) {
-    // Case-insensitive matching via lowercase comparison.
-    let lower = s.to_lowercase();
     let patterns = [
         "password=",
         "passwd=",
@@ -260,8 +258,17 @@ fn redact_secret_patterns(s: &mut String) {
 
     for pat in &patterns {
         let mut search_from = 0;
-        while let Some(idx) = lower[search_from..].find(pat) {
-            let abs_idx = search_from + idx;
+        loop {
+            // Recompute lowercase on every iteration so indexes are always
+            // consistent with the current contents of `s`.
+            let lower = s.to_lowercase();
+            if search_from >= lower.len() {
+                break;
+            }
+            let Some(rel_idx) = lower[search_from..].find(pat) else {
+                break;
+            };
+            let abs_idx = search_from + rel_idx;
             let value_start = abs_idx + pat.len();
             // Find end of value: next space, '&', ';', ',', or end of string.
             let value_end = s[value_start..]
@@ -271,17 +278,10 @@ fn redact_secret_patterns(s: &mut String) {
 
             if value_end > value_start {
                 s.replace_range(value_start..value_end, "***");
-                // Recompute lowercase after mutation for subsequent passes.
-                // This is acceptable since error strings are short.
-                let new_lower = s.to_lowercase();
-                // Update search position past the redacted portion.
                 search_from = value_start + 3;
-                // We need to restart the outer loop with the new string.
-                // Use a simple approach: break and let the outer while find next.
-                let _updated = new_lower;
-                continue;
+            } else {
+                search_from = value_start;
             }
-            search_from = value_start;
         }
     }
 }
@@ -520,5 +520,68 @@ mod tests {
     fn redact_urls_no_urls() {
         let s = "plain error message";
         assert_eq!(redact_urls_in_string(s), s);
+    }
+
+    // -- redact_secret_patterns: multiple/repeated/mixed --
+
+    #[test]
+    fn redact_multiple_secrets_in_one_string() {
+        let s = "password=abc token=xyz secret=qqq";
+        let clean = sanitize_error_string(s);
+        assert!(!clean.contains("abc"));
+        assert!(!clean.contains("xyz"));
+        assert!(!clean.contains("qqq"));
+        assert!(clean.contains("password=***"));
+        assert!(clean.contains("token=***"));
+        assert!(clean.contains("secret=***"));
+    }
+
+    #[test]
+    fn redact_repeated_same_key() {
+        let s = "token=first&token=second&token=third";
+        let clean = sanitize_error_string(s);
+        assert!(!clean.contains("first"));
+        assert!(!clean.contains("second"));
+        assert!(!clean.contains("third"));
+        // All three occurrences redacted.
+        assert_eq!(clean.matches("token=***").count(), 3);
+    }
+
+    #[test]
+    fn redact_mixed_delimiters() {
+        let s = "password=a1 token=b2&secret=c3;auth=d4,key=e5'passwd=f6\"bearer g7";
+        let clean = sanitize_error_string(s);
+        for secret in &["a1", "b2", "c3", "d4", "e5", "f6", "g7"] {
+            assert!(!clean.contains(secret), "secret {secret} leaked");
+        }
+    }
+
+    #[test]
+    fn redact_no_panic_on_adversarial_strings() {
+        // Empty value
+        let _ = sanitize_error_string("password= next");
+        // Pattern at end of string with no value
+        let _ = sanitize_error_string("password=");
+        // Overlapping pattern-like text
+        let _ = sanitize_error_string("password=password=nested");
+        // Only delimiters after key
+        let _ = sanitize_error_string("token=&&&");
+        // Very long value
+        let long_val = format!("secret={}", "x".repeat(2000));
+        let clean = sanitize_error_string(&long_val);
+        assert!(!clean.contains(&"x".repeat(100)));
+        // Unicode content
+        let _ = sanitize_error_string("token=日本語テスト done");
+        // Repeated pattern with no value between
+        let _ = sanitize_error_string("key=key=key=");
+    }
+
+    #[test]
+    fn redact_case_insensitive() {
+        let s = "PASSWORD=upper Token=Mixed SECRET=LOUD";
+        let clean = sanitize_error_string(s);
+        assert!(!clean.contains("upper"));
+        assert!(!clean.contains("Mixed"));
+        assert!(!clean.contains("LOUD"));
     }
 }
