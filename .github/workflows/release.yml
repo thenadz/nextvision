@@ -6,6 +6,7 @@ on:
       - "v[0-9]+.*"
 
 permissions:
+  checks: write
   contents: write
 
 env:
@@ -36,6 +37,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libglib2.0-dev \
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev
 
