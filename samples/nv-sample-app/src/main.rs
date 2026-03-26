@@ -451,7 +451,7 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(Err(e)) => {
                 warn!("UI failed: {e} — falling back to headless mode");
-                wait_for_ctrlc();
+                wait_for_ctrlc()?;
             }
             Err(_) => {
                 warn!(
@@ -459,12 +459,12 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
                      — falling back to headless mode. \
                      Hint: set --headless when running over SSH without GPU display forwarding"
                 );
-                wait_for_ctrlc();
+                wait_for_ctrlc()?;
             }
         }
     } else {
         // Headless mode: wait for Ctrl-C.
-        wait_for_ctrlc();
+        wait_for_ctrlc()?;
     }
 
     info!("shutting down");
@@ -480,18 +480,19 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Block the current thread until Ctrl-C is pressed.
-fn wait_for_ctrlc() {
+fn wait_for_ctrlc() -> Result<(), ctrlc::Error> {
     let stop = Arc::new(AtomicBool::new(false));
     {
         let stop = Arc::clone(&stop);
-        let _ = ctrlc::set_handler(move || {
+        ctrlc::set_handler(move || {
             stop.store(true, Ordering::Relaxed);
-        });
+        })?;
     }
     info!("pipeline running (headless) — press Ctrl-C to stop");
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(200));
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

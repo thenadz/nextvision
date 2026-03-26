@@ -14,7 +14,7 @@ readme = "../README.md"
 [dependencies]
 nv-core.workspace = true
 nv-frame.workspace = true
-nv-media = { workspace = true, features = ["gst-backend"] }
+nv-media = { workspace = true, default-features = false, features = ["gst-backend"] }
 tracing.workspace = true
 
 gstreamer = { version = "0.25", package = "gstreamer" }

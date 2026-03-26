@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "nv-core",
     "nv-frame",
@@ -47,7 +47,7 @@ nv-temporal = { path = "nv-temporal" }
 nv-view = { path = "nv-view" }
 nv-runtime = { path = "nv-runtime", default-features = false }
 nv-test-util = { path = "nv-test-util" }
-nv-metrics = { path = "nv-metrics" }
+nv-metrics = { path = "nv-metrics", default-features = false }
 nv-jetson = { path = "nv-jetson" }
 nv-sample-detection = { path = "samples/nv-sample-detection", default-features = false }
 nv-sample-tracking = { path = "samples/nv-sample-tracking" }

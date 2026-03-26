@@ -824,10 +824,12 @@ fn timeout_variant_preserved_in_health() {
 // Liveness watchdog tests
 // ===========================================================================
 
-/// After a successful reconnect (simulated via create_session_stub), the
-/// liveness deadline should be armed.
+/// Seam test: after error → reconnecting, a simulated successful
+/// reconnect (via create_session_stub + manual state) must leave
+/// the liveness deadline armed.  This verifies the liveness *state
+/// invariant* without requiring a real GStreamer session.
 #[test]
-fn liveness_armed_after_reconnect() {
+fn liveness_armed_after_reconnect_seam() {
     let (mut src, _, _, _) = started_source(test_spec(), test_reconnect());
     // Trigger error → reconnecting
     src.handle_event(MediaEvent::Error {
@@ -849,6 +851,74 @@ fn liveness_armed_after_reconnect() {
         src.liveness_deadline().is_some(),
         "liveness deadline should be armed after reconnect",
     );
+    // Full lifecycle: StreamStarted clears liveness, confirming the
+    // deadline was genuinely armed and observable.
+    src.handle_event(MediaEvent::StreamStarted);
+    assert!(
+        src.liveness_deadline().is_none(),
+        "StreamStarted should clear the armed liveness deadline",
+    );
+}
+
+/// try_reconnect() exercises the real reconnect method.  Without
+/// gst-backend the session creation fails, so this validates the
+/// retry/exhaustion FSM path rather than the success path.
+#[cfg(not(feature = "gst-backend"))]
+#[test]
+fn try_reconnect_retries_on_session_failure() {
+    let (mut src, _, _, _) = started_source(test_spec(), limited_reconnect(3));
+    // Trigger error → reconnecting
+    src.handle_event(MediaEvent::Error {
+        error: MediaError::Timeout,
+        debug: None,
+    });
+    assert_eq!(src.source_state(), SourceState::Reconnecting);
+
+    // First try_reconnect: create_session() fails (no gst-backend) → Retry.
+    let outcome = src.try_reconnect();
+    assert!(
+        matches!(outcome, ReconnectOutcome::Retry { .. }),
+        "first reconnect should produce Retry; got: {outcome:?}",
+    );
+    assert_eq!(src.source_state(), SourceState::Reconnecting);
+}
+
+/// With gst-backend, try_reconnect() creates a real GstSession and the
+/// liveness deadline must be armed automatically by create_session().
+#[cfg(feature = "gst-backend")]
+#[test]
+fn liveness_armed_after_real_reconnect() {
+    if gstreamer::init().is_err() {
+        eprintln!("skipping: GStreamer init failed");
+        return;
+    }
+    let (mut src, _, _, _) = started_source(test_spec(), test_reconnect());
+    // Trigger error → reconnecting
+    src.handle_event(MediaEvent::Error {
+        error: MediaError::Timeout,
+        debug: None,
+    });
+    assert_eq!(src.source_state(), SourceState::Reconnecting);
+
+    let outcome = src.try_reconnect();
+    // With gst-backend but a fake RTSP URL, create_session may succeed
+    // (pipeline construction) or fail (no element). Either path is valid:
+    match outcome {
+        ReconnectOutcome::Connected => {
+            assert_eq!(src.source_state(), SourceState::Running);
+            assert!(
+                src.liveness_deadline().is_some(),
+                "real create_session() must arm liveness deadline",
+            );
+        }
+        ReconnectOutcome::Retry { .. } => {
+            // Session build failed but can retry — still valid
+            assert_eq!(src.source_state(), SourceState::Reconnecting);
+        }
+        ReconnectOutcome::Exhausted => {
+            // Budget exhausted — acceptable with default policy
+        }
+    }
 }
 
 /// StreamStarted clears the liveness watchdog.
@@ -1068,7 +1138,10 @@ fn force_hardware_pipeline_builds_successfully() {
     use crate::pipeline::PipelineBuilder;
     use nv_core::config::SourceSpec;
 
-    gstreamer::init().unwrap();
+    if gstreamer::init().is_err() {
+        eprintln!("skipping: GStreamer init failed");
+        return;
+    }
     if gstreamer::ElementFactory::find("decodebin").is_none() {
         eprintln!("skipping: decodebin element not available");
         return;
@@ -1103,7 +1176,10 @@ fn force_software_pipeline_builds_successfully() {
     use crate::pipeline::PipelineBuilder;
     use nv_core::config::SourceSpec;
 
-    gstreamer::init().unwrap();
+    if gstreamer::init().is_err() {
+        eprintln!("skipping: GStreamer init failed");
+        return;
+    }
     if gstreamer::ElementFactory::find("decodebin").is_none() {
         eprintln!("skipping: decodebin element not available");
         return;

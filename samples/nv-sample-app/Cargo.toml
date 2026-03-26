@@ -15,10 +15,10 @@ path = "src/main.rs"
 nv-core.workspace = true
 nv-frame.workspace = true
 nv-perception.workspace = true
-nv-runtime.workspace = true
-nv-media.workspace = true
-nv-metrics.workspace = true
-nv-sample-detection.workspace = true
+nv-runtime = { workspace = true, default-features = false, features = ["gst-backend"] }
+nv-media = { workspace = true, default-features = false, features = ["gst-backend"] }
+nv-metrics = { workspace = true, default-features = false, features = ["otlp-grpc"] }
+nv-sample-detection = { workspace = true, default-features = false }
 nv-sample-tracking.workspace = true
 nv-jetson = { workspace = true, optional = true }
 

@@ -14,7 +14,7 @@ readme = "../README.md"
 [dependencies]
 nv-core.workspace = true
 nv-frame.workspace = true
-nv-media.workspace = true
+nv-media = { workspace = true, default-features = false }
 nv-perception.workspace = true
 nv-temporal.workspace = true
 nv-view.workspace = true
