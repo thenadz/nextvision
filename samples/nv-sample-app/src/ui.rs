@@ -332,9 +332,9 @@ impl NvApp {
 }
 
 impl eframe::App for NvApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Request continuous repaint for live video.
-        ctx.request_repaint();
+        ui.ctx().request_repaint();
 
         let state = self.state.lock().unwrap();
         let feed_order = state.feed_order.clone();
@@ -360,7 +360,7 @@ impl eframe::App for NvApp {
         let runtime_uptime = self.runtime_handle.uptime();
 
         // ------- Telemetry top panel -------
-        egui::TopBottomPanel::top("telemetry").show(ctx, |ui| {
+        egui::Panel::top("telemetry").show_inside(ui, |ui| {
             // Row 1: header + per-feed metrics (single horizontal line).
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("NextVision").strong().size(13.0));
@@ -601,7 +601,7 @@ impl eframe::App for NvApp {
 
         let now = Instant::now();
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             let available = ui.available_size();
 
             // Determine columns: each feed cell must be at least 400px
@@ -991,6 +991,7 @@ pub fn run_ui(
         viewport: egui::ViewportBuilder::default()
             .with_title(&title)
             .with_inner_size([1280.0, 800.0]),
+        renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
 

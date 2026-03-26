@@ -16,6 +16,7 @@ use nv_core::error::MediaError;
 /// Constructed by the backend from actual `gst::Message` values.
 /// Processed by the source layer's event loop via [`into_media_event`](Self::into_media_event).
 #[derive(Debug)]
+#[allow(dead_code)] // Variants constructed under gst-backend; tested via unit tests
 pub(crate) enum BusMessage {
     /// Pipeline reached end of stream.
     Eos,
@@ -57,6 +58,7 @@ pub(crate) enum BusMessage {
 ///
 /// Mirrors `gst::State` without depending on `gstreamer-rs` at the type level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Variants constructed under gst-backend; tested via unit tests
 pub(crate) enum ElementState {
     Null,
     Ready,

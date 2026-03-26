@@ -362,6 +362,7 @@ pub fn discover_decode_capabilities() -> DecodeCapabilities {
 /// the element's `klass` metadata omits the `"Hardware"` keyword, the
 /// decoder will not be recognized. File an issue or extend this list if
 /// that happens.
+#[allow(dead_code)] // used under gst-backend
 pub(crate) const HW_DECODER_PREFIXES: &[&str] =
     &["nv", "va", "msdk", "amf", "qsv", "d3d11", "d3d12"];
 
@@ -379,6 +380,7 @@ pub(crate) const HW_DECODER_PREFIXES: &[&str] =
 /// This function is the **single source of truth** for hardware decoder
 /// classification. Both capability discovery and the `autoplug-select`
 /// callback delegate to it.
+#[allow(dead_code)] // used under gst-backend
 pub(crate) fn is_hardware_video_decoder(klass: &str, element_name: &str) -> bool {
     let is_video_decoder = klass.contains("Decoder") && klass.contains("Video");
     if !is_video_decoder {

@@ -30,7 +30,9 @@
 //! `Drop` calls `stop()` for best-effort cleanup.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+#[cfg(feature = "gst-backend")]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use nv_core::config::SourceSpec;
@@ -38,12 +40,15 @@ use nv_core::error::MediaError;
 use nv_core::id::FeedId;
 
 use crate::bus::BusMessage;
+#[cfg(feature = "gst-backend")]
 use crate::clock::PtsTracker;
 use crate::decode::{DecoderSelection, SelectedDecoderInfo, SelectedDecoderSlot};
 use crate::event::MediaEvent;
 use crate::hook::PostDecodeHook;
 use crate::ingress::{DeviceResidency, FrameSink, PtzProvider};
-use crate::pipeline::{OutputFormat, PipelineBuilder};
+use crate::pipeline::OutputFormat;
+#[cfg(feature = "gst-backend")]
+use crate::pipeline::PipelineBuilder;
 
 /// Thread-safe queue for media events produced asynchronously (e.g., from
 /// the appsink callback thread). Drained by [`MediaSource::poll_bus()`].
@@ -60,6 +65,7 @@ pub(crate) const EVENT_QUEUE_CAPACITY: usize = 64;
 ///
 /// The threshold fires exactly once (on the crossing frame) to avoid
 /// spamming `on_error` on every subsequent failure.
+#[cfg(feature = "gst-backend")]
 const BRIDGE_FAIL_ESCALATION_THRESHOLD: u64 = 30;
 
 /// Configuration for a GStreamer session.
@@ -73,6 +79,7 @@ pub(crate) struct SessionConfig {
     /// Optional post-decode hook — can inject a pipeline element.
     pub post_decode_hook: Option<PostDecodeHook>,
     /// Maximum events buffered in the event queue before drops.
+    #[cfg_attr(not(feature = "gst-backend"), allow(dead_code))]
     pub event_queue_capacity: usize,
     /// Where decoded frames reside after the bridge.
     pub device_residency: DeviceResidency,

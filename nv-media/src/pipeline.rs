@@ -24,11 +24,16 @@
 //! `gst-backend` cargo feature is enabled. All configuration types compile
 //! unconditionally.
 
-use nv_core::config::{RtspTransport, SourceSpec};
+#[cfg(any(test, feature = "gst-backend"))]
+use nv_core::config::RtspTransport;
+use nv_core::config::SourceSpec;
 use nv_core::error::MediaError;
 use nv_frame::PixelFormat;
 
-use crate::decode::{DecoderSelection, SelectedDecoderSlot};
+use crate::decode::DecoderSelection;
+#[cfg(feature = "gst-backend")]
+use crate::decode::SelectedDecoderSlot;
+#[cfg(feature = "gst-backend")]
 use crate::gpu_provider::SharedGpuProvider;
 use crate::hook::PostDecodeHook;
 use crate::ingress::DeviceResidency;
@@ -53,6 +58,7 @@ pub(crate) enum OutputFormat {
 
 impl OutputFormat {
     /// GStreamer caps format string (e.g., `"RGB"`, `"BGR"`, `"RGBA"`).
+    #[allow(dead_code)] // used under gst-backend
     pub fn gst_format_str(self) -> &'static str {
         match self {
             Self::Rgb => "RGB",
@@ -62,6 +68,7 @@ impl OutputFormat {
     }
 
     /// Map to the library's [`PixelFormat`].
+    #[allow(dead_code)] // used under gst-backend
     pub fn to_pixel_format(self) -> PixelFormat {
         match self {
             Self::Rgb => PixelFormat::Rgb8,
@@ -74,6 +81,7 @@ impl OutputFormat {
 /// Internal pipeline builder — constructs GStreamer elements from a [`SourceSpec`].
 ///
 /// This type is `pub(crate)` and does not appear in the public API.
+#[allow(dead_code)] // constructed under gst-backend; tested via unit tests
 pub(crate) struct PipelineBuilder {
     spec: SourceSpec,
     decoder: DecoderSelection,
@@ -87,6 +95,7 @@ pub(crate) struct PipelineBuilder {
 }
 
 /// Default latency hint for RTSP jitter buffers.
+#[allow(dead_code)] // used under gst-backend and tests
 const DEFAULT_LATENCY_MS: u32 = 200;
 
 /// Default TCP timeout for RTSP sources, in microseconds.
@@ -96,6 +105,7 @@ const DEFAULT_LATENCY_MS: u32 = 200;
 /// 10 seconds balances normal jitter tolerance against prompt failure
 /// detection. GStreamer posts a bus Error when this fires, which the
 /// source FSM maps to a reconnection attempt.
+#[allow(dead_code)] // used under gst-backend and tests
 const DEFAULT_RTSP_TCP_TIMEOUT_US: u64 = 10_000_000;
 
 /// Build the standard host-memory pipeline tail: `videoconvert → appsink(video/x-raw)`.
@@ -129,6 +139,7 @@ fn build_host_tail(
     Ok((vec![videoconvert], appsink))
 }
 
+#[allow(dead_code)] // methods used under gst-backend; tested via unit tests
 impl PipelineBuilder {
     /// Create a builder for the given source specification.
     pub fn new(spec: SourceSpec) -> Self {
@@ -1110,8 +1121,10 @@ mod tests {
 
     /// When the `cuda` feature is NOT compiled, requesting CUDA device residency
     /// must produce a typed `MediaError::Unsupported` — never a silent fallback.
+    /// Requires gst-backend so the CUDA-specific check is reached (without it,
+    /// build() fails earlier with a generic "backend not linked" error).
     #[test]
-    #[cfg(not(feature = "cuda"))]
+    #[cfg(all(not(feature = "cuda"), feature = "gst-backend"))]
     fn cuda_residency_without_cuda_feature_errors() {
         let builder = PipelineBuilder::new(SourceSpec::file("/tmp/test.mp4"))
             .device_residency(DeviceResidency::Cuda);
@@ -1146,8 +1159,11 @@ mod tests {
     #[test]
     fn builder_stores_provider_residency() {
         use crate::gpu_provider::{GpuPipelineProvider, SharedGpuProvider};
+        #[cfg(feature = "gst-backend")]
         use nv_core::error::MediaError;
+        #[cfg(feature = "gst-backend")]
         use nv_core::id::FeedId;
+        #[cfg(feature = "gst-backend")]
         use nv_frame::PixelFormat;
         use std::sync::Arc;
 
@@ -1194,6 +1210,7 @@ mod tests {
     /// a hardware integration; silent degradation would produce subtly
     /// wrong results in GPU-dependent stages.
     #[test]
+    #[cfg(feature = "gst-backend")]
     fn provider_failure_returns_error() {
         use crate::gpu_provider::{GpuPipelineProvider, SharedGpuProvider};
         use nv_core::error::MediaError;
@@ -1204,6 +1221,11 @@ mod tests {
         // Pipeline construction requires GStreamer to be initialized.
         if gstreamer::init().is_err() {
             eprintln!("skipping: GStreamer init failed");
+            return;
+        }
+        // decodebin is provided by gst-plugins-base; skip when absent.
+        if gstreamer::ElementFactory::find("decodebin").is_none() {
+            eprintln!("skipping: decodebin element not available");
             return;
         }
 

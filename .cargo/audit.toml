@@ -1,0 +1,9 @@
+# cargo-audit configuration
+# https://docs.rs/rustsec/latest/rustsec/report/struct.Settings.html
+
+[advisories]
+# RUSTSEC-2024-0384: `instant` is unmaintained.
+#   Transitive dep from minifb (non-Linux targets only).
+#   minifb has not released a version without it yet.
+#   Not a vulnerability — informational only.
+ignore = ["RUSTSEC-2024-0384"]

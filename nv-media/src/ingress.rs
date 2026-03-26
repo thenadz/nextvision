@@ -557,8 +557,11 @@ mod tests {
     #[test]
     fn device_residency_provider_is_device() {
         use crate::gpu_provider::GpuPipelineProvider;
+        #[cfg(feature = "gst-backend")]
         use nv_core::error::MediaError;
+        #[cfg(feature = "gst-backend")]
         use nv_core::id::FeedId;
+        #[cfg(feature = "gst-backend")]
         use nv_frame::PixelFormat;
         use std::sync::Arc;
 

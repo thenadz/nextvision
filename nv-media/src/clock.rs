@@ -15,9 +15,11 @@
 //! and low-FPS sources while catching genuine disruptions.
 
 /// Default discontinuity threshold: 5 seconds in nanoseconds.
+#[allow(dead_code)] // used under gst-backend and tests
 const DEFAULT_DISCONTINUITY_THRESHOLD_NS: u64 = 5_000_000_000;
 
 /// Tracks presentation timestamps across frames and detects discontinuities.
+#[allow(dead_code)] // constructed under gst-backend; tested via unit tests
 pub(crate) struct PtsTracker {
     /// Last observed PTS (nanoseconds), or `None` before the first frame.
     last_pts_ns: Option<u64>,
@@ -29,6 +31,7 @@ pub(crate) struct PtsTracker {
 
 /// Result of observing a new PTS value.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Variants constructed under gst-backend; tested via unit tests
 pub(crate) enum PtsResult {
     /// First frame — no predecessor to compare against.
     First,
@@ -50,6 +53,7 @@ pub(crate) enum PtsResult {
 
 impl PtsTracker {
     /// Create a PTS tracker with the default discontinuity threshold (5 s).
+    #[allow(dead_code)] // used under gst-backend and tests
     pub fn new() -> Self {
         Self {
             last_pts_ns: None,
@@ -59,6 +63,7 @@ impl PtsTracker {
     }
 
     /// Process a new presentation timestamp and classify the result.
+    #[allow(dead_code)] // used under gst-backend and tests
     pub fn observe(&mut self, pts_ns: u64) -> PtsResult {
         self.frame_count += 1;
 

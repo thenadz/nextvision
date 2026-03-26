@@ -22,13 +22,22 @@
 //! the view crate — ensuring end-to-end type alignment. If telemetry is
 //! present, it is stored in the frame's [`TypedMetadata`](nv_core::TypedMetadata).
 
+#[cfg(feature = "gst-backend")]
 use std::sync::Arc;
+#[cfg(feature = "gst-backend")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(any(feature = "gst-backend", test))]
 use nv_core::TypedMetadata;
+#[cfg(any(feature = "gst-backend", test))]
 use nv_core::error::MediaError;
+#[cfg(any(feature = "gst-backend", test))]
 use nv_core::id::FeedId;
-use nv_core::timestamp::{MonotonicTs, WallTs};
+#[cfg(any(feature = "gst-backend", test))]
+use nv_core::timestamp::MonotonicTs;
+#[cfg(any(feature = "gst-backend", test))]
+use nv_core::timestamp::WallTs;
+#[cfg(any(feature = "gst-backend", test))]
 use nv_frame::FrameEnvelope;
 #[cfg(test)]
 use nv_frame::PixelFormat;
@@ -37,6 +46,7 @@ use nv_frame::PixelFormat;
 // used everywhere in the library. No separate definition in nv-media.
 pub use nv_view::PtzTelemetry;
 
+#[cfg(feature = "gst-backend")]
 use crate::pipeline::OutputFormat;
 
 /// Metadata extracted from a GStreamer sample's caps and buffer.

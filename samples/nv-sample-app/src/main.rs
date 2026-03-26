@@ -438,23 +438,33 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // UI mode: egui window blocks the main thread.
         let inference_label = if args.gpu { "GPU (CUDA)" } else { "CPU" }.to_string();
         info!("launching UI — close window to stop");
-        ui::run_ui(state, feeds, batch_handle, runtime_handle, inference_label)
-            .map_err(|e| format!("UI error: {e}"))?;
-        info!("UI closed, shutting down");
+
+        // The glow/EGL backend can panic when no GPU display is reachable
+        // (e.g. SSH X-forwarding without EGL support). Catch that and fall
+        // back to headless mode so the pipeline stays alive.
+        let ui_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ui::run_ui(state, feeds, batch_handle, runtime_handle, inference_label)
+        }));
+        match ui_result {
+            Ok(Ok(())) => {
+                info!("UI closed, shutting down");
+            }
+            Ok(Err(e)) => {
+                warn!("UI failed: {e} — falling back to headless mode");
+                wait_for_ctrlc();
+            }
+            Err(_) => {
+                warn!(
+                    "UI display initialization panicked (no EGL/GLX display?) \
+                     — falling back to headless mode. \
+                     Hint: set --headless when running over SSH without GPU display forwarding"
+                );
+                wait_for_ctrlc();
+            }
+        }
     } else {
         // Headless mode: wait for Ctrl-C.
-        let stop = Arc::new(AtomicBool::new(false));
-        {
-            let stop = Arc::clone(&stop);
-            ctrlc::set_handler(move || {
-                stop.store(true, Ordering::Relaxed);
-            })?;
-        }
-
-        info!("pipeline running (headless) — press Ctrl-C to stop");
-        while !stop.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(200));
-        }
+        wait_for_ctrlc();
     }
 
     info!("shutting down");
@@ -467,6 +477,21 @@ fn run(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     runtime.shutdown()?;
     Ok(())
+}
+
+/// Block the current thread until Ctrl-C is pressed.
+fn wait_for_ctrlc() {
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = Arc::clone(&stop);
+        let _ = ctrlc::set_handler(move || {
+            stop.store(true, Ordering::Relaxed);
+        });
+    }
+    info!("pipeline running (headless) — press Ctrl-C to stop");
+    while !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 // ---------------------------------------------------------------------------

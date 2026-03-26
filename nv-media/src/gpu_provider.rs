@@ -38,13 +38,19 @@
 //! the tail returned by `build_pipeline_tail`.
 
 use std::sync::Arc;
+#[cfg(feature = "gst-backend")]
 use std::sync::atomic::AtomicU64;
 
+#[cfg(feature = "gst-backend")]
 use nv_core::error::MediaError;
+#[cfg(feature = "gst-backend")]
 use nv_core::id::FeedId;
+#[cfg(feature = "gst-backend")]
 use nv_frame::FrameEnvelope;
+#[cfg(feature = "gst-backend")]
 use nv_frame::frame::PixelFormat;
 
+#[cfg(feature = "gst-backend")]
 use crate::bridge::PtzTelemetry;
 
 /// Result of [`GpuPipelineProvider::build_pipeline_tail`].

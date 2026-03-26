@@ -21,7 +21,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [features]
-default = ["otlp-grpc"]
+default = ["otlp-grpc", "gst-backend"]
+gst-backend = ["nv-runtime/gst-backend"]
 otlp-grpc = ["dep:opentelemetry-otlp"]
 
 [dev-dependencies]

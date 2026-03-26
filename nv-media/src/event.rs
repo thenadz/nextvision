@@ -12,6 +12,7 @@ use nv_core::error::MediaError;
 /// a media pipeline. The source layer maps them to lifecycle transitions
 /// (reconnection, stop) and the runtime maps them to [`HealthEvent`]s.
 #[derive(Debug)]
+#[allow(dead_code)] // Variants constructed under gst-backend; tested via bus unit tests
 pub(crate) enum MediaEvent {
     /// Pipeline reached the Playing state and is producing frames.
     StreamStarted,

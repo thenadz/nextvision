@@ -24,10 +24,10 @@ nv-jetson = { workspace = true, optional = true }
 
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
-eframe = "0.31"
-egui = "0.31"
+eframe = { version = "0.34", default-features = false, features = ["default_fonts", "glow", "x11"] }
+egui = "0.34"
 hostname = "0.4"
-minifb = "0.27"
+minifb = "0.28"
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
