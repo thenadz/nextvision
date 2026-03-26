@@ -33,15 +33,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install GStreamer dev libraries
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config \
-            libglib2.0-dev \
-            libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev
-
       # Publish in strict dependency order. Each crate waits for its
       # dependencies to be indexed before publishing. The sleep between
       # publishes gives the crates.io index time to propagate.
